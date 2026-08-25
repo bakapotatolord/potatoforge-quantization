@@ -1,0 +1,15 @@
+format_version = 1
+
+[paths]
+audit_report = "reports/weight-audit.json"
+profile = "profiles/generated/candidate.json"
+
+[optimize]
+profile_id = "candidate"
+target_size_gib = 4.0
+methods = ["int8", "int8_convrot", "convrot_w4a4"]
+# When enabled, "int6" and "int6_convrot" may also be included in methods.
+enable_potatoforge_int6_runtime = false
+exclude_prefixes = []
+exclude_suffixes = []
+overwrite = false

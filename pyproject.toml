@@ -1,0 +1,27 @@
+[project]
+name = "potatoforge-quants"
+version = "0.1.0"
+description = "Streaming safetensors quantization toolkit for image models."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["safetensors>=0.8.0", "torch==2.12.0", "typer>=0.16.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["potatoforge"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+
+[project.scripts]
+potatoforge = "potatoforge.cli:app"

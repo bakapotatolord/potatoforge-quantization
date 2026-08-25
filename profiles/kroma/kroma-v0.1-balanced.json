@@ -1,0 +1,84 @@
+{
+  "format_version": 1,
+  "profile_id": "kroma-v0.1-balanced",
+  "description": "Recreate the mixed Kroma2 policy from kroma_v0.2_turbo_v0.1 with ConvRot INT8 replacing every plain INT8 layer and BF16 for otherwise-kept floating tensors.",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": [
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.",
+      "suffixes": [".attn.wk.weight", ".attn.wv.weight", ".attn.wo.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.2.",
+      "suffixes": [".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.3.",
+      "suffixes": [".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.4.",
+      "suffixes": [".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.5.",
+      "suffixes": [".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.6.",
+      "suffixes": [".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.7.",
+      "suffixes": [".attn.wq.weight", ".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.8.",
+      "suffixes": [".attn.wq.weight", ".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.9.",
+      "suffixes": [".attn.wq.weight", ".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.10.",
+      "suffixes": [".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.11.",
+      "suffixes": [".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.12.",
+      "suffixes": [".mlp.gate.weight", ".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.13.",
+      "suffixes": [".mlp.down.weight"]
+    },
+    {
+      "action": "int8_convrot",
+      "prefix": "blocks.15.",
+      "suffixes": [".mlp.down.weight"]
+    },
+    {
+      "action": "convrot_w4a4",
+      "prefix": "blocks.",
+      "suffixes": [".attn.gate.weight", ".attn.wq.weight", ".mlp.gate.weight", ".mlp.up.weight", ".mlp.down.weight"]
+    }
+  ]
+}

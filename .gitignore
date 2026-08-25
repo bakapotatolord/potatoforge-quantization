@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+wheels/
+*.egg-info/
+.uv-cache-potatoforge/
+
+# Virtual environments
+.venv/
+.env
+.env.*
+!.env.example
+
+# Local model files and conversion outputs
+*.safetensors
+
+*.safetensors.partial
+
+# Generated experiment artifacts and other folders
+reports/
+fixtures/
+docs/
+AGENTS.md
+comfyui_custom_nodes/*
+
+# Local editor settings
+.vscode/
+.idea/
+*.code-workspace

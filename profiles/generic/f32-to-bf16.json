@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "profile_id": "f32-to-bf16",
+  "description": "Convert floating-point tensors to BF16 while preserving tensor names and shapes.",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": []
+}
