@@ -327,6 +327,10 @@ profiles/      model-family JSON policies
 tests/         standard-library test suite
 ```
 
+## ComfyUI Extensions
+
+- [ComfyUI-PotatoForge-INT6](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INT6) enables ComfyUI to load INT6 and INT6 ConvRot quantized models.
+
 ## Credits
 
 The following repositories were used as references for this project:
