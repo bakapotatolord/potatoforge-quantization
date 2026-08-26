@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "profile_id": "zit-int6-convrot",
+  "description": "INT6 & INT6 Convrot only profile for Z Image Turbo",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": [
+    {
+      "action": "int6_convrot",
+      "prefix": "layers.",
+      "suffixes": [
+        ".attention.qkv.weight",
+        ".attention.out.weight",
+        ".feed_forward.w1.weight",
+        ".feed_forward.w2.weight",
+        ".feed_forward.w3.weight"
+      ]
+    },
+    {
+      "action": "int6_convrot",
+      "prefix": "context_refiner.",
+      "suffixes": [".feed_forward.w1.weight", ".feed_forward.w2.weight", ".feed_forward.w3.weight"]
+    },
+    {
+      "action": "int6_convrot",
+      "prefix": "noise_refiner.",
+      "suffixes": [".feed_forward.w1.weight", ".feed_forward.w2.weight", ".feed_forward.w3.weight"]
+    }
+  ]
+}

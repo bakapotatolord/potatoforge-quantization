@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Streaming safetensors quantization toolkit for image models."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["safetensors>=0.8.0", "torch==2.12.0", "typer>=0.16.0"]
+dependencies = [
+    "numpy>=2.4.6",
+    "safetensors>=0.8.0",
+    "torch==2.12.0",
+    "typer>=0.16.0",
+]
 
 [build-system]
 requires = ["hatchling"]
