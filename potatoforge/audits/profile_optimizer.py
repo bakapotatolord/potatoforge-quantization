@@ -384,6 +384,11 @@ def write_profile(
                 "action": rule["action"],
                 "prefix": rule["prefix"],
                 "suffixes": list(rule["suffixes"]),
+                **(
+                    {"fallback": rule["fallback"]}
+                    if "fallback" in rule
+                    else {}
+                ),
             }
             for rule in profile["rules"]
         ],

@@ -145,6 +145,20 @@ uv run potatoforge quantize `
     --profile profiles\kroma\kroma-v0.1-balanced.json
 ```
 
+Estimate the final safetensors storage without reading tensor payloads or
+writing an output file:
+
+```powershell
+uv run potatoforge quantize `
+    path\to\source.safetensors `
+    --profile profiles\kroma\kroma-v0.1-balanced.json `
+    --dry-run
+```
+
+The command prints `estimated_output_bytes`, `estimated_output_mib`, and
+`estimated_output_gib` after applying the profile, including the safetensors
+header and quantization metadata.
+
 #### Generate a layer patch sweep
 
 Use an explicit sweep profile to generate one independent patch per layer. The
@@ -315,6 +329,22 @@ Profiles can select `keep`, `int8`, `int8_convrot`, `int6_rowwise`,
 Rules are validated before conversion and applied in order by prefix and
 suffix, with an explicit default action. A profile can also convert kept
 floating-point tensors to BF16 with `keep_dtype = "BF16"`.
+A rule may optionally specify one `fallback` quantization method. It is tried
+only after the rule matches and its primary action fails eligibility for that
+tensor; if the fallback is also ineligible, the existing profile-wide default
+behavior is used. Fallback is one level only and does not catch runtime
+quantization exceptions.
+
+For example:
+
+```json
+{
+  "action": "int8_convrot",
+  "fallback": "int8",
+  "prefix": "model.diffusion_model.",
+  "suffixes": [".weight"]
+}
+```
 
 ConvRot formats use the runtime-specific group size and storage layout defined
 by their format markers. Packed W4A4 stores two signed INT4 values per byte;

@@ -265,6 +265,33 @@ class TestCli(unittest.TestCase):
             result.output,
         )
 
+    def test_quantize_dry_run_reports_size_without_writing_output(self) -> None:
+        with (
+            patch(
+                "potatoforge.cli.estimate_output_bytes",
+                return_value=123,
+            ) as estimate_mock,
+            patch("potatoforge.cli.convert_model_from_profile") as convert_mock,
+        ):
+            result = self.runner.invoke(
+                app,
+                [
+                    "quantize",
+                    "source.safetensors",
+                    "--profile",
+                    "profile.json",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        estimate_mock.assert_called_once_with(
+            Path("source.safetensors"),
+            Path("profile.json"),
+        )
+        convert_mock.assert_not_called()
+        self.assertIn("estimated_output_bytes: 123", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

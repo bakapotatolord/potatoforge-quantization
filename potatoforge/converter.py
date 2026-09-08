@@ -7,11 +7,12 @@ from .planning import (
     ResolvedIOMode,
     build_output_layout,
     build_plan,
+    build_quantization_metadata,
     plan_input_batches,
     resolve_io_mode,
 )
 from .profiles import QuantizationProfile, load_profile
-from .safetensors_writer import write_safetensors_file
+from .safetensors_writer import encode_safetensors_header, write_safetensors_file
 from .headers.source_header import read_source_model_header
 from .lora.lora_merge import (
     AdapterMergeInput,
@@ -29,6 +30,25 @@ def print_conversion_progress(entry_index: int, entry_count: int, entry: PlanEnt
         f"[{entry_index}/{entry_count}] "
         f"{entry['action']}: {entry['tensor_name']}",
         flush=True,
+    )
+
+
+def estimate_output_bytes(
+    source_path: str | Path,
+    profile_path: str | Path,
+) -> int:
+    source = read_source_model_header(source_path)
+    profile = load_profile(profile_path)
+    entries = build_plan(source.tensors, profile)
+    layout = build_output_layout(entries)
+    metadata = {
+        **source.metadata,
+        **build_quantization_metadata(entries),
+    }
+    return (
+        8
+        + len(encode_safetensors_header(layout, metadata))
+        + layout.raw_data_bytes
     )
 
 

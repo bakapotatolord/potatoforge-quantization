@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from potatoforge.profiles import load_profile, resolve_profile
+from potatoforge.profiles import find_profile_rule, load_profile, resolve_profile
 
 from tests.profile_paths import (
     ILLUSTRIOUS_COMBINED_PROFILE_PATH,
@@ -300,3 +300,37 @@ class TestProfiles(unittest.TestCase):
             document,
             "contains unknown fields",
         )
+    def test_loads_and_matches_optional_fallback(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "int8",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        rule = find_profile_rule(profile, "blocks.0.attn.wq.weight")
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule["fallback"], "int8")
+        self.assertEqual(
+            resolve_profile(profile, "blocks.0.attn.wq.weight"),
+            "int8_convrot",
+        )
+
+    def test_rejects_keep_as_fallback(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "keep",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        self._assert_invalid_document(document, "fallback must be one of")

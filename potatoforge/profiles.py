@@ -24,6 +24,7 @@ _SUPPORTED_ACTIONS: tuple[QuantizationAction, ...] = (
 
 class ProfileRule(TypedDict):
     action: QuantizationAction
+    fallback: NotRequired[QuantizationAction]
     prefix: str
     suffixes: tuple[str, ...]
 
@@ -50,18 +51,37 @@ def validate_quantization_action(
         raise ValueError(
             f"{field_name} must be one of: "
             + ", ".join(supported_actions)
+            + f"; got {value!r}"
         )
 
     return cast(QuantizationAction, value)
 
 
-def resolve_profile(profile: QuantizationProfile, tensor_name: str) -> QuantizationAction:
+def profile_rule_matches(rule: ProfileRule, tensor_name: str) -> bool:
+    return (
+        tensor_name.startswith(rule["prefix"])
+        and tensor_name.endswith(rule["suffixes"])
+    )
+
+
+def find_profile_rule(
+    profile: QuantizationProfile,
+    tensor_name: str,
+) -> ProfileRule | None:
     for rule in profile["rules"]:
-        if (
-            tensor_name.startswith(rule["prefix"])
-            and tensor_name.endswith(rule["suffixes"])
-        ):
-            return rule["action"]
+        if profile_rule_matches(rule, tensor_name):
+            return rule
+
+    return None
+
+
+def resolve_profile(
+    profile: QuantizationProfile,
+    tensor_name: str,
+) -> QuantizationAction:
+    rule = find_profile_rule(profile, tensor_name)
+    if rule is not None:
+        return rule["action"]
 
     return profile["default"]
 
@@ -147,7 +167,7 @@ def load_profile(profile_path: str | Path) -> QuantizationProfile:
                 + ", ".join(sorted(missing_rule_fields))
             )
 
-        unknown_rule_fields = set(raw_rule) - required_rule_fields
+        unknown_rule_fields = set(raw_rule) - required_rule_fields - {"fallback"}
         if unknown_rule_fields:
             raise ValueError(
                 f"Profile rule {rule_index} contains unknown fields: "
@@ -158,6 +178,21 @@ def load_profile(profile_path: str | Path) -> QuantizationProfile:
             raw_rule["action"],
             f"Profile rule {rule_index} action",
         )
+        fallback: QuantizationAction | None = None
+        if "fallback" in raw_rule:
+            fallback = validate_quantization_action(
+                raw_rule["fallback"],
+                f"Profile rule {rule_index} fallback",
+                allow_keep=False,
+            )
+            if fallback == action:
+                raise ValueError(
+                    f"Profile rule {rule_index} fallback must differ from action"
+                )
+            if action == "keep":
+                raise ValueError(
+                    f"Profile rule {rule_index} fallback requires a quantizing action"
+                )
 
         prefix = raw_rule["prefix"]
         if not isinstance(prefix, str):
@@ -176,13 +211,14 @@ def load_profile(profile_path: str | Path) -> QuantizationProfile:
                 f"Profile rule {rule_index} suffixes must contain only strings"
             )
 
-        validated_rules.append(
-            {
-                "action": action,
-                "prefix": prefix,
-                "suffixes": tuple(cast(str, suffix) for suffix in raw_suffixes),
-            }
-        )
+        validated_rule: ProfileRule = {
+            "action": action,
+            "prefix": prefix,
+            "suffixes": tuple(cast(str, suffix) for suffix in raw_suffixes),
+        }
+        if fallback is not None:
+            validated_rule["fallback"] = fallback
+        validated_rules.append(validated_rule)
 
     loaded_profile: QuantizationProfile = {
         "default": default_action,

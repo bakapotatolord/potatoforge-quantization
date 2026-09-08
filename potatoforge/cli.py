@@ -21,7 +21,11 @@ from .audits.weight_audit import (
     audit_bf16_source,
     print_weight_audit_table,
 )
-from .converter import convert_model_from_profile, print_conversion_progress
+from .converter import (
+    convert_model_from_profile,
+    estimate_output_bytes,
+    print_conversion_progress,
+)
 from .extraction import extract_tensors
 from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
@@ -417,8 +421,13 @@ def quantize(
         "--config",
         help="TOML quantize config.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Estimate output storage without writing a checkpoint.",
+    ),
 ) -> None:
-    """Convert a checkpoint with an explicit JSON profile."""
+    """Convert or estimate a checkpoint with an explicit JSON profile."""
     def action() -> None:
         cli_adapters = _build_adapter_inputs(adapter_path, adapter_strength)
 
@@ -446,10 +455,15 @@ def quantize(
                 cli_adapters if cli_adapters else quantize_config.adapters
             )
         else:
-            if source_path is None or output_path is None or profile is None:
+            if (
+                source_path is None
+                or (output_path is None and not dry_run)
+                or profile is None
+            ):
                 raise ValueError(
-                    "Direct quantize requires SOURCE_PATH, OUTPUT_PATH, "
-                    "and --profile."
+                    "Direct quantize requires SOURCE_PATH, "
+                    + ("OUTPUT_PATH, " if not dry_run else "")
+                    + "and --profile."
                 )
             effective_source_path = source_path
             effective_output_path = output_path
@@ -458,14 +472,37 @@ def quantize(
             effective_input_buffer_gib = input_buffer_gib
             effective_adapters = cli_adapters
 
-        if (
-            effective_source_path is None
-            or effective_output_path is None
-            or effective_profile is None
-        ):
+        if effective_source_path is None or effective_profile is None:
             raise ValueError(
-                "Quantize config requires paths.source, paths.profile, "
-                "and paths.quantized_output."
+                "Quantize config requires paths.source and paths.profile."
+            )
+
+        if dry_run:
+            estimated_bytes = estimate_output_bytes(
+                effective_source_path,
+                effective_profile,
+            )
+            _finish(
+                {
+                    "source_path": str(effective_source_path),
+                    "profile_path": str(effective_profile),
+                    "estimated_output_bytes": estimated_bytes,
+                    "estimated_output_mib": round(
+                        estimated_bytes / 1024**2,
+                        2,
+                    ),
+                    "estimated_output_gib": round(
+                        estimated_bytes / 1024**3,
+                        3,
+                    ),
+                    "dry_run": True,
+                }
+            )
+            return
+
+        if effective_output_path is None:
+            raise ValueError(
+                "Quantize config requires paths.quantized_output."
             )
 
         input_buffer_bytes = (

@@ -325,6 +325,31 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "keep")
         self.assertIn("divisible by 256", entries[0]["reason"])
 
+    def test_falls_back_to_int8_when_convrot_is_ineligible(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 4],
+                "data_offsets": [0, 32],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "int8")
+        self.assertEqual(len(entries[0]["output_tensors"]), 3)
+
 class TestInputBatchPlanning(unittest.TestCase):
     def test_keeps_output_batches_and_reads_each_batch_by_source_offset(self) -> None:
         entries = [

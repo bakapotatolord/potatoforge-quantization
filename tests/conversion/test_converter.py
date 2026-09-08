@@ -18,6 +18,7 @@ from potatoforge.converter import (
     ResolvedIOMode,
     convert_model,
     convert_model_from_profile,
+    estimate_output_bytes,
     resolve_io_mode,
 )
 from potatoforge.headers.header_reader import read_header_from_safetensors
@@ -88,6 +89,33 @@ class TestConverter(unittest.TestCase):
                 )
 
         self.assertIn("I/O mode: serial (test selection)", output.getvalue())
+
+    def test_estimate_output_bytes_matches_conversion(self) -> None:
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            output_path = Path(directory) / "output.safetensors"
+            save_file(
+                {
+                    "blocks.0.attn.wq.weight": torch.tensor(
+                        [[1.0, -1.0]],
+                        dtype=torch.bfloat16,
+                    )
+                },
+                str(source_path),
+            )
+            profile_path = self._write_int8_profile(directory)
+
+            estimated_bytes = estimate_output_bytes(source_path, profile_path)
+            convert_model_from_profile(
+                source_path,
+                output_path,
+                profile_path,
+                on_entry_started=None,
+                io_mode="serial",
+            )
+            actual_bytes = output_path.stat().st_size
+
+        self.assertEqual(estimated_bytes, actual_bytes)
 
     def test_batched_falls_back_to_serial_without_an_input_buffer(self) -> None:
         result = resolve_io_mode("batched", None)

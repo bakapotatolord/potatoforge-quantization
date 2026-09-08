@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping
 from .profiles import (
     QuantizationAction,
     QuantizationProfile,
-    resolve_profile,
+    find_profile_rule,
 )
 from .quantization.hadamard import CONVROT_GROUP_SIZE
 
@@ -394,9 +394,14 @@ def build_plan(
             ),
         }
 
-        selected_action = resolve_profile(
-            profile,
-            tensor_name,
+        matched_rule = find_profile_rule(profile, tensor_name)
+        selected_action = (
+            profile["default"]
+            if matched_rule is None
+            else matched_rule["action"]
+        )
+        fallback_action = (
+            None if matched_rule is None else matched_rule.get("fallback")
         )
 
         if (
@@ -417,24 +422,35 @@ def build_plan(
             )
             entry["estimated_bytes"] = entry["output_tensors"][0].byte_count
 
-        plan_builder = _PLAN_BUILDERS.get(selected_action)
+        if selected_action != "keep":
+            actions = (selected_action,)
+            if fallback_action is not None:
+                actions += (fallback_action,)
 
-        if plan_builder is not None:
-            try:
-                quantized_plan = plan_builder(
-                    tensor_name,
-                    descriptor,
-                )
-            except ValueError as error:
-                entry["reason"] = str(error)
-            else:
-                entry["action"] = selected_action
-                entry["estimated_bytes"] = (
-                    quantized_plan.estimated_bytes
-                )
-                entry["output_tensors"] = (
-                    quantized_plan.output_tensors
-                )
+            last_error: ValueError | None = None
+            for action in actions:
+                plan_builder = _PLAN_BUILDERS.get(action)
+                if plan_builder is None:
+                    last_error = ValueError(
+                        f"Unsupported quantization action: {action}."
+                    )
+                    continue
+                try:
+                    quantized_plan = plan_builder(
+                        tensor_name,
+                        descriptor,
+                    )
+                except ValueError as error:
+                    last_error = error
+                    continue
+
+                entry["action"] = action
+                entry["estimated_bytes"] = quantized_plan.estimated_bytes
+                entry["output_tensors"] = quantized_plan.output_tensors
+                break
+
+            if last_error is not None and entry["action"] == "keep":
+                entry["reason"] = str(last_error)
 
 
         entries.append(entry)
