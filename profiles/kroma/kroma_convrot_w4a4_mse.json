@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "profile_id": "kroma-v0.3-turbo-convrot-w4a4-mse-all-blocks",
+  "description": "Quantize all main Kroma block attention and MLP weights with W4A4 ConvRot using MSE-optimized weight scales. Keep all non-block weights unchanged.",
+  "default": "keep",
+  "rules": [
+    {
+      "action": "convrot_w4a4_mse",
+      "prefix": "blocks.",
+      "suffixes": [
+        ".attn.gate.weight",
+        ".attn.wk.weight",
+        ".attn.wo.weight",
+        ".attn.wq.weight",
+        ".attn.wv.weight",
+        ".mlp.down.weight",
+        ".mlp.gate.weight",
+        ".mlp.up.weight"
+      ]
+    }
+  ]
+}

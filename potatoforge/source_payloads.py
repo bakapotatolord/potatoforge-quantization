@@ -12,18 +12,25 @@ from .planning import (
     INT8_MARKER_PAYLOAD,
     OutputTensorSpec,
     PlanEntry,
+    QUANTIZATION_SOURCE_DTYPES,
     TensorDescriptor,
 )
 from .headers.header_reader import read_raw_data_start
 from .safetensors_writer import TensorPayload
-from .profiles import QuantizationAction
 from .quantization.int6_rowwise import (
     quantize_int6_convrot,
     quantize_int6_rowwise,
 )
 from .quantization.int6_packing import pack_int6_row_major
-from .quantization import quantize_int8_tensorwise, quantize_int8_convrot
-from .quantization.convrot_w4a4 import quantize_convrot_w4a4
+from .quantization import (
+    quantize_int8_convrot,
+    quantize_int8_tensorwise,
+)
+from .quantization.convrot_w4a4 import (
+    quantize_convrot_w4a4,
+    quantize_convrot_w4a4_mse,
+)
+from .profiles import QuantizationAction
 
 import torch
 
@@ -38,9 +45,6 @@ _TORCH_DTYPES: dict[str, torch.dtype] = {
     "F32": torch.float32,
     "F64": torch.float64,
 }
-
-_QUANTIZATION_SOURCE_DTYPES = frozenset(("BF16", "F16", "F32"))
-
 
 def tensor_to_raw_bytes(tensor: torch.Tensor) -> bytes:
     if tensor.device.type != "cpu":
@@ -139,7 +143,7 @@ def stream_bf16_source_tensors(
             descriptors,
             start=1,
         ):
-            if descriptor["dtype"] not in _QUANTIZATION_SOURCE_DTYPES:
+            if descriptor["dtype"] not in QUANTIZATION_SOURCE_DTYPES:
                 raise ValueError(
                     f"Profile-free audit received unsupported dtype "
                     f"{descriptor['dtype']} "
@@ -189,94 +193,51 @@ def _stream_entry_payloads(
                 "Unsupported kept-tensor dtype conversion: "
                 f'{entry["source_dtype"]} -> {output_spec.dtype}'
             )
-    elif action == "int8":
-        weights = tensor_from_raw_bytes(
-            source_bytes,
-            entry["shape"],
-            entry["source_dtype"],
-            tensor_name=entry["tensor_name"],
-        )
+        return
+
+    weights = tensor_from_raw_bytes(
+        source_bytes,
+        entry["shape"],
+        entry["source_dtype"],
+        tensor_name=entry["tensor_name"],
+    )
+    if action == "int8":
         result = quantize_int8_tensorwise(weights)
-
-        (weight_spec, scale_spec, marker_spec) = entry["output_tensors"]
-
-        yield weight_spec.name, tensor_to_raw_bytes(result.codes)
-        yield scale_spec.name, tensor_to_raw_bytes(result.scales)
-        yield marker_spec.name, INT8_MARKER_PAYLOAD
+        code_bytes = tensor_to_raw_bytes(result.codes)
+        marker_payload = INT8_MARKER_PAYLOAD
     elif action == "int6_rowwise":
-        weights = tensor_from_raw_bytes(
-            source_bytes,
-            entry["shape"],
-            entry["source_dtype"],
-            tensor_name=entry["tensor_name"],
-        )
         result = quantize_int6_rowwise(weights)
-
-        (weight_spec, scale_spec, marker_spec) = entry["output_tensors"]
-
-        packed = pack_int6_row_major(result.codes)
-        yield weight_spec.name, tensor_to_raw_bytes(packed.packed_codes)
-        yield scale_spec.name, tensor_to_raw_bytes(result.scales)
-        yield marker_spec.name, INT6_ROWWISE_MARKER_PAYLOAD
+        code_bytes = tensor_to_raw_bytes(
+            pack_int6_row_major(result.codes).packed_codes
+        )
+        marker_payload = INT6_ROWWISE_MARKER_PAYLOAD
     elif action == "int6_convrot":
-        weights = tensor_from_raw_bytes(
-            source_bytes,
-            entry["shape"],
-            entry["source_dtype"],
-            tensor_name=entry["tensor_name"],
-        )
         result = quantize_int6_convrot(weights)
-
-        (weight_spec, scale_spec, marker_spec) = entry["output_tensors"]
-
-        packed = pack_int6_row_major(result.codes)
-        yield weight_spec.name, tensor_to_raw_bytes(packed.packed_codes)
-        yield scale_spec.name, tensor_to_raw_bytes(result.scales)
-        yield marker_spec.name, INT6_CONVROT_MARKER_PAYLOAD
+        code_bytes = tensor_to_raw_bytes(
+            pack_int6_row_major(result.codes).packed_codes
+        )
+        marker_payload = INT6_CONVROT_MARKER_PAYLOAD
     elif action == "int8_convrot":
-        weights = tensor_from_raw_bytes(
-            source_bytes,
-            entry["shape"],
-            entry["source_dtype"],
-            tensor_name=entry["tensor_name"],
-        )
         result = quantize_int8_convrot(weights)
-
-        (
-            weight_spec,
-            scale_spec,
-            marker_spec,
-        ) = entry["output_tensors"]
-
-        yield weight_spec.name, tensor_to_raw_bytes(result.codes)
-        yield scale_spec.name, tensor_to_raw_bytes(result.scales)
-        yield marker_spec.name, INT8_CONVROT_MARKER_PAYLOAD
-    elif action == "convrot_w4a4":
-        weights = tensor_from_raw_bytes(
-            source_bytes,
-            entry["shape"],
-            entry["source_dtype"],
-            tensor_name=entry["tensor_name"],
-        )
-        result = quantize_convrot_w4a4(weights)
-
-        (
-            weight_spec,
-            scale_spec,
-            marker_spec,
-        ) = entry["output_tensors"]
-
-        yield (
-            weight_spec.name,
-            tensor_to_raw_bytes(result.packed_codes),
-        )
-        yield (
-            scale_spec.name,
-            tensor_to_raw_bytes(result.scales),
-        )
-        yield marker_spec.name, CONVROT_W4A4_MARKER_PAYLOAD
+        code_bytes = tensor_to_raw_bytes(result.codes)
+        marker_payload = INT8_CONVROT_MARKER_PAYLOAD
+    elif action in (
+        "convrot_w4a4",
+        "convrot_w4a4_mse",
+    ):
+        if action == "convrot_w4a4_mse":
+            result = quantize_convrot_w4a4_mse(weights)
+        else:
+            result = quantize_convrot_w4a4(weights)
+        code_bytes = tensor_to_raw_bytes(result.packed_codes)
+        marker_payload = CONVROT_W4A4_MARKER_PAYLOAD
     else:
         raise ValueError(f"Unknown payload action: {action}")
+
+    weight_spec, scale_spec, marker_spec = entry["output_tensors"]
+    yield weight_spec.name, code_bytes
+    yield scale_spec.name, tensor_to_raw_bytes(result.scales)
+    yield marker_spec.name, marker_payload
 
 
 def stream_quantized_payloads(

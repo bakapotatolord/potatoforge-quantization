@@ -53,6 +53,7 @@ class OutputTensorSpec(NamedTuple):
     shape: tuple[int, ...]
     byte_count: int
 
+
 class QuantizedPlan(NamedTuple):
     output_tensors: tuple[OutputTensorSpec, ...]
     estimated_bytes: int
@@ -89,6 +90,7 @@ class ScheduledOutputTensor(NamedTuple):
     spec: OutputTensorSpec
     data_offsets: tuple[int, int]
 
+
 class SafetensorsLayout(NamedTuple):
     tensors: tuple[ScheduledOutputTensor, ...]
     raw_data_bytes: int
@@ -97,7 +99,16 @@ TensorHeader: TypeAlias = Mapping[str, TensorDescriptor]
 
 FLOAT32_BYTES_PER_ELEMENT: Final = 4
 BFLOAT16_BYTES_PER_ELEMENT: Final = 2
+QUANTIZATION_SOURCE_DTYPES: Final[frozenset[str]] = frozenset(
+    ("BF16", "F16", "F32")
+)
+_SUPPORTED_WEIGHT_SUFFIXES: Final[tuple[str, ...]] = (
+    ".weight",
+    ".attn.in_proj_weight",
+)
 METADATA_KEY = "__metadata__"
+QUANTIZATION_METADATA_KEY = "potatoforge.quantization"
+QUANTIZATION_LAYERS_METADATA_KEY = "potatoforge.quantization_layers"
 
 INT8_MARKER = {"format": "int8_tensorwise"}
 INT8_MARKER_PAYLOAD: Final[bytes] = json.dumps(
@@ -153,6 +164,67 @@ def source_bytes(descriptor: TensorDescriptor) -> int:
     return end - start
 
 
+def is_supported_weight_key(name: str) -> bool:
+    return name.endswith(_SUPPORTED_WEIGHT_SUFFIXES)
+
+
+def logical_layer_name_for_weight(weight_name: str) -> str:
+    if weight_name.endswith(".attn.in_proj_weight"):
+        return weight_name.removesuffix("_weight")
+    if weight_name.endswith(".weight"):
+        return weight_name.removesuffix(".weight")
+    raise ValueError(
+        "Quantization layer families must start from a supported weight tensor."
+    )
+
+
+def weight_key_for_layer(layer_name: str) -> str:
+    if layer_name.endswith(".attn.in_proj"):
+        return f"{layer_name}_weight"
+    return f"{layer_name}.weight"
+
+
+def _validate_quantization_source_dtype(
+    descriptor: TensorDescriptor,
+    format_name: str,
+) -> None:
+    if descriptor["dtype"] not in QUANTIZATION_SOURCE_DTYPES:
+        raise ValueError(
+            f"{format_name} currently expects BF16, F16, or F32 "
+            "source weights."
+        )
+
+
+def _validate_quantization_weight(
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+    format_name: str,
+) -> tuple[int, int]:
+    _validate_quantization_source_dtype(descriptor, format_name)
+    shape = descriptor["shape"]
+    if len(shape) != 2:
+        raise ValueError(f"{format_name} weights must be two-dimensional.")
+    if not is_supported_weight_key(tensor_name):
+        raise ValueError(
+            f"{format_name} selection must target a weight tensor."
+        )
+    return shape[0], shape[1]
+
+
+def quantization_family_names(weight_name: str) -> tuple[str, ...]:
+    layer_name = logical_layer_name_for_weight(weight_name)
+    physical_weight_name = (
+        weight_key_for_layer(layer_name)
+        if weight_name.endswith(".attn.in_proj_weight")
+        else weight_name
+    )
+    return (
+        physical_weight_name,
+        f"{layer_name}.weight_scale",
+        f"{layer_name}.comfy_quant",
+    )
+
+
 def _build_quantized_plan(
     tensor_name: str,
     code_shape: tuple[int, ...],
@@ -160,23 +232,25 @@ def _build_quantized_plan(
     marker_payload: bytes,
     storage_dtype: str = "I8",
 ) -> QuantizedPlan:
-    layer_name = tensor_name.removesuffix(".weight")
+    weight_name, scale_name, marker_name = quantization_family_names(
+        tensor_name
+    )
 
     output_tensors = (
         OutputTensorSpec(
-            name=tensor_name,
+            name=weight_name,
             dtype=storage_dtype,
             shape=code_shape,
             byte_count=prod(code_shape),
         ),
         OutputTensorSpec(
-            name=f"{layer_name}.weight_scale",
+            name=scale_name,
             dtype="F32",
             shape=scale_shape,
             byte_count=prod(scale_shape) * FLOAT32_BYTES_PER_ELEMENT,
         ),
         OutputTensorSpec(
-            name=f"{layer_name}.comfy_quant",
+            name=marker_name,
             dtype="U8",
             shape=(len(marker_payload),),
             byte_count=len(marker_payload),
@@ -193,20 +267,11 @@ def plan_int8_tensorwise(
     tensor_name: str,
     descriptor: TensorDescriptor,
 ) -> QuantizedPlan:
-    if descriptor["dtype"] not in ("BF16", "F16"):
-        raise ValueError(
-            "INT8 baseline currently expects BF16 or F16 source weights."
-        )
-
-    shape = descriptor["shape"]
-
-    if len(shape) != 2:
-        raise ValueError("INT8 tensorwise weights must be two-dimensional.")
-
-    if not tensor_name.endswith(".weight"):
-        raise ValueError("INT8 tensorwise selection must target a weight tensor.")
-
-    out_features, in_features = shape
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "INT8 tensorwise",
+    )
     return _build_quantized_plan(
         tensor_name,
         code_shape=(out_features, in_features),
@@ -220,20 +285,11 @@ def plan_int6_rowwise(
     descriptor: TensorDescriptor,
 ) -> QuantizedPlan:
     """Plan physically packed rowwise INT6 codes."""
-    if descriptor["dtype"] not in ("BF16", "F16", "F32"):
-        raise ValueError(
-            "INT6 rowwise currently expects BF16, F16, or F32 source weights."
-        )
-
-    shape = descriptor["shape"]
-
-    if len(shape) != 2:
-        raise ValueError("INT6 rowwise weights must be two-dimensional.")
-
-    if not tensor_name.endswith(".weight"):
-        raise ValueError("INT6 rowwise selection must target a weight tensor.")
-
-    out_features, in_features = shape
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "INT6 rowwise",
+    )
     if in_features % 4 != 0:
         raise ValueError(
             "INT6 rowwise input features must be divisible by 4."
@@ -253,9 +309,11 @@ def plan_int6_convrot(
     descriptor: TensorDescriptor,
 ) -> QuantizedPlan:
     """Plan packed rowwise W6 weights with the fixed ConvRot contract."""
-
-    plan_int6_rowwise(tensor_name, descriptor)
-    out_features, in_features = descriptor["shape"]
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "ConvRot INT6",
+    )
     if in_features % CONVROT_GROUP_SIZE != 0:
         raise ValueError(
             "ConvRot INT6 input features must be divisible by "
@@ -274,24 +332,11 @@ def plan_int8_convrot(
     tensor_name: str,
     descriptor: TensorDescriptor,
 ) -> QuantizedPlan:
-    if descriptor["dtype"] not in ("BF16", "F16"):
-        raise ValueError(
-            "ConvRot INT8 currently expects BF16 or F16 source weights."
-        )
-
-    shape = descriptor["shape"]
-
-    if len(shape) != 2:
-        raise ValueError(
-            "ConvRot INT8 weights must be two-dimensional."
-        )
-
-    if not tensor_name.endswith(".weight"):
-        raise ValueError(
-            "ConvRot INT8 selection must target a weight tensor."
-        )
-
-    out_features, in_features = shape
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "ConvRot INT8",
+    )
 
     if in_features % CONVROT_GROUP_SIZE != 0:
         raise ValueError(
@@ -311,20 +356,11 @@ def plan_convrot_w4a4(
     tensor_name: str,
     descriptor: TensorDescriptor,
 ) -> QuantizedPlan:
-    if descriptor["dtype"] not in ("BF16", "F16"):
-        raise ValueError(
-            "ConvRot W4A4 currently expects BF16 or F16 source weights."
-        )
-
-    shape = descriptor["shape"]
-
-    if len(shape) != 2:
-        raise ValueError("ConvRot W4A4 weights must be two-dimensional.")
-
-    if not tensor_name.endswith(".weight"):
-        raise ValueError("ConvRot W4A4 selection must target a weight tensor.")
-
-    out_features, in_features = shape
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "ConvRot W4A4",
+    )
 
     if in_features % CONVROT_GROUP_SIZE != 0:
         raise ValueError(
@@ -346,6 +382,7 @@ _PLAN_BUILDERS: Mapping[QuantizationAction, PlanBuilder] = {
     "int6_convrot": plan_int6_convrot,
     "int8_convrot": plan_int8_convrot,
     "convrot_w4a4": plan_convrot_w4a4,
+    "convrot_w4a4_mse": plan_convrot_w4a4,
 }
 
 
@@ -429,14 +466,9 @@ def build_plan(
 
             last_error: ValueError | None = None
             for action in actions:
-                plan_builder = _PLAN_BUILDERS.get(action)
-                if plan_builder is None:
-                    last_error = ValueError(
-                        f"Unsupported quantization action: {action}."
-                    )
-                    continue
                 try:
-                    quantized_plan = plan_builder(
+                    quantized_plan = build_quantized_tensor_plan(
+                        action,
                         tensor_name,
                         descriptor,
                     )
@@ -452,10 +484,81 @@ def build_plan(
             if last_error is not None and entry["action"] == "keep":
                 entry["reason"] = str(last_error)
 
-
         entries.append(entry)
 
     return entries
+
+
+def build_quantization_metadata(
+    entries: Iterable[PlanEntry],
+) -> dict[str, str]:
+    return _quantization_metadata_for_layers(
+        {
+            entry["tensor_name"]: entry["action"]
+            for entry in entries
+            if entry["action"] != "keep"
+        }
+    )
+
+
+def _quantization_metadata_for_layers(
+    layer_actions: Mapping[str, str],
+) -> dict[str, str]:
+    layer_actions = {
+        name: "convrot_w4a4"
+        if action == "convrot_w4a4_mse"
+        else action
+        for name, action in layer_actions.items()
+    }
+    actions = sorted(set(layer_actions.values()))
+    summary = (
+        "none"
+        if not actions
+        else actions[0]
+        if len(actions) == 1
+        else "mixed"
+    )
+    return {
+        QUANTIZATION_METADATA_KEY: summary,
+        QUANTIZATION_LAYERS_METADATA_KEY: json.dumps(
+            dict(layer_actions),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+
+
+def parse_quantization_layers(raw_layers: str) -> dict[str, str]:
+    try:
+        decoded_layers = json.loads(raw_layers)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            "Invalid PotatoForge quantization layer metadata."
+        ) from error
+
+    if not isinstance(decoded_layers, dict) or any(
+        not isinstance(name, str) or not isinstance(action, str)
+        for name, action in decoded_layers.items()
+    ):
+        raise ValueError("Invalid PotatoForge quantization layer metadata.")
+
+    return decoded_layers
+
+
+def update_quantization_metadata(
+    metadata: Mapping[str, str],
+    layer_actions: Mapping[str, str],
+) -> dict[str, str]:
+    existing_layers: dict[str, str] = {}
+    raw_layers = metadata.get(QUANTIZATION_LAYERS_METADATA_KEY)
+    if raw_layers is not None:
+        existing_layers.update(parse_quantization_layers(raw_layers))
+
+    existing_layers.update(layer_actions)
+    return {
+        **metadata,
+        **_quantization_metadata_for_layers(existing_layers),
+    }
 
 
 def plan_input_batches(

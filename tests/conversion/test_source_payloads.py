@@ -16,13 +16,19 @@ from potatoforge.planning import (
 from potatoforge.profiles import QuantizationProfile
 from potatoforge.headers.source_header import read_source_model_header
 from potatoforge.source_payloads import tensor_to_raw_bytes, stream_output_payloads
-from potatoforge.quantization import quantize_int8_tensorwise, quantize_int8_convrot
+from potatoforge.quantization import (
+    quantize_int8_tensorwise,
+    quantize_int8_convrot,
+)
 from potatoforge.quantization.int6_rowwise import (
     quantize_int6_convrot,
     quantize_int6_rowwise,
 )
 from potatoforge.quantization.int6_packing import pack_int6_row_major
-from potatoforge.quantization.convrot_w4a4 import quantize_convrot_w4a4
+from potatoforge.quantization.convrot_w4a4 import (
+    quantize_convrot_w4a4,
+    quantize_convrot_w4a4_mse,
+)
 
 
 class TestSourcePayloads(unittest.TestCase):
@@ -119,7 +125,7 @@ class TestSourcePayloads(unittest.TestCase):
                 [1.0, 0.25, -1.0],
                 [0.01, -0.02, 0.02],
             ],
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         )
 
         with TemporaryDirectory() as directory:
@@ -172,6 +178,42 @@ class TestSourcePayloads(unittest.TestCase):
             self.assertEqual(weight_bytes, tensor_to_raw_bytes(result.codes))
             self.assertEqual(scale_bytes, tensor_to_raw_bytes(result.scales))
             self.assertEqual(marker_bytes, b'{"format": "int8_tensorwise"}')
+
+    def test_stream_source_payload_w4a4_mse_keeps_the_standard_w4a4_family(
+        self,
+    ) -> None:
+        tensor = torch.linspace(
+            -0.1,
+            0.1,
+            steps=256,
+            dtype=torch.bfloat16,
+        ).reshape(1, 256)
+        tensor[0, 0] = 3.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "convrot_w4a4_mse",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            payloads = list(stream_output_payloads(source_path, build_plan(header.tensors, profile)))
+
+        expected = quantize_convrot_w4a4_mse(tensor)
+        self.assertEqual(len(payloads), 3)
+        self.assertEqual(
+            payloads[0][1],
+            tensor_to_raw_bytes(expected.packed_codes),
+        )
+        self.assertEqual(payloads[1][1], tensor_to_raw_bytes(expected.scales))
+        self.assertEqual(payloads[2][1], CONVROT_W4A4_MARKER_PAYLOAD)
 
     def test_stream_source_payload_int8_convrot(self) -> None:
         tensor = torch.zeros(

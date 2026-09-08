@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "profile_id": "zit-w4a4-convrot-mse-main-layers",
+  "description": "Quantize all main Z-Image Turbo transformer layer weights with ConvRot W4A4 using MSE-optimized weight scales. Keep non-layer weights unchanged.",
+  "default": "keep",
+  "rules": [
+    {
+      "action": "convrot_w4a4_mse",
+      "prefix": "layers.",
+      "suffixes": [
+        ".adaLN_modulation.0.weight",
+        ".attention.out.weight",
+        ".attention.qkv.weight",
+        ".feed_forward.w1.weight",
+        ".feed_forward.w2.weight",
+        ".feed_forward.w3.weight"
+      ]
+    }
+  ]
+}
