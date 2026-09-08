@@ -35,6 +35,26 @@ class QuantizationProfile(TypedDict):
     description: NotRequired[str]
 
 
+def validate_quantization_action(
+    value: object,
+    field_name: str,
+    *,
+    allow_keep: bool = True,
+) -> QuantizationAction:
+    supported_actions = (
+        _SUPPORTED_ACTIONS
+        if allow_keep
+        else tuple(action for action in _SUPPORTED_ACTIONS if action != "keep")
+    )
+    if not isinstance(value, str) or value not in supported_actions:
+        raise ValueError(
+            f"{field_name} must be one of: "
+            + ", ".join(supported_actions)
+        )
+
+    return cast(QuantizationAction, value)
+
+
 def resolve_profile(profile: QuantizationProfile, tensor_name: str) -> QuantizationAction:
     for rule in profile["rules"]:
         if (

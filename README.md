@@ -89,6 +89,7 @@ environment) to see all available options.
 | `audit`          | Compare INT8, INT6, ConvRot INT8, ConvRot INT6, and W4A4 by size and reconstruction error. |
 | `optimize`       | Generate a profile from an audit report and target size; INT6 methods are opt-in.          |
 | `quantize`       | Convert a checkpoint with a profile, optionally merging LoRA adapters.                     |
+| `patch-sweep`    | Generate one independent quantization patch per explicitly selected layer.                  |
 | `extract`        | Extract tensors matching a source prefix.                                                  |
 | `test`           | Run the standard-library test suite.                                                       |
 
@@ -143,6 +144,54 @@ uv run potatoforge quantize `
     path\to\quantized.safetensors `
     --profile profiles\kroma\kroma-v0.1-balanced.json
 ```
+
+#### Generate a layer patch sweep
+
+Use an explicit sweep profile to generate one independent patch per layer. The
+source checkpoint is the only model input; a later runtime experiment can apply
+these patches to any compatible baseline.
+
+Example `sweep.json`:
+
+```json
+{
+  "format_version": 1,
+  "profile_id": "kroma-int8cr-sensitivity-v1",
+  "groups": [
+    {
+      "action": "int8_convrot",
+      "layers": [
+        "blocks.0.attn.wq.weight",
+        "blocks.0.attn.wk.weight"
+      ]
+    }
+  ]
+}
+```
+
+Run it with:
+
+```powershell
+uv run potatoforge patch-sweep `
+    --source path\to\kroma-bf16.safetensors `
+    --profile sweep.json `
+    --output-dir patches\int8cr
+```
+
+The command writes one `.safetensors` patch per listed layer and a
+`sweep_manifest.json`. Files use deterministic names such as
+`blocks.0.attn.wq__int8_convrot.safetensors`; each file contains only that
+layer's quantized family and declares its own `quant_patch` metadata.
+
+This supports sensitivity experiments: create an aggressively quantized
+baseline, generate candidate layer patches once, apply them individually at
+runtime, then combine useful upgrades into a normal mixed-precision profile or
+another sweep profile.
+
+These patches are designed for use with the companion [ComfyUI-PotatoForge
+custom node](https://github.com/bakapotatolord/ComfyUI-PotatoForge). Generate
+the candidate files here, then use that node to apply individual patches to a
+compatible baseline checkpoint in ComfyUI for sensitivity testing.
 
 #### Merge LoRA adapters and quantize in one run
 

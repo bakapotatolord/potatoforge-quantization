@@ -348,6 +348,24 @@ _PLAN_BUILDERS: Mapping[QuantizationAction, PlanBuilder] = {
     "convrot_w4a4": plan_convrot_w4a4,
 }
 
+
+def build_quantized_tensor_plan(
+    action: QuantizationAction,
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+) -> QuantizedPlan:
+    if action == "keep":
+        raise ValueError(
+            "The keep action does not produce a quantized tensor plan."
+        )
+
+    plan_builder = _PLAN_BUILDERS.get(action)
+    if plan_builder is None:
+        raise ValueError(f"Unsupported quantization action: {action}.")
+
+    return plan_builder(tensor_name, descriptor)
+
+
 def build_plan(
     header: TensorHeader,
     profile: QuantizationProfile,

@@ -10,11 +10,13 @@ from .planning import (
     INT6_ROWWISE_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_PAYLOAD,
     INT8_MARKER_PAYLOAD,
+    OutputTensorSpec,
     PlanEntry,
     TensorDescriptor,
 )
 from .headers.header_reader import read_raw_data_start
 from .safetensors_writer import TensorPayload
+from .profiles import QuantizationAction
 from .quantization.int6_rowwise import (
     quantize_int6_convrot,
     quantize_int6_rowwise,
@@ -275,6 +277,33 @@ def _stream_entry_payloads(
         yield marker_spec.name, CONVROT_W4A4_MARKER_PAYLOAD
     else:
         raise ValueError(f"Unknown payload action: {action}")
+
+
+def stream_quantized_payloads(
+    source_bytes: bytes,
+    *,
+    tensor_name: str,
+    source_dtype: str,
+    shape: Sequence[int],
+    action: QuantizationAction,
+    output_tensors: tuple[OutputTensorSpec, ...],
+) -> Iterator[TensorPayload]:
+    if action == "keep":
+        raise ValueError("Patch replacements must use a quantizing action.")
+
+    entry: PlanEntry = {
+        "tensor_name": tensor_name,
+        "source_dtype": source_dtype,
+        "shape": tuple(shape),
+        "input_bytes": len(source_bytes),
+        "action": action,
+        "estimated_bytes": sum(
+            tensor.byte_count for tensor in output_tensors
+        ),
+        "output_tensors": output_tensors,
+        "source_data_offsets": (0, len(source_bytes)),
+    }
+    yield from _stream_entry_payloads(entry, source_bytes)
 
 
 def stream_output_payloads(

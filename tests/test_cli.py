@@ -27,6 +27,7 @@ class TestCli(unittest.TestCase):
             "audit",
             "optimize",
             "quantize",
+            "patch-sweep",
             "extract",
             "test",
         ):

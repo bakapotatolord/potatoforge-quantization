@@ -27,6 +27,7 @@ from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
 from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
+from .patch_sweep import generate_patch_sweep_from_profile
 from .planning import IOMode
 from .config import load_optimize_config, load_quantize_config
 
@@ -87,6 +88,10 @@ def _gib_to_bytes(value: float) -> int:
 
 def _print_progress(index: int, count: int, name: str) -> None:
     typer.echo(f"[{index}/{count}] {name}", err=True)
+
+
+def _print_patch_progress(message: str) -> None:
+    typer.echo(message, err=True)
 
 
 def _build_adapter_inputs(
@@ -491,6 +496,49 @@ def quantize(
         )
 
     _run("quantize", action)
+
+
+@app.command("patch-sweep")
+def patch_sweep(
+    source_path: Path = typer.Option(
+        ...,
+        "--source",
+        help="Original source checkpoint containing the selected weights.",
+    ),
+    profile_path: Path = typer.Option(
+        ...,
+        "--profile",
+        help="JSON sweep profile listing exact layers and actions.",
+    ),
+    output_dir: Path = typer.Option(
+        ...,
+        "--output-dir",
+        help="Directory for independent quantization patches.",
+    ),
+) -> None:
+    """Generate one independent quantization patch per selected layer."""
+    def action() -> None:
+        result = generate_patch_sweep_from_profile(
+            source_path,
+            profile_path,
+            output_dir,
+            on_progress=_print_patch_progress,
+        )
+        _finish(
+            {
+                "source_path": str(source_path),
+                "profile_path": str(profile_path),
+                "profile_id": result.plan.profile_id,
+                "output_dir": str(output_dir),
+                "generated_patch_count": result.generated_patch_count,
+                "failed_patch_count": 0,
+                "manifest_path": str(result.manifest_path),
+                "total_patch_bytes": result.total_patch_bytes,
+                "elapsed_seconds": round(result.elapsed_seconds, 3),
+            }
+        )
+
+    _run("patch-sweep", action)
 
 
 @app.command("extract")
