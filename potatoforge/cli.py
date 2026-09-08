@@ -175,6 +175,7 @@ def inspect_lora(
             "tensor_count": len(inspection["tensors"]),
             "pair_count": len(inspection["pairs"]),
             "additive_delta_count": len(inspection["additive_deltas"]),
+            "lokr_group_count": len(inspection["lokr_groups"]),
             "kind_counts": dict(sorted(kind_counts.items())),
             "contract_counts": dict(sorted(contract_counts.items())),
             "rank_counts": {

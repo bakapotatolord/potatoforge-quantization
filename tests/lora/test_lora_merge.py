@@ -82,6 +82,119 @@ class TestBuildMergePlan(unittest.TestCase):
             "norm.scale",
         )
 
+    def test_resolves_direct_lokr_group(self) -> None:
+        adapter_header = make_header(
+            {
+                "diffusion_model.layer.lokr_w1": ("BF16", [2, 2]),
+                "diffusion_model.layer.lokr_w2": ("BF16", [3, 5]),
+                "diffusion_model.layer.alpha": ("BF16", []),
+            }
+        )
+        source_header = make_header(
+            {
+                "layer.weight": ("BF16", [6, 10]),
+            }
+        )
+
+        plan = build_merge_plan(
+            source_header,
+            adapter_header,
+        )
+
+        self.assertEqual(
+            plan["lokr_groups"],
+            [
+                {
+                    "w1_key": "diffusion_model.layer.lokr_w1",
+                    "w2_key": "diffusion_model.layer.lokr_w2",
+                    "source_key": "layer.weight",
+                    "alpha_key": "diffusion_model.layer.alpha",
+                }
+            ],
+        )
+
+    def test_accepts_direct_lokr_without_alpha(self) -> None:
+        adapter_header = make_header(
+            {
+                "layer.lokr_w1": ("BF16", [2, 2]),
+                "layer.lokr_w2": ("BF16", [3, 5]),
+            }
+        )
+
+        plan = build_merge_plan(
+            make_header({"layer.weight": ("BF16", [6, 10])}),
+            adapter_header,
+        )
+
+        self.assertIsNone(plan["lokr_groups"][0]["alpha_key"])
+
+    def test_rejects_incomplete_direct_lokr_group(self) -> None:
+        for missing_key, descriptors, message in (
+            (
+                "lokr_w2",
+                {"layer.lokr_w1": ("BF16", [2, 2])},
+                "missing lokr_w2",
+            ),
+            (
+                "lokr_w1",
+                {"layer.lokr_w2": ("BF16", [3, 5])},
+                "missing lokr_w1",
+            ),
+        ):
+            with self.subTest(missing_key=missing_key):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_merge_plan(
+                        make_header({"layer.weight": ("BF16", [6, 10])}),
+                        make_header(descriptors),
+                    )
+
+    def test_rejects_direct_lokr_rank_mismatch(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unsupported direct LoKr tensor rank",
+        ):
+            build_merge_plan(
+                make_header({"layer.weight": ("BF16", [6, 10])}),
+                make_header(
+                    {
+                        "layer.lokr_w1": ("BF16", [2, 2, 1]),
+                        "layer.lokr_w2": ("BF16", [3, 5]),
+                    }
+                ),
+            )
+
+    def test_rejects_direct_lokr_shape_mismatch(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "LoKr shape mismatch.*lokr_w1.*lokr_w2.*kron.*target",
+        ):
+            build_merge_plan(
+                make_header({"layer.weight": ("BF16", [6, 11])}),
+                make_header(
+                    {
+                        "layer.lokr_w1": ("BF16", [2, 2]),
+                        "layer.lokr_w2": ("BF16", [3, 5]),
+                    }
+                ),
+            )
+
+    def test_rejects_unsupported_lokr_variant(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "only direct/direct LoKr",
+        ):
+            build_merge_plan(
+                make_header({}),
+                make_header(
+                    {
+                        "layer.lokr_w1_a": ("BF16", [2, 2]),
+                        "layer.lokr_w1_b": ("BF16", [2, 2]),
+                        "layer.lokr_w2": ("BF16", [3, 5]),
+                        "layer.alpha": ("BF16", []),
+                    }
+                ),
+            )
+
     def test_rejects_linear_source_shape_mismatch(self) -> None:
         adapter_header = make_header(
             {
@@ -210,6 +323,63 @@ class TestBuildMergePlan(unittest.TestCase):
 
 
 class TestStreamingBf16Merge(unittest.TestCase):
+    def test_merges_direct_lokr_with_strength_and_ignores_alpha(self) -> None:
+        source_tensors = {
+            "layer.weight": torch.zeros(
+                (4, 4),
+                dtype=torch.bfloat16,
+            ),
+        }
+        adapter_tensors = {
+            "layer.lokr_w1": torch.tensor(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "layer.lokr_w2": torch.tensor(
+                [
+                    [5.0, 6.0],
+                    [7.0, 8.0],
+                ],
+                dtype=torch.bfloat16,
+            ),
+            "layer.alpha": torch.tensor(
+                128.0,
+                dtype=torch.bfloat16,
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            source_path = directory_path / "source.safetensors"
+            adapter_path = directory_path / "adapter.safetensors"
+            output_path = directory_path / "merged.safetensors"
+
+            save_file(source_tensors, str(source_path))
+            save_file(adapter_tensors, str(adapter_path))
+
+            merge_bf16_adapters(
+                source_path,
+                output_path,
+                (AdapterMergeInput(adapter_path, 0.5),),
+            )
+
+            merged_tensors = load_file(str(output_path))
+
+        expected = torch.tensor(
+            [
+                [2.5, 3.0, 5.0, 6.0],
+                [3.5, 4.0, 7.0, 8.0],
+                [7.5, 9.0, 10.0, 12.0],
+                [10.5, 12.0, 14.0, 16.0],
+            ],
+            dtype=torch.bfloat16,
+        )
+
+        self.assertTrue(torch.equal(merged_tensors["layer.weight"], expected))
+
     def test_merges_hybrid_adapter_and_preserves_untouched_payloads(self) -> None:
         source_tensors = {
             "layer.weight": torch.tensor(

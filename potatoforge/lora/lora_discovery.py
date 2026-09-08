@@ -38,9 +38,19 @@ class DiscoveredAdditiveDelta(TypedDict):
     shape: list[int]
     dtype: str
 
+
+class DiscoveredDirectLoKr(TypedDict):
+    target: str
+    w1_key: str | None
+    w2_key: str | None
+    alpha_key: str | None
+
+
 AdapterTensorKind = Literal[
     "additive_tensor_delta",
     "alpha",
+    "lokr_w1",
+    "lokr_w2",
     "unsupported",
 ]
 
@@ -73,6 +83,8 @@ AdapterInventoryKind = Literal[
     "linear_up",
     "additive_tensor_delta",
     "alpha",
+    "lokr_w1",
+    "lokr_w2",
     "unpaired_down",
     "unpaired_up",
     "unsupported",
@@ -90,6 +102,7 @@ class AdapterTensorRecord(TypedDict):
 class AdapterInspectionResult(TypedDict):
     pairs: list[DiscoveredLinearPair]
     additive_deltas: list[DiscoveredAdditiveDelta]
+    lokr_groups: list[DiscoveredDirectLoKr]
     tensors: list[AdapterTensorRecord]
 
 PAIR_CONVENTIONS: tuple[PairConvention, ...] = (
@@ -140,8 +153,6 @@ _UNSUPPORTED_CONTRACT_SUFFIXES: tuple[
     (".hada_w2_b", "loha"),
     (".hada_t1", "loha"),
     (".hada_t2", "loha"),
-    (".lokr_w1", "lokr"),
-    (".lokr_w2", "lokr"),
     (".lokr_w1_a", "lokr"),
     (".lokr_w1_b", "lokr"),
     (".lokr_w2_a", "lokr"),
@@ -301,6 +312,20 @@ def classify_adapter_tensor_key(
             contract="alpha",
         )
 
+    if key.endswith(".lokr_w1"):
+        return AdapterTensorClassification(
+            kind="lokr_w1",
+            target=key[:-len(".lokr_w1")],
+            contract="lokr",
+        )
+
+    if key.endswith(".lokr_w2"):
+        return AdapterTensorClassification(
+            kind="lokr_w2",
+            target=key[:-len(".lokr_w2")],
+            contract="lokr",
+        )
+
     for suffix, contract in _UNSUPPORTED_CONTRACT_SUFFIXES:
         if key.endswith(suffix):
             return AdapterTensorClassification(
@@ -344,6 +369,52 @@ def discover_additive_deltas(
 
     return deltas
 
+
+def discover_direct_lokr_groups(
+    header: SourceModelHeader,
+) -> list[DiscoveredDirectLoKr]:
+    tensor_names = set(header.tensors)
+    groups: dict[str, dict[str, str | None]] = {}
+
+    for key in sorted(tensor_names):
+        classification = classify_adapter_tensor_key(key)
+        kind = classification["kind"]
+
+        if kind not in {"lokr_w1", "lokr_w2"}:
+            continue
+
+        target = classification["target"]
+
+        if target is None or not target:
+            raise ValueError(f"Invalid direct LoKr key: {key}")
+
+        group = groups.setdefault(
+            target,
+            {
+                "w1_key": None,
+                "w2_key": None,
+            },
+        )
+        group["w1_key" if kind == "lokr_w1" else "w2_key"] = key
+
+    discovered: list[DiscoveredDirectLoKr] = []
+
+    for target in sorted(groups):
+        group = groups[target]
+        alpha_key = f"{target}.alpha"
+
+        discovered.append(
+            DiscoveredDirectLoKr(
+                target=target,
+                w1_key=group["w1_key"],
+                w2_key=group["w2_key"],
+                alpha_key=alpha_key if alpha_key in tensor_names else None,
+            )
+        )
+
+    return discovered
+
+
 def _make_adapter_tensor_record(
     header: SourceModelHeader,
     key: str,
@@ -386,6 +457,7 @@ def inspect_adapter_header(
 ) -> AdapterInspectionResult:
     pair_result = discover_linear_pairs(header)
     additive_deltas = discover_additive_deltas(header)
+    lokr_groups = discover_direct_lokr_groups(header)
 
     records_by_key: dict[str, AdapterTensorRecord] = {}
 
@@ -432,6 +504,22 @@ def inspect_adapter_header(
             "additive_tensor_delta",
         )
 
+    for group in lokr_groups:
+        for key_name, kind in (
+            (group["w1_key"], "lokr_w1"),
+            (group["w2_key"], "lokr_w2"),
+        ):
+            if key_name is None:
+                continue
+
+            records_by_key[key_name] = _make_adapter_tensor_record(
+                header,
+                key_name,
+                kind,
+                group["target"],
+                "lokr",
+            )
+
     for key in sorted(header.tensors):
         if key in records_by_key:
             continue
@@ -475,6 +563,7 @@ def inspect_adapter_header(
     return AdapterInspectionResult(
         pairs=pair_result["pairs"],
         additive_deltas=additive_deltas,
+        lokr_groups=lokr_groups,
         tensors=[
             records_by_key[key]
             for key in sorted(records_by_key)

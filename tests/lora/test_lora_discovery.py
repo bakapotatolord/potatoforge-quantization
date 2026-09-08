@@ -5,6 +5,7 @@ from potatoforge.lora.lora_discovery import (
     classify_adapter_tensor_key,
     derive_pair_candidate,
     discover_additive_deltas,
+    discover_direct_lokr_groups,
     discover_linear_pairs,
     inspect_adapter_header,
     inspect_linear_pair,
@@ -237,7 +238,7 @@ class TestAdapterTensorClassification(unittest.TestCase):
     def test_classifies_explicit_unsupported_contract_markers(self) -> None:
         cases = (
             ("layer.hada_w1_a", "loha"),
-            ("layer.lokr_w1", "lokr"),
+            ("layer.lokr_w1_a", "lokr"),
             ("layer.oft_blocks", "oft_or_boft"),
             ("layer.dora_scale", "dora"),
             ("layer.w_norm", "weight_norm"),
@@ -254,6 +255,78 @@ class TestAdapterTensorClassification(unittest.TestCase):
                 self.assertEqual(result["kind"], "unsupported")
                 self.assertEqual(result["target"], "layer")
                 self.assertEqual(result["contract"], contract)
+
+    def test_classifies_direct_lokr_factors(self) -> None:
+        for key, kind in (
+            ("layer.lokr_w1", "lokr_w1"),
+            ("layer.lokr_w2", "lokr_w2"),
+        ):
+            with self.subTest(key=key):
+                result = classify_adapter_tensor_key(key)
+
+                self.assertEqual(result["kind"], kind)
+                self.assertEqual(result["target"], "layer")
+                self.assertEqual(result["contract"], "lokr")
+
+
+class TestDirectLoKrDiscovery(unittest.TestCase):
+    def test_discovers_direct_pair_and_optional_alpha(self) -> None:
+        header = SourceModelHeader(
+            tensors={
+                "layer.lokr_w1": {
+                    "dtype": "BF16",
+                    "shape": [2, 2],
+                    "data_offsets": [0, 8],
+                },
+                "layer.lokr_w2": {
+                    "dtype": "BF16",
+                    "shape": [3, 5],
+                    "data_offsets": [8, 38],
+                },
+                "layer.alpha": {
+                    "dtype": "BF16",
+                    "shape": [],
+                    "data_offsets": [38, 40],
+                },
+            },
+            metadata={},
+        )
+
+        self.assertEqual(
+            discover_direct_lokr_groups(header),
+            [
+                {
+                    "target": "layer",
+                    "w1_key": "layer.lokr_w1",
+                    "w2_key": "layer.lokr_w2",
+                    "alpha_key": "layer.alpha",
+                }
+            ],
+        )
+
+    def test_keeps_missing_direct_factor_in_group_for_validation(self) -> None:
+        header = SourceModelHeader(
+            tensors={
+                "layer.lokr_w1": {
+                    "dtype": "BF16",
+                    "shape": [2, 2],
+                    "data_offsets": [0, 8],
+                },
+            },
+            metadata={},
+        )
+
+        self.assertEqual(
+            discover_direct_lokr_groups(header),
+            [
+                {
+                    "target": "layer",
+                    "w1_key": "layer.lokr_w1",
+                    "w2_key": None,
+                    "alpha_key": None,
+                }
+            ],
+        )
 
 
 class TestAdditiveDeltaDiscovery(unittest.TestCase):

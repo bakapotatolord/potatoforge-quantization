@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 import torch
 
 
@@ -43,9 +45,37 @@ def calculate_additive_tensor_delta(
     return strength * delta.to(dtype=torch.float32)
 
 
+def reconstruct_lokr_direct(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    target_shape: torch.Size | tuple[int, ...],
+) -> torch.Tensor:
+    if w1.ndim != 2 or w2.ndim != 2:
+        raise ValueError(
+            "Direct LoKr currently supports only 2D lokr_w1/lokr_w2 "
+            f"(got w1={tuple(w1.shape)}, w2={tuple(w2.shape)})"
+        )
+
+    delta = torch.kron(
+        w1.to(dtype=torch.float32),
+        w2.to(dtype=torch.float32),
+    )
+
+    if tuple(delta.shape) != tuple(target_shape):
+        raise ValueError(
+            "LoKr shape mismatch: "
+            f"w1={tuple(w1.shape)}, "
+            f"w2={tuple(w2.shape)}, "
+            f"produced={tuple(delta.shape)}, "
+            f"target={tuple(target_shape)}"
+        )
+
+    return delta
+
+
 def merge_tensor_contributions(
     base: torch.Tensor,
-    contributions: list[torch.Tensor],
+    contributions: Iterable[torch.Tensor],
 ) -> torch.Tensor:
     if not base.is_floating_point():
         raise ValueError("Base tensor must be floating-point.")
@@ -69,5 +99,6 @@ def merge_tensor_contributions(
             )
 
         merged = merged + contribution.to(dtype=torch.float32)
+        del contribution
 
     return merged.to(dtype=base.dtype)

@@ -9,6 +9,7 @@ from safetensors.torch import load_file
 from potatoforge.headers.header_reader import read_raw_data_start
 from potatoforge.lora.lora_discovery import (
     DiscoveredAdditiveDelta,
+    DiscoveredDirectLoKr,
     DiscoveredLinearPair,
     inspect_adapter_header,
 )
@@ -16,6 +17,7 @@ from potatoforge.lora.lora_math import (
     calculate_additive_tensor_delta,
     calculate_linear_lora_delta,
     merge_tensor_contributions,
+    reconstruct_lokr_direct,
 )
 from potatoforge.planning import (
     OutputTensorSpec,
@@ -52,9 +54,17 @@ class ResolvedAdditiveDelta(TypedDict):
     source_key: str
 
 
+class ResolvedDirectLoKr(TypedDict):
+    w1_key: str
+    w2_key: str
+    source_key: str
+    alpha_key: str | None
+
+
 class MergePlan(TypedDict):
     linear_pairs: list[ResolvedLinearPair]
     additive_deltas: list[ResolvedAdditiveDelta]
+    lokr_groups: list[ResolvedDirectLoKr]
 
 
 class AdapterMergeInput(NamedTuple):
@@ -71,6 +81,7 @@ class _PreparedAdapter(NamedTuple):
 class _PatchIndex(NamedTuple):
     linear_pairs: dict[str, tuple[ResolvedLinearPair, ...]]
     additive_deltas: dict[str, tuple[ResolvedAdditiveDelta, ...]]
+    lokr_groups: dict[str, tuple[ResolvedDirectLoKr, ...]]
 
 
 MergeProgressReporter: TypeAlias = Callable[[int, int, str], None]
@@ -148,6 +159,17 @@ def resolve_linear_pair_source_key(
     )
 
 
+def resolve_direct_lokr_source_key(
+    source_header: SourceModelHeader,
+    group: DiscoveredDirectLoKr,
+) -> str:
+    return _resolve_source_tensor_key(
+        source_header,
+        adapter_target=group["target"],
+        source_suffix=".weight",
+    )
+
+
 def resolve_additive_delta_source_key(
     source_header: SourceModelHeader,
     delta: DiscoveredAdditiveDelta,
@@ -211,6 +233,70 @@ def _validate_linear_source_tensor(
         )
 
 
+def _validate_direct_lokr_group(
+    adapter_header: SourceModelHeader,
+    group: DiscoveredDirectLoKr,
+) -> None:
+    target = group["target"]
+    w1_key = group["w1_key"]
+    w2_key = group["w2_key"]
+
+    if w1_key is None:
+        raise ValueError(
+            f"Incomplete direct LoKr group {target!r}: missing lokr_w1. "
+            f"Expected: {target}.lokr_w1 and {target}.lokr_w2."
+        )
+
+    if w2_key is None:
+        raise ValueError(
+            f"Incomplete direct LoKr group {target!r}: missing lokr_w2. "
+            f"Expected: {target}.lokr_w1 and {target}.lokr_w2."
+        )
+
+    _validate_adapter_dtype(adapter_header, w1_key)
+    _validate_adapter_dtype(adapter_header, w2_key)
+
+    w1_shape = adapter_header.tensors[w1_key]["shape"]
+    w2_shape = adapter_header.tensors[w2_key]["shape"]
+
+    if len(w1_shape) != 2 or len(w2_shape) != 2:
+        raise ValueError(
+            f"Unsupported direct LoKr tensor rank for {target!r}: "
+            f"lokr_w1 shape={w1_shape}, lokr_w2 shape={w2_shape}. "
+            "PotatoForge currently supports only 2D direct/direct LoKr."
+        )
+
+
+def _validate_direct_lokr_source_tensor(
+    adapter_header: SourceModelHeader,
+    source_header: SourceModelHeader,
+    source_key: str,
+    group: DiscoveredDirectLoKr,
+) -> None:
+    descriptor = source_header.tensors[source_key]
+    w1_shape = adapter_header.tensors[group["w1_key"]]["shape"]
+    w2_shape = adapter_header.tensors[group["w2_key"]]["shape"]
+    expected_shape = [
+        w1_shape[0] * w2_shape[0],
+        w1_shape[1] * w2_shape[1],
+    ]
+
+    if descriptor["dtype"] not in _MERGE_SOURCE_DTYPES:
+        raise ValueError(
+            f"Source tensor {source_key} must use BF16 or F32; "
+            f"got {descriptor['dtype']}."
+        )
+
+    if descriptor["shape"] != expected_shape:
+        raise ValueError(
+            f"LoKr shape mismatch for {source_key!r}: "
+            f"lokr_w1: {tuple(w1_shape)}, "
+            f"lokr_w2: {tuple(w2_shape)}, "
+            f"kron: {tuple(expected_shape)}, "
+            f"target: {tuple(descriptor['shape'])}."
+        )
+
+
 def _validate_additive_source_tensor(
     source_header: SourceModelHeader,
     source_key: str,
@@ -237,6 +323,46 @@ def build_merge_plan(
     adapter_header: SourceModelHeader,
 ) -> MergePlan:
     inspection = inspect_adapter_header(adapter_header)
+    lokr_targets = {
+        group["target"] for group in inspection["lokr_groups"]
+    }
+
+    unsupported_lokr_records = [
+        record
+        for record in inspection["tensors"]
+        if record["kind"] == "unsupported"
+        and (
+            record["contract"] == "lokr"
+            or (
+                record["contract"] == "dora"
+                and record["target"] in lokr_targets
+            )
+        )
+    ]
+
+    if unsupported_lokr_records:
+        records_by_target: dict[str, list[str]] = {}
+
+        for record in unsupported_lokr_records:
+            target = record["target"] or "<unknown>"
+            records_by_target.setdefault(target, []).append(record["key"])
+
+        details = []
+
+        for target in sorted(records_by_target):
+            keys = records_by_target[target]
+            details.append(
+                f"Unsupported LoKr representation for {target!r}. "
+                "PotatoForge currently supports only direct/direct LoKr "
+                f"({target}.lokr_w1 + {target}.lokr_w2)."
+            )
+            details.append("Unsupported LoKr tensors found:")
+            details.extend(f"  - {key}" for key in keys)
+
+        raise ValueError("\n".join(details))
+
+    for group in inspection["lokr_groups"]:
+        _validate_direct_lokr_group(adapter_header, group)
 
     invalid_records = [
         record
@@ -289,7 +415,7 @@ def build_merge_plan(
         pair["target"]
         for pair in inspection["pairs"]
     }
-    orphan_alpha_targets = set(alpha_keys_by_target) - pair_targets
+    orphan_alpha_targets = set(alpha_keys_by_target) - pair_targets - lokr_targets
 
     if orphan_alpha_targets:
         raise ValueError(
@@ -331,6 +457,35 @@ def build_merge_plan(
             )
         )
 
+    resolved_lokr_groups: list[ResolvedDirectLoKr] = []
+
+    for group in inspection["lokr_groups"]:
+        source_key = resolve_direct_lokr_source_key(
+            source_header,
+            group,
+        )
+        _validate_direct_lokr_source_tensor(
+            adapter_header,
+            source_header,
+            source_key,
+            group,
+        )
+
+        w1_key = group["w1_key"]
+        w2_key = group["w2_key"]
+
+        assert w1_key is not None
+        assert w2_key is not None
+
+        resolved_lokr_groups.append(
+            ResolvedDirectLoKr(
+                w1_key=w1_key,
+                w2_key=w2_key,
+                source_key=source_key,
+                alpha_key=group["alpha_key"],
+            )
+        )
+
     resolved_deltas: list[ResolvedAdditiveDelta] = []
 
     for delta in inspection["additive_deltas"]:
@@ -356,6 +511,7 @@ def build_merge_plan(
     return MergePlan(
         linear_pairs=resolved_pairs,
         additive_deltas=resolved_deltas,
+        lokr_groups=resolved_lokr_groups,
     )
 
 
@@ -406,12 +562,16 @@ def _validate_file_layout(
 def _build_patch_index(plan: MergePlan) -> _PatchIndex:
     linear_pairs: dict[str, list[ResolvedLinearPair]] = {}
     additive_deltas: dict[str, list[ResolvedAdditiveDelta]] = {}
+    lokr_groups: dict[str, list[ResolvedDirectLoKr]] = {}
 
     for pair in plan["linear_pairs"]:
         linear_pairs.setdefault(pair["source_key"], []).append(pair)
 
     for delta in plan["additive_deltas"]:
         additive_deltas.setdefault(delta["source_key"], []).append(delta)
+
+    for group in plan["lokr_groups"]:
+        lokr_groups.setdefault(group["source_key"], []).append(group)
 
     return _PatchIndex(
         linear_pairs={
@@ -421,6 +581,10 @@ def _build_patch_index(plan: MergePlan) -> _PatchIndex:
         additive_deltas={
             source_key: tuple(deltas)
             for source_key, deltas in additive_deltas.items()
+        },
+        lokr_groups={
+            source_key: tuple(groups)
+            for source_key, groups in lokr_groups.items()
         },
     )
 
@@ -433,21 +597,12 @@ def _merge_source_payload(
     prepared_adapters: Sequence[_PreparedAdapter],
     patch_indexes: Sequence[_PatchIndex],
 ) -> bytes:
-    contributions: list[torch.Tensor] = []
-
-    for prepared_adapter, patch_index in zip(
-        prepared_adapters,
-        patch_indexes,
+    if not any(
+        source_key in patch_index.linear_pairs
+        or source_key in patch_index.lokr_groups
+        or source_key in patch_index.additive_deltas
+        for patch_index in patch_indexes
     ):
-        contributions.extend(
-            _iter_adapter_contributions(
-                prepared_adapter,
-                patch_index,
-                source_key,
-            )
-        )
-
-    if not contributions:
         return source_payload
 
     source_tensor = tensor_from_raw_bytes(
@@ -458,7 +613,19 @@ def _merge_source_payload(
     )
     merged_tensor = merge_tensor_contributions(
         source_tensor,
-        contributions,
+        (
+            contribution
+            for prepared_adapter, patch_index in zip(
+                prepared_adapters,
+                patch_indexes,
+            )
+            for contribution in _iter_adapter_contributions(
+                prepared_adapter,
+                patch_index,
+                source_key,
+                target_shape=shape,
+            )
+        ),
     )
     return tensor_to_raw_bytes(merged_tensor)
 
@@ -499,6 +666,7 @@ def _iter_adapter_contributions(
     prepared_adapter: _PreparedAdapter,
     patch_index: _PatchIndex,
     source_key: str,
+    target_shape: Sequence[int],
 ) -> Iterator[torch.Tensor]:
     for pair in patch_index.linear_pairs.get(source_key, ()):
         down = prepared_adapter.tensors[pair["down_key"]]
@@ -521,6 +689,19 @@ def _iter_adapter_contributions(
             strength=prepared_adapter.strength,
             alpha=alpha,
         )
+
+    for group in patch_index.lokr_groups.get(source_key, ()):
+        delta = reconstruct_lokr_direct(
+            prepared_adapter.tensors[group["w1_key"]],
+            prepared_adapter.tensors[group["w2_key"]],
+            target_shape,
+        )
+        # AI Toolkit direct/direct LoKr stores both factors directly. In
+        # that representation the internal LoKr runtime scale is 1.0, so
+        # the stored alpha does not rescale the Kronecker-product delta.
+        delta.mul_(prepared_adapter.strength)
+        yield delta
+        del delta
 
     for delta in patch_index.additive_deltas.get(source_key, ()):
         yield calculate_additive_tensor_delta(
@@ -615,7 +796,11 @@ def _prepare_adapter(
         adapter_header,
     )
 
-    if not plan["linear_pairs"] and not plan["additive_deltas"]:
+    if not (
+        plan["linear_pairs"]
+        or plan["lokr_groups"]
+        or plan["additive_deltas"]
+    ):
         raise ValueError(
             f"Adapter {adapter_path} contains no supported patches."
         )

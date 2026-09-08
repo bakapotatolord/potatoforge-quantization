@@ -2,7 +2,12 @@ import unittest
 
 import torch
 
-from potatoforge.lora.lora_math import calculate_additive_tensor_delta, calculate_linear_lora_delta, merge_tensor_contributions
+from potatoforge.lora.lora_math import (
+    calculate_additive_tensor_delta,
+    calculate_linear_lora_delta,
+    merge_tensor_contributions,
+    reconstruct_lokr_direct,
+)
 
 
 def make_factors() -> tuple[torch.Tensor, torch.Tensor]:
@@ -83,6 +88,88 @@ class TestLinearLoraMath(unittest.TestCase):
         )
 
         torch.testing.assert_close(result, expected)
+
+
+class TestDirectLoKrMath(unittest.TestCase):
+    def test_reconstructs_in_direct_w1_w2_orientation(self) -> None:
+        w1 = torch.tensor(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+            ]
+        )
+        w2 = torch.tensor(
+            [
+                [5.0, 6.0],
+                [7.0, 8.0],
+            ]
+        )
+
+        result = reconstruct_lokr_direct(
+            w1,
+            w2,
+            target_shape=(4, 4),
+        )
+
+        expected = torch.tensor(
+            [
+                [5.0, 6.0, 10.0, 12.0],
+                [7.0, 8.0, 14.0, 16.0],
+                [15.0, 18.0, 20.0, 24.0],
+                [21.0, 24.0, 28.0, 32.0],
+            ]
+        )
+
+        torch.testing.assert_close(result, expected)
+
+    def test_applies_strength_after_reconstruction(self) -> None:
+        w1 = torch.ones((2, 2))
+        w2 = torch.ones((2, 2))
+
+        delta = reconstruct_lokr_direct(
+            w1,
+            w2,
+            target_shape=(4, 4),
+        )
+
+        merged = torch.zeros((4, 4)) + 0.5 * delta
+
+        torch.testing.assert_close(merged, torch.full((4, 4), 0.5))
+        torch.testing.assert_close(
+            torch.zeros((4, 4)) + 0.0 * delta,
+            torch.zeros((4, 4)),
+        )
+
+    def test_accepts_krea_like_factor_shapes(self) -> None:
+        delta = reconstruct_lokr_direct(
+            torch.ones((4, 4)),
+            torch.ones((3, 5)),
+            target_shape=(12, 20),
+        )
+
+        self.assertEqual(delta.shape, (12, 20))
+
+    def test_rejects_non_matrix_factors(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "only 2D lokr_w1/lokr_w2",
+        ):
+            reconstruct_lokr_direct(
+                torch.ones((2, 2, 1)),
+                torch.ones((2, 2)),
+                target_shape=(4, 4),
+            )
+
+    def test_rejects_shape_mismatch(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "w1=.*w2=.*produced=.*target",
+        ):
+            reconstruct_lokr_direct(
+                torch.ones((2, 2)),
+                torch.ones((2, 3)),
+                target_shape=(4, 5),
+            )
 
 
 class TestTensorContributionMerge(unittest.TestCase):
