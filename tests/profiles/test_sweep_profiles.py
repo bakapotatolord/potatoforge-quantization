@@ -20,6 +20,7 @@ class TestSweepProfiles(unittest.TestCase):
                 "profile_id": "kroma-sensitivity-v1",
                 "groups": [
                     {
+                        "id": "attention",
                         "action": "int8_convrot",
                         "layers": ["blocks.0.attn.wq.weight"],
                     },
@@ -33,10 +34,13 @@ class TestSweepProfiles(unittest.TestCase):
 
         self.assertEqual(profile["profile_id"], "kroma-sensitivity-v1")
         self.assertEqual(
-            [(group["action"], group["layers"]) for group in profile["groups"]],
             [
-                ("int8_convrot", ("blocks.0.attn.wq.weight",)),
-                ("int6_convrot", ("blocks.1.mlp.down.weight",)),
+                (group.get("id"), group["action"], group["layers"])
+                for group in profile["groups"]
+            ],
+            [
+                ("attention", "int8_convrot", ("blocks.0.attn.wq.weight",)),
+                (None, "int6_convrot", ("blocks.1.mlp.down.weight",)),
             ],
         )
 
@@ -92,6 +96,34 @@ class TestSweepProfiles(unittest.TestCase):
         )
         for document, error in cases:
             with self.subTest(error=error):
+                with self.assertRaisesRegex(ValueError, error):
+                    self._load(document)
+
+    def test_rejects_invalid_group_ids(self) -> None:
+        base = {
+            "format_version": 1,
+            "profile_id": "test",
+            "groups": [
+                {"id": "", "action": "int8", "layers": ["layer.weight"]}
+            ],
+        }
+        cases = (
+            ("", "non-empty string"),
+            ("patch.safetensors", "without an extension"),
+            ("nested/patch", "safe filename stem"),
+        )
+        for group_id, error in cases:
+            with self.subTest(group_id=group_id):
+                document = {
+                    **base,
+                    "groups": [
+                        {
+                            "id": group_id,
+                            "action": "int8",
+                            "layers": ["layer.weight"],
+                        }
+                    ],
+                }
                 with self.assertRaisesRegex(ValueError, error):
                     self._load(document)
 

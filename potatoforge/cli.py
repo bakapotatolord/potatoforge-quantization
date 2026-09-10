@@ -551,10 +551,10 @@ def patch_sweep(
     output_dir: Path = typer.Option(
         ...,
         "--output-dir",
-        help="Directory for independent quantization patches.",
+        help="Directory for group quantization patches.",
     ),
 ) -> None:
-    """Generate one independent quantization patch per selected layer."""
+    """Generate one quantization patch per profile group."""
     def action() -> None:
         result = generate_patch_sweep_from_profile(
             source_path,
@@ -570,7 +570,6 @@ def patch_sweep(
                 "output_dir": str(output_dir),
                 "generated_patch_count": result.generated_patch_count,
                 "failed_patch_count": 0,
-                "manifest_path": str(result.manifest_path),
                 "total_patch_bytes": result.total_patch_bytes,
                 "elapsed_seconds": round(result.elapsed_seconds, 3),
             }

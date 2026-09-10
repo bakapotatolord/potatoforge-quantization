@@ -89,7 +89,7 @@ environment) to see all available options.
 | `audit`          | Compare INT8, INT6, ConvRot INT8, ConvRot INT6, and W4A4 by size and reconstruction error. |
 | `optimize`       | Generate a profile from an audit report and target size; INT6 methods are opt-in.          |
 | `quantize`       | Convert a checkpoint with a profile, optionally merging LoRA adapters.                     |
-| `patch-sweep`    | Generate one independent quantization patch per explicitly selected layer.                  |
+| `patch-sweep`    | Generate one quantization patch per profile group.                                           |
 | `extract`        | Extract tensors matching a source prefix.                                                  |
 | `test`           | Run the standard-library test suite.                                                       |
 
@@ -161,9 +161,10 @@ header and quantization metadata.
 
 #### Generate a layer patch sweep
 
-Use an explicit sweep profile to generate one independent patch per layer. The
-source checkpoint is the only model input; a later runtime experiment can apply
-these patches to any compatible baseline.
+Use an explicit sweep profile to generate one quantization patch per group. All
+layers in a group use that group's action. The source checkpoint is the only
+model input; a later runtime experiment can apply these patches to any
+compatible baseline.
 
 Example `sweep.json`:
 
@@ -173,6 +174,7 @@ Example `sweep.json`:
   "profile_id": "kroma-int8cr-sensitivity-v1",
   "groups": [
     {
+      "id": "attention",
       "action": "int8_convrot",
       "layers": [
         "blocks.0.attn.wq.weight",
@@ -181,6 +183,14 @@ Example `sweep.json`:
     }
   ]
 }
+```
+
+The optional group `id` is used as the filename stem before the action. A group
+without an `id` uses its one-based profile index, producing names such as:
+
+```text
+attention-int8_convrot.safetensors
+group-2-int6_convrot.safetensors
 ```
 
 Run it with:
@@ -192,19 +202,20 @@ uv run potatoforge patch-sweep `
     --output-dir patches\int8cr
 ```
 
-The command writes one `.safetensors` patch per listed layer and a
-`sweep_manifest.json`. Files use deterministic names such as
-`blocks.0.attn.wq__int8_convrot.safetensors`; each file contains only that
-layer's quantized family and declares its own `quant_patch` metadata.
+The command writes one `.safetensors` patch per group. Each file contains the
+complete quantized family for every layer in that group and declares one V1
+`quant_patch` metadata record whose replacement list contains all of those
+logical layer families.
 
 This supports sensitivity experiments: create an aggressively quantized
-baseline, generate candidate layer patches once, apply them individually at
-runtime, then combine useful upgrades into a normal mixed-precision profile or
-another sweep profile.
+baseline, generate candidate group patches once, apply them at runtime, then
+combine useful upgrades into a normal mixed-precision profile or another sweep
+profile. Groups may overlap; when multiple patches replace the same layer, the
+later patch in the runtime stack wins.
 
 These patches are designed for use with the companion [ComfyUI-PotatoForge
 custom node](https://github.com/bakapotatolord/ComfyUI-PotatoForge). Generate
-the candidate files here, then use that node to apply individual patches to a
+the candidate files here, then use that node to apply group patches to a
 compatible baseline checkpoint in ComfyUI for sensitivity testing.
 
 #### Merge LoRA adapters and quantize in one run

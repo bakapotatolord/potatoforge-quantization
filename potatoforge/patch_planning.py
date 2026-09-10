@@ -14,6 +14,8 @@ from .planning import (
     TensorDescriptor,
     build_layout_from_specs,
     build_quantized_tensor_plan,
+    is_supported_weight_key,
+    logical_layer_name_for_weight,
     source_bytes,
 )
 from .profiles import QuantizationAction
@@ -105,9 +107,10 @@ def build_patch_plan(
         raise ValueError(
             f"Patch layer does not exist in source checkpoint: {tensor_name}"
         )
-    if not tensor_name.endswith(".weight"):
+    if not is_supported_weight_key(tensor_name):
         raise ValueError(
-            f"Patch layer must be a canonical .weight tensor: {tensor_name}"
+            f"Patch layer must be a canonical supported weight tensor: "
+            f"{tensor_name}"
         )
 
     descriptor = source_header[tensor_name]
@@ -124,7 +127,7 @@ def build_patch_plan(
 
     entry = PatchEntry(
         source_tensor_name=tensor_name,
-        logical_layer_name=tensor_name.removesuffix(".weight"),
+        logical_layer_name=logical_layer_name_for_weight(tensor_name),
         source_data_offsets=_validated_offsets(descriptor, tensor_name),
         source_dtype=_validated_dtype(descriptor, tensor_name),
         source_shape=_validated_shape(descriptor, tensor_name),

@@ -29,7 +29,7 @@ def sweep_profile(*groups: dict[str, object]) -> SweepProfile:
 
 
 class TestPatchSweep(unittest.TestCase):
-    def test_plans_deterministic_ids_filenames_and_physical_order(self) -> None:
+    def test_plans_group_filename_and_physical_layer_order(self) -> None:
         source_header: dict[str, TensorDescriptor] = {
             "layer/a.weight": {
                 "dtype": "BF16",
@@ -44,6 +44,7 @@ class TestPatchSweep(unittest.TestCase):
         }
         profile = sweep_profile(
             {
+                "id": "layers",
                 "action": "int8",
                 "layers": ["layer/a.weight", "layer_b.weight"],
             }
@@ -51,29 +52,28 @@ class TestPatchSweep(unittest.TestCase):
 
         plan = plan_patch_sweep(source_header, profile)
 
+        self.assertEqual(len(plan.entries), 1)
+        entry = plan.entries[0]
+        self.assertEqual(entry.group_id, "layers")
+        self.assertEqual(entry.filename, "layers-int8.safetensors")
+        self.assertEqual(entry.patch_id, "layers-int8")
         self.assertEqual(
-            [(entry.layer, entry.filename) for entry in plan.entries],
-            [
-                ("layer/a.weight", "layer_a__int8.safetensors"),
-                ("layer_b.weight", "layer_b__int8.safetensors"),
-            ],
+            entry.layers,
+            ("layer/a.weight", "layer_b.weight"),
         )
         self.assertEqual(
-            [entry.patch_id for entry in plan.entries],
-            [
-                "sweep-v1__layer/a__int8",
-                "sweep-v1__layer_b__int8",
-            ],
+            [item.source_tensor_name for item in entry.plan.entries],
+            ["layer_b.weight", "layer/a.weight"],
         )
 
-    def test_rejects_sanitized_filename_collision(self) -> None:
+    def test_rejects_case_insensitive_group_filename_collision(self) -> None:
         source_header: dict[str, TensorDescriptor] = {
-            "layer/a.weight": {
+            "A.weight": {
                 "dtype": "BF16",
                 "shape": [1, 4],
                 "data_offsets": [0, 8],
             },
-            "layer_a.weight": {
+            "B.weight": {
                 "dtype": "BF16",
                 "shape": [1, 4],
                 "data_offsets": [8, 16],
@@ -84,13 +84,53 @@ class TestPatchSweep(unittest.TestCase):
                 source_header,
                 sweep_profile(
                     {
+                        "id": "shared",
                         "action": "int8",
-                        "layers": ["layer/a.weight", "layer_a.weight"],
+                        "layers": ["A.weight"],
+                    },
+                    {
+                        "id": "SHARED",
+                        "action": "int8",
+                        "layers": ["B.weight"],
                     }
                 ),
             )
 
-    def test_generates_one_standalone_patch_per_layer_and_manifest(self) -> None:
+    def test_rejects_duplicate_layer_within_one_group(self) -> None:
+        source_header: dict[str, TensorDescriptor] = {
+            "A.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [0, 8],
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "more than once"):
+            plan_patch_sweep(
+                source_header,
+                sweep_profile(
+                    {
+                        "id": "duplicate",
+                        "action": "int8",
+                        "layers": ["A.weight", "A.weight"],
+                    }
+                ),
+            )
+
+    def test_rejects_empty_group_at_planning_boundary(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one source layer"):
+            plan_patch_sweep(
+                {},
+                sweep_profile(
+                    {
+                        "id": "empty",
+                        "action": "int8",
+                        "layers": [],
+                    }
+                ),
+            )
+
+    def test_generates_one_patch_per_group_without_a_sweep_manifest(self) -> None:
         tensors = {
             "A.weight": torch.tensor([[1.0, -2.0, 0.5, 0.25]], dtype=torch.bfloat16),
             "B.weight": torch.arange(256, dtype=torch.float32).reshape(1, 256).to(torch.bfloat16),
@@ -128,26 +168,21 @@ class TestPatchSweep(unittest.TestCase):
                 ],
             )
             self.assertEqual(cli_result.exit_code, 0, cli_result.output)
-            manifest = json.loads(
-                (output_dir / "sweep_manifest.json").read_text(encoding="utf-8")
-            )
             self.assertIn("generated_patch_count: 2", cli_result.output)
-            self.assertEqual(
-                [patch["layer"] for patch in manifest["patches"]],
-                ["A.weight", "B.weight"],
-            )
-            self.assertEqual(manifest["profile_id"], "precision-v1")
-            self.assertEqual(manifest["source"], "source.safetensors")
-            for entry in manifest["patches"]:
-                patch_path = output_dir / entry["file"]
+            self.assertFalse((output_dir / "sweep_manifest.json").exists())
+            for filename, family in (
+                ("group-1-int8.safetensors", "A"),
+                ("group-2-int6_convrot.safetensors", "B"),
+            ):
+                patch_path = output_dir / filename
                 header = read_source_model_header(patch_path)
                 tensors = load_file(str(patch_path))
                 self.assertEqual(
                     list(header.tensors),
                     [
-                        entry["family"] + ".weight",
-                        entry["family"] + ".weight_scale",
-                        entry["family"] + ".comfy_quant",
+                        family + ".weight",
+                        family + ".weight_scale",
+                        family + ".comfy_quant",
                     ],
                 )
                 self.assertEqual(set(tensors), set(header.tensors))
@@ -156,8 +191,12 @@ class TestPatchSweep(unittest.TestCase):
                     "quant_patch",
                 )
                 self.assertEqual(
+                    header.metadata["potatoforge_patch_format"],
+                    "1",
+                )
+                self.assertEqual(
                     json.loads(header.metadata["potatoforge_patch_replaces"]),
-                    [entry["family"]],
+                    [family],
                 )
 
     def test_generates_a_standard_w4a4_patch_for_mse_scale_action(self) -> None:
@@ -190,14 +229,68 @@ class TestPatchSweep(unittest.TestCase):
                 profile,
                 output_dir,
             )
-            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
             patch_tensors = load_file(
-                str(output_dir / "B__convrot_w4a4_mse.safetensors")
+                str(output_dir / "group-1-convrot_w4a4_mse.safetensors")
             )
 
-        self.assertEqual(manifest["patches"][0]["action"], "convrot_w4a4_mse")
+        self.assertEqual(result.generated_patch_count, 1)
         marker = bytes(patch_tensors["B.comfy_quant"].tolist()).decode("utf-8")
         self.assertEqual(json.loads(marker), CONVROT_W4A4_MARKER)
+
+    def test_generates_one_explicitly_named_multi_layer_patch(self) -> None:
+        tensors = {
+            "A.weight": torch.tensor([[1.0, -2.0, 0.5, 0.25]], dtype=torch.bfloat16),
+            "B.weight": torch.tensor([[2.0, -1.0, 0.25, 0.5]], dtype=torch.bfloat16),
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.safetensors"
+            profile = root / "sweep.json"
+            output_dir = root / "patches"
+            save_file(tensors, str(source))
+            profile.write_text(
+                json.dumps(
+                    {
+                        "format_version": 1,
+                        "profile_id": "grouped-v1",
+                        "groups": [
+                            {
+                                "id": "shared",
+                                "action": "int8",
+                                "layers": ["A.weight", "B.weight"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = generate_patch_sweep_from_profile(source, profile, output_dir)
+
+            patch_path = output_dir / "shared-int8.safetensors"
+            self.assertTrue(patch_path.exists())
+            self.assertFalse((output_dir / "sweep_manifest.json").exists())
+            self.assertEqual(result.generated_patch_count, 1)
+            header = read_source_model_header(patch_path)
+            self.assertEqual(
+                set(header.tensors),
+                {
+                    "A.weight",
+                    "A.weight_scale",
+                    "A.comfy_quant",
+                    "B.weight",
+                    "B.weight_scale",
+                    "B.comfy_quant",
+                },
+            )
+            self.assertEqual(
+                header.metadata["potatoforge_patch_id"],
+                "shared-int8",
+            )
+            self.assertEqual(
+                json.loads(header.metadata["potatoforge_patch_replaces"]),
+                ["A", "B"],
+            )
 
     def test_reads_only_selected_source_layers_and_preflights_invalid_profile(self) -> None:
         tensors = {
@@ -254,7 +347,7 @@ class TestPatchSweep(unittest.TestCase):
                 )
             self.assertFalse((root / "invalid-patches").exists())
 
-    def test_preserves_completed_patches_when_a_later_layer_fails(self) -> None:
+    def test_preserves_completed_groups_when_a_later_group_fails(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.safetensors"
@@ -272,8 +365,14 @@ class TestPatchSweep(unittest.TestCase):
             )
             profile = sweep_profile(
                 {
+                    "id": "first",
                     "action": "int8",
-                    "layers": ["A.weight", "B.weight"],
+                    "layers": ["A.weight"],
+                },
+                {
+                    "id": "second",
+                    "action": "int8",
+                    "layers": ["B.weight"],
                 }
             )
 
@@ -295,63 +394,46 @@ class TestPatchSweep(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "B.weight"):
                     generate_patch_sweep(source, output_dir, profile)
 
-            self.assertTrue((output_dir / "A__int8.safetensors").exists())
-            self.assertFalse((output_dir / "B__int8.safetensors").exists())
+            self.assertTrue((output_dir / "first-int8.safetensors").exists())
+            self.assertFalse((output_dir / "second-int8.safetensors").exists())
             self.assertFalse((output_dir / "sweep_manifest.json").exists())
 
-    def test_processes_source_ranges_by_offset_but_keeps_manifest_profile_order(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.safetensors"
-            output_dir = root / "patches"
-            save_file(
+    def test_allows_overlapping_layers_in_distinct_groups(self) -> None:
+        source_header: dict[str, TensorDescriptor] = {
+            "A.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [0, 8],
+            },
+            "B.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [8, 16],
+            },
+        }
+
+        plan = plan_patch_sweep(
+            source_header,
+            sweep_profile(
                 {
-                    "Z.weight": torch.tensor(
-                        [[1.0, 2.0, 3.0, 4.0]], dtype=torch.bfloat16
-                    ),
-                    "A.weight": torch.tensor(
-                        [[4.0, 3.0, 2.0, 1.0]], dtype=torch.bfloat16
-                    ),
+                    "id": "wide",
+                    "action": "int8",
+                    "layers": ["A.weight", "B.weight"],
                 },
-                str(source),
-            )
-            source_header = read_source_model_header(source)
-            physical_order = [
-                name
-                for name, _ in sorted(
-                    source_header.tensors.items(),
-                    key=lambda item: item[1]["data_offsets"][0],
-                )
-            ]
-            profile = sweep_profile(
-                {"action": "int8", "layers": list(reversed(physical_order))}
-            )
-            calls: list[str] = []
+                {
+                    "id": "wide",
+                    "action": "int6_rowwise",
+                    "layers": ["B.weight"],
+                },
+            ),
+        )
 
-            def fake_generate(
-                _source: Path,
-                output_path: Path,
-                plan: PatchPlan,
-                **_kwargs: object,
-            ) -> None:
-                layer = plan.entries[0].source_tensor_name
-                calls.append(layer)
-                output_path.write_bytes(b"patch")
-
-            with patch(
-                "potatoforge.patch_sweep.execute_patch_plan",
-                side_effect=fake_generate,
-            ):
-                result = generate_patch_sweep(source, output_dir, profile)
-
-            manifest = json.loads(
-                result.manifest_path.read_text(encoding="utf-8")
-            )
-
-        self.assertEqual(calls, physical_order)
         self.assertEqual(
-            [entry["layer"] for entry in manifest["patches"]],
-            list(reversed(physical_order)),
+            [(entry.filename, entry.layers) for entry in plan.entries],
+            [
+                ("wide-int8.safetensors", ("A.weight", "B.weight")),
+                ("wide-int6_rowwise.safetensors", ("B.weight",)),
+            ],
         )
 
 

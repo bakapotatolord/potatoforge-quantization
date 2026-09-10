@@ -1,5 +1,6 @@
+import re
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from .profile_documents import (
     load_json_object,
@@ -11,6 +12,7 @@ from .profiles import QuantizationAction, validate_quantization_action
 
 
 class SweepGroup(TypedDict):
+    id: NotRequired[str]
     action: QuantizationAction
     layers: tuple[str, ...]
 
@@ -18,6 +20,19 @@ class SweepGroup(TypedDict):
 class SweepProfile(TypedDict):
     profile_id: str
     groups: tuple[SweepGroup, ...]
+
+
+def validate_sweep_group_id(value: object, label: str) -> str:
+    group_id = require_nonempty_string(value, label)
+    if (
+        group_id in (".", "..")
+        or group_id.casefold().endswith(".safetensors")
+        or re.fullmatch(r"[A-Za-z0-9._-]+", group_id) is None
+    ):
+        raise ValueError(
+            f"{label} must be a safe filename stem without an extension"
+        )
+    return group_id
 
 
 def load_sweep_profile(profile_path: str | Path) -> SweepProfile:
@@ -45,17 +60,25 @@ def load_sweep_profile(profile_path: str | Path) -> SweepProfile:
         if not isinstance(raw_group, dict):
             raise ValueError(f"{label} must be an object")
         required_group_fields = {"action", "layers"}
+        allowed_group_fields = {"action", "layers", "id"}
         missing_group_fields = required_group_fields - set(raw_group)
         if missing_group_fields:
             raise ValueError(
                 f"{label} is missing fields: "
                 + ", ".join(sorted(missing_group_fields))
             )
-        unknown_group_fields = set(raw_group) - required_group_fields
+        unknown_group_fields = set(raw_group) - allowed_group_fields
         if unknown_group_fields:
             raise ValueError(
                 f"{label} contains unknown fields: "
                 + ", ".join(sorted(unknown_group_fields))
+            )
+
+        group_id = None
+        if "id" in raw_group:
+            group_id = validate_sweep_group_id(
+                raw_group["id"],
+                f"{label} id",
             )
 
         action = validate_quantization_action(
@@ -74,11 +97,12 @@ def load_sweep_profile(profile_path: str | Path) -> SweepProfile:
                 f"{label} layers must contain non-empty strings"
             )
 
-        groups.append(
-            {
-                "action": action,
-                "layers": tuple(raw_layers),
-            }
-        )
+        group: SweepGroup = {
+            "action": action,
+            "layers": tuple(raw_layers),
+        }
+        if group_id is not None:
+            group["id"] = group_id
+        groups.append(group)
 
     return {"profile_id": profile_id, "groups": tuple(groups)}

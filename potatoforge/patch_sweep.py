@@ -1,5 +1,3 @@
-import json
-import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from time import perf_counter
@@ -8,21 +6,29 @@ from typing import NamedTuple, TypeAlias
 from .headers.source_header import read_source_model_header
 from .patch_planning import PatchPlan, build_patch_plan, build_patch_metadata
 from .patching import execute_patch_plan
-from .planning import TensorDescriptor
+from .planning import (
+    TensorDescriptor,
+    build_layout_from_specs,
+)
 from .profiles import QuantizationAction
-from .sweep_profiles import SweepProfile, load_sweep_profile
+from .sweep_profiles import (
+    SweepGroup,
+    SweepProfile,
+    load_sweep_profile,
+    validate_sweep_group_id,
+)
 
 
 SweepProgressReporter: TypeAlias = Callable[[str], None]
 
 
 class SweepEntry(NamedTuple):
-    layer: str
-    family: str
+    group_index: int
+    group_id: str
     action: QuantizationAction
+    layers: tuple[str, ...]
     patch_id: str
     filename: str
-    source_data_offsets: tuple[int, int]
     plan: PatchPlan
 
 
@@ -34,14 +40,56 @@ class SweepPlan(NamedTuple):
 class SweepResult(NamedTuple):
     plan: SweepPlan
     output_dir: Path
-    manifest_path: Path
     generated_patch_count: int
     total_patch_bytes: int
     elapsed_seconds: float
 
 
-def _safe_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+def _build_group_plan(
+    source_header: Mapping[str, TensorDescriptor],
+    group: SweepGroup,
+    patch_id: str,
+) -> PatchPlan:
+    layers = tuple(group["layers"])
+    if not layers:
+        raise ValueError("Sweep group must select at least one source layer.")
+    if len(set(layers)) != len(layers):
+        raise ValueError("Sweep group lists a layer more than once.")
+
+    layer_plans = [
+        build_patch_plan(
+            source_header,
+            layer,
+            group["action"],
+            patch_id,
+        )
+        for layer in layers
+    ]
+    entries = tuple(
+        entry
+        for plan in sorted(
+            layer_plans,
+            key=lambda plan: plan.entries[0].source_data_offsets[0],
+        )
+        for entry in plan.entries
+    )
+    return PatchPlan(
+        patch_id=patch_id,
+        entries=entries,
+        layout=build_layout_from_specs(
+            spec
+            for entry in entries
+            for spec in entry.output_tensors
+        ),
+        selected_tensor_count=len(entries),
+        generated_tensor_count=sum(
+            len(entry.output_tensors) for entry in entries
+        ),
+        source_bytes_to_read=sum(
+            entry.source_input_bytes for entry in entries
+        ),
+        replacement_bytes=sum(entry.estimated_bytes for entry in entries),
+    )
 
 
 def plan_patch_sweep(
@@ -49,84 +97,44 @@ def plan_patch_sweep(
     sweep_profile: SweepProfile,
 ) -> SweepPlan:
     entries: list[SweepEntry] = []
-    selected_layers: set[str] = set()
     filenames: set[str] = set()
 
-    for group in sweep_profile["groups"]:
+    for group_index, group in enumerate(sweep_profile["groups"], start=1):
         action = group["action"]
-        for layer in group["layers"]:
-            if layer in selected_layers:
-                raise ValueError(
-                    f"Sweep layer {layer} is listed more than once."
-                )
-            selected_layers.add(layer)
-            family = layer.removesuffix(".weight")
-            patch_id = (
-                f"{sweep_profile['profile_id']}__{family}__{action}"
+        raw_group_id = group.get("id")
+        group_id = (
+            f"group-{group_index}"
+            if raw_group_id is None
+            else validate_sweep_group_id(
+                raw_group_id,
+                f"Sweep group {group_index} id",
             )
-            filename = f"{_safe_filename(family)}__{action}.safetensors"
-            filename_key = filename.casefold()
-            if filename_key in filenames:
-                raise ValueError(
-                    f"Sweep layers produce duplicate output filename: {filename}"
-                )
-            filenames.add(filename_key)
+        )
+        patch_id = f"{group_id}-{action}"
+        filename = f"{patch_id}.safetensors"
+        filename_key = filename.casefold()
+        if filename_key in filenames:
+            raise ValueError(
+                f"Sweep groups produce duplicate output filename: {filename}"
+            )
+        filenames.add(filename_key)
 
-            plan = build_patch_plan(
-                source_header,
-                layer,
-                action,
-                patch_id,
+        plan = _build_group_plan(source_header, group, patch_id)
+        entries.append(
+            SweepEntry(
+                group_index=group_index,
+                group_id=group_id,
+                action=action,
+                layers=tuple(group["layers"]),
+                patch_id=patch_id,
+                filename=filename,
+                plan=plan,
             )
-            entries.append(
-                SweepEntry(
-                    layer=layer,
-                    family=family,
-                    action=action,
-                    patch_id=patch_id,
-                    filename=filename,
-                    source_data_offsets=plan.entries[0].source_data_offsets,
-                    plan=plan,
-                )
-            )
+        )
 
     if not entries:
         raise ValueError("Sweep profile selected no source layers.")
     return SweepPlan(sweep_profile["profile_id"], tuple(entries))
-
-
-def _write_manifest(
-    path: Path,
-    plan: SweepPlan,
-    source_path: Path,
-) -> None:
-    partial = path.with_name(f"{path.name}.partial")
-    try:
-        with partial.open("x", encoding="utf-8") as file:
-            json.dump(
-                {
-                    "format_version": 1,
-                    "profile_id": plan.profile_id,
-                    "source": source_path.name,
-                    "patches": [
-                        {
-                            "layer": entry.layer,
-                            "family": entry.family,
-                            "action": entry.action,
-                            "file": entry.filename,
-                        }
-                        for entry in plan.entries
-                    ],
-                },
-                file,
-                indent=2,
-            )
-            file.write("\n")
-        partial.rename(path)
-    except BaseException:
-        if partial.exists():
-            partial.unlink()
-        raise
 
 
 def generate_patch_sweep(
@@ -145,15 +153,7 @@ def generate_patch_sweep(
 
     source_header = read_source_model_header(source)
     plan = plan_patch_sweep(source_header.tensors, sweep_profile)
-    manifest = output / "sweep_manifest.json"
     source_resolved = source.resolve()
-    if manifest.resolve() == source_resolved:
-        raise ValueError("Sweep manifest path cannot be the source checkpoint.")
-    if manifest.exists():
-        raise FileExistsError(f"Refusing to overwrite existing manifest: {manifest}")
-    manifest_partial = manifest.with_name(f"{manifest.name}.partial")
-    if manifest_partial.exists():
-        raise FileExistsError(f"Partial manifest already exists: {manifest_partial}")
     for entry in plan.entries:
         target = output / entry.filename
         if target.resolve() == source_resolved:
@@ -169,15 +169,12 @@ def generate_patch_sweep(
     output.mkdir(parents=True, exist_ok=True)
     started = perf_counter()
     generated_bytes = 0
-    processing_entries = sorted(
-        plan.entries,
-        key=lambda entry: entry.source_data_offsets[0],
-    )
-    for index, entry in enumerate(processing_entries, start=1):
+    for index, entry in enumerate(plan.entries, start=1):
         if on_progress is not None:
             on_progress(
-                f"[{index}/{len(processing_entries)}] "
-                f"{entry.layer} -> {entry.action}"
+                f"[{index}/{len(plan.entries)}] "
+                f"{entry.group_id} ({len(entry.layers)} layers) -> "
+                f"{entry.action}"
             )
         try:
             execute_patch_plan(
@@ -191,15 +188,14 @@ def generate_patch_sweep(
             )
         except Exception as error:
             raise ValueError(
-                f"Failed to generate patch for {entry.layer}: {error}"
+                f"Failed to generate patch for group {entry.group_id} "
+                f"({', '.join(entry.layers)}): {error}"
             ) from error
         generated_bytes += (output / entry.filename).stat().st_size
 
-    _write_manifest(manifest, plan, source)
     return SweepResult(
         plan=plan,
         output_dir=output,
-        manifest_path=manifest,
         generated_patch_count=len(plan.entries),
         total_patch_bytes=generated_bytes,
         elapsed_seconds=perf_counter() - started,

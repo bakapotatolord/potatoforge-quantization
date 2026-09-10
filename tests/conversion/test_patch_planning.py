@@ -50,6 +50,33 @@ class TestPatchPlanning(unittest.TestCase):
         self.assertEqual(plan.generated_tensor_count, 3)
         self.assertEqual(plan.source_bytes_to_read, 8)
 
+    def test_plans_a_fused_qkv_family(self) -> None:
+        source_header = {
+            **self.source_header,
+            "C.attn.in_proj_weight": {
+                "dtype": "BF16",
+                "shape": [3, 256],
+                "data_offsets": [28, 28 + 3 * 256 * 2],
+            },
+        }
+
+        plan = build_patch_plan(
+            source_header,
+            "C.attn.in_proj_weight",
+            "int8_convrot",
+            "fused-qkv",
+        )
+
+        self.assertEqual(plan.entries[0].logical_layer_name, "C.attn.in_proj")
+        self.assertEqual(
+            [tensor.spec.name for tensor in plan.layout.tensors],
+            [
+                "C.attn.in_proj_weight",
+                "C.attn.in_proj.weight_scale",
+                "C.attn.in_proj.comfy_quant",
+            ],
+        )
+
     def test_reuses_normal_format_planner(self) -> None:
         plan = build_patch_plan(
             self.source_header,
