@@ -32,7 +32,12 @@ from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
 from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
 from .patch_sweep import generate_patch_sweep_from_profile
-from .planning import IOMode
+from .planning import (
+    IOMode,
+    QUANTIZATION_LAYERS_METADATA_KEY,
+    QUANTIZATION_METADATA_KEY,
+    parse_quantization_layers,
+)
 from .config import load_optimize_config, load_quantize_config
 
 
@@ -81,6 +86,48 @@ def _write_json(path: Path, document: object, overwrite: bool) -> None:
         output_file.write("\n")
 
 
+def _parse_quantization_metadata(
+    metadata: object,
+) -> tuple[str, dict[str, str]]:
+    if not isinstance(metadata, dict):
+        return "unavailable", {}
+
+    summary = metadata.get(QUANTIZATION_METADATA_KEY)
+    if not isinstance(summary, str):
+        summary = "unavailable"
+
+    raw_layers = metadata.get(QUANTIZATION_LAYERS_METADATA_KEY)
+    if raw_layers is None:
+        return summary, {}
+    if not isinstance(raw_layers, str):
+        return "invalid", {}
+
+    try:
+        layers = parse_quantization_layers(raw_layers)
+    except ValueError:
+        return "invalid", {}
+
+    return summary, layers
+
+
+def _print_quantization(
+    summary: str,
+    layers: dict[str, str],
+) -> None:
+    typer.echo(f"quantization: {summary}")
+    typer.echo(f"quantized_layer_count: {len(layers)}")
+    if not layers:
+        return
+
+    typer.echo("formats:")
+    for action, count in sorted(Counter(layers.values()).items()):
+        label = "layer" if count == 1 else "layers"
+        typer.echo(f"  {action}: {count} {label}")
+
+    typer.echo("layers:")
+    for name, action in layers.items():
+        typer.echo(f"  {name}: {action}")
+
 def _gib_to_bytes(value: float) -> int:
     if not math.isfinite(value) or value <= 0:
         raise typer.BadParameter("must be a finite positive number")
@@ -126,6 +173,11 @@ def inspect_header(
     model_path: Path = typer.Argument(..., help="Source safetensors checkpoint."),
     output: Path | None = typer.Option(None, help="Optional JSON report path."),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
+    show_quantization: bool = typer.Option(
+        False,
+        "--quantization",
+        help="Show per-layer quantization metadata.",
+    ),
 ) -> None:
     """Inspect a safetensors header without reading tensor payloads."""
     def action() -> None:
@@ -141,10 +193,17 @@ def inspect_header(
             for descriptor in tensors.values()
         )
         prefix_counts = Counter(name.split(".", 1)[0] for name in tensors)
+        quantization_summary, quantization_layers = (
+            _parse_quantization_metadata(metadata)
+        )
         report = {
             "source_path": str(model_path),
             "metadata": metadata,
             "model_info": tensors,
+            "quantization": {
+                "summary": quantization_summary,
+                "layers": quantization_layers,
+            },
             "summary": {
                 "metadata_count": len(metadata) if isinstance(metadata, dict) else 0,
                 "tensor_count": len(tensors),
@@ -154,7 +213,13 @@ def inspect_header(
         }
         if output is not None:
             _write_json(output, report, overwrite)
-        _finish(report["summary"])
+        if show_quantization:
+            _print_quantization(
+                quantization_summary,
+                quantization_layers,
+            )
+        else:
+            _finish(report["summary"])
 
     _run("inspect-header", action)
 

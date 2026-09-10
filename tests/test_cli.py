@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -38,6 +39,91 @@ class TestCli(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "0.1.0")
+
+    def test_inspect_header_displays_quantization_metadata(self) -> None:
+        header = {
+            "__metadata__": {
+                "potatoforge.quantization": "mixed",
+                "potatoforge.quantization_layers": json.dumps(
+                    {
+                        "blocks.1.mlp.weight": "int6_rowwise",
+                        "blocks.0.attn.wq.weight": "int8",
+                    }
+                ),
+            },
+            "blocks.0.attn.wq.weight": {
+                "dtype": "I8",
+                "shape": [1, 4],
+                "data_offsets": [0, 4],
+            },
+        }
+
+        with patch(
+            "potatoforge.cli.read_header_from_safetensors",
+            return_value=header,
+        ):
+            result = self.runner.invoke(
+                app,
+                [
+                    "inspect-header",
+                    "model.safetensors",
+                    "--quantization",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.stdout)
+        self.assertIn("quantization: mixed", result.stdout)
+        self.assertIn("int8: 1 layer", result.stdout)
+        self.assertIn("int6_rowwise: 1 layer", result.stdout)
+        self.assertIn(
+            "blocks.0.attn.wq.weight: int8",
+            result.stdout,
+        )
+        self.assertIn(
+            "blocks.1.mlp.weight: int6_rowwise",
+            result.stdout,
+        )
+
+    def test_inspect_header_reports_fused_qkv_as_one_quantized_layer(self) -> None:
+        header = {
+            "__metadata__": {
+                "potatoforge.quantization": "int8_convrot",
+                "potatoforge.quantization_layers": json.dumps(
+                    {"foo.attn.in_proj_weight": "int8_convrot"}
+                ),
+            },
+            "foo.attn.in_proj_weight": {
+                "dtype": "I8",
+                "shape": [3, 256],
+                "data_offsets": [0, 768],
+            },
+            "foo.attn.in_proj.weight_scale": {
+                "dtype": "F32",
+                "shape": [3, 1],
+                "data_offsets": [768, 780],
+            },
+            "foo.attn.in_proj.comfy_quant": {
+                "dtype": "U8",
+                "shape": [64],
+                "data_offsets": [780, 844],
+            },
+        }
+
+        with patch(
+            "potatoforge.cli.read_header_from_safetensors",
+            return_value=header,
+        ):
+            result = self.runner.invoke(
+                app,
+                ["inspect-header", "model.safetensors", "--quantization"],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.stdout)
+        self.assertIn("quantized_layer_count: 1", result.stdout)
+        self.assertIn("foo.attn.in_proj_weight: int8_convrot", result.stdout)
+        self.assertNotIn("q_proj", result.stdout)
+        self.assertNotIn("k_proj", result.stdout)
+        self.assertNotIn("v_proj", result.stdout)
 
     def test_optimize_config_applies_a_typed_target_override(self) -> None:
         config = OptimizeConfig(

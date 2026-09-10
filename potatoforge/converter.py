@@ -123,7 +123,10 @@ def convert_model(
         partial,
         layout,
         payloads,
-        metadata=model.metadata or None,
+        metadata={
+            **model.metadata,
+            **build_quantization_metadata(plan_entries),
+        },
     )
 
     partial.rename(output)

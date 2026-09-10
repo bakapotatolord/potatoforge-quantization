@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Final, NamedTuple, cast
 
 from ..headers.source_header import SourceModelHeader, read_source_model_header
-from ..planning import build_output_layout, build_plan
+from ..planning import (
+    build_output_layout,
+    build_plan,
+    build_quantization_metadata,
+)
 from ..profiles import (
     ProfileRule,
     QuantizationAction,
@@ -104,8 +108,15 @@ def estimate_profile_bytes(
     profile: QuantizationProfile,
 ) -> int:
     """Return the exact output-file size the streaming converter will write."""
-    layout = build_output_layout(build_plan(source_header.tensors, profile))
-    header = encode_safetensors_header(layout, source_header.metadata or None)
+    plan_entries = build_plan(source_header.tensors, profile)
+    layout = build_output_layout(plan_entries)
+    header = encode_safetensors_header(
+        layout,
+        {
+            **source_header.metadata,
+            **build_quantization_metadata(plan_entries),
+        },
+    )
     return 8 + len(header) + layout.raw_data_bytes
 
 

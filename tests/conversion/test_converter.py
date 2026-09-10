@@ -264,7 +264,53 @@ class TestConverter(unittest.TestCase):
 
             output_header = read_header_from_safetensors(target_path)
 
-        self.assertEqual(output_header["__metadata__"], metadata)
+        output_metadata = output_header["__metadata__"]
+        self.assertEqual(output_metadata["creator"], metadata["creator"])
+        self.assertEqual(output_metadata["source"], metadata["source"])
+        self.assertEqual(
+            output_metadata["potatoforge.quantization"],
+            "int8",
+        )
+
+    def test_converter_writes_per_layer_quantization_metadata(self) -> None:
+        weights = torch.tensor(
+            [[1.0, 0.25, -1.0]],
+            dtype=torch.bfloat16,
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.safetensors"
+            target_path = root / "target.safetensors"
+            profile_path = self._write_int8_profile(directory)
+
+            save_file(
+                {
+                    "model.diffusion_model.blocks.1.attn.wq.weight": weights,
+                    "model.diffusion_model.blocks.1.attn.wq.bias": weights[0].clone(),
+                },
+                str(source_path),
+            )
+
+            convert_model_from_profile(
+                source_path,
+                target_path,
+                profile_path,
+            )
+
+            output_header = read_header_from_safetensors(target_path)
+
+        output_metadata = output_header["__metadata__"]
+        self.assertEqual(
+            output_metadata["potatoforge.quantization"],
+            "int8",
+        )
+        self.assertEqual(
+            json.loads(output_metadata["potatoforge.quantization_layers"]),
+            {
+                "model.diffusion_model.blocks.1.attn.wq.weight": "int8",
+            },
+        )
 
     def test_converter(self) -> None:
         with TemporaryDirectory() as directory:

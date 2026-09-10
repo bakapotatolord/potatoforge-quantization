@@ -103,6 +103,15 @@ The usual profile workflow is `audit` → `optimize` → `quantize`.
 uv run potatoforge inspect-header path\to\model.safetensors
 ```
 
+Show the quantization summary and each quantized layer:
+
+```powershell
+uv run potatoforge inspect-header path\to\quantized.safetensors --quantization
+```
+
+Normal quantized outputs record the summary in `__metadata__` and store a JSON
+layer map in `potatoforge.quantization_layers`.
+
 #### Inspect a LoRA adapter
 
 Inspect a LoRA adapter without loading tensor payloads:
