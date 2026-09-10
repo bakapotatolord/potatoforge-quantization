@@ -304,7 +304,7 @@ commands use direct arguments and do not have config files.
 
 #### Audit reconstruction and storage
 
-Compare every BF16 or F16 2-D `.weight` tensor against all supported formats
+Compare every BF16, F16, or F32 2-D `.weight` tensor against all supported formats,
 without a profile. The command prints a storage/error table and writes the
 same data as JSON:
 

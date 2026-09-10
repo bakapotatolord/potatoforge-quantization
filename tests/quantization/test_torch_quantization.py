@@ -62,14 +62,32 @@ class TestTorchInt8Tensorwise(unittest.TestCase):
             ],
         )
 
-    def test_rejects_non_bfloat16_weights(self) -> None:
+    def test_quantizes_float32_rows(self) -> None:
         weights = torch.tensor(
-            [[1.0]],
+            [
+                [1.0, 0.25, -1.0],
+                [0.01, -0.02, 0.02],
+            ],
             dtype=torch.float32,
         )
 
+        result = quantize_int8_tensorwise(weights)
+
+        self.assertEqual(result.codes.dtype, torch.int8)
+        self.assertEqual(result.scales.dtype, torch.float32)
+        self.assertEqual(
+            result.codes.tolist(),
+            [
+                [127, 32, -127],
+                [63, -127, 127],
+            ],
+        )
+
+    def test_rejects_integer_weights(self) -> None:
         with self.assertRaises(ValueError):
-            quantize_int8_tensorwise(weights)
+            quantize_int8_tensorwise(
+                torch.tensor([[1]], dtype=torch.int8)
+            )
 
     def test_rejects_non_matrix_weights(self) -> None:
         weights = torch.tensor(
@@ -129,6 +147,26 @@ class TestTorchInt8Tensorwise(unittest.TestCase):
         weights = torch.zeros(
             (1, 256),
             dtype=torch.float16,
+        )
+        weights[0, 0] = 70.0
+
+        result = quantize_int8_convrot(weights)
+
+        self.assertEqual(result.codes.dtype, torch.int8)
+        self.assertEqual(result.scales.dtype, torch.float32)
+        self.assertAlmostEqual(
+            result.scales[0, 0].item(),
+            4.375 / 127,
+        )
+        self.assertEqual(
+            result.codes[0, :4].tolist(),
+            [127, 127, 127, -127],
+        )
+
+    def test_quantizes_float32_convrot_int8_weights(self) -> None:
+        weights = torch.zeros(
+            (1, 256),
+            dtype=torch.float32,
         )
         weights[0, 0] = 70.0
 

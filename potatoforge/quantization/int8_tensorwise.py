@@ -69,9 +69,13 @@ def quantize_int8_rows(
 
 
 def _validate_int8_tensorwise_weights(weights: torch.Tensor) -> None:
-    if weights.dtype not in (torch.bfloat16, torch.float16):
+    if weights.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+        torch.float32,
+    ):
         raise ValueError(
-            "INT8 tensorwise expects BF16 or F16 weights, "
+            "INT8 tensorwise expects BF16, F16, or F32 weights, "
             f"got {weights.dtype}."
         )
 
@@ -105,7 +109,7 @@ def quantize_int8_convrot(weights: torch.Tensor) -> Int8TensorwiseResult:
         group_size=CONVROT_GROUP_SIZE,
         output_dtype=(
             torch.float32
-            if weights.dtype == torch.float16
+            if weights.dtype in (torch.float16, torch.float32)
             else torch.bfloat16
         ),
     )
