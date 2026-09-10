@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "profile_id": "sdxl_diffusion_only_int8_convrot",
+  "description": "SDXL checkpoint profile: quantize eligible diffusion-model weights under model.diffusion_model.* to INT8 ConvRot. Keep conditioner and VAE tensors unchanged.",
+  "default": "keep",
+  "rules": [
+    {
+      "action": "int8_convrot",
+      "fallback": "int8",
+      "prefix": "model.diffusion_model.",
+      "suffixes": [".weight"]
+    }
+  ]
+}

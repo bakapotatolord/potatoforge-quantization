@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "profile_id": "krea2-turbo-int6-convrot",
+  "description": "Apply INT6 ConvRot to Krea 2 Turbo block attention and MLP weights; keep all other tensors in BF16.",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": [
+    {
+      "action": "int6_convrot",
+      "prefix": "blocks.",
+      "suffixes": [
+        ".attn.gate.weight",
+        ".attn.wk.weight",
+        ".attn.wo.weight",
+        ".attn.wq.weight",
+        ".attn.wv.weight",
+        ".mlp.down.weight",
+        ".mlp.gate.weight",
+        ".mlp.up.weight"
+      ]
+    }
+  ]
+}

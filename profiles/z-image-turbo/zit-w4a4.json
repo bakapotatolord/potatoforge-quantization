@@ -1,12 +1,11 @@
 {
   "format_version": 1,
-  "profile_id": "zit-int6-convrot",
-  "description": "Apply INT6 ConvRot to the main Z-Image Turbo transformer layers; keep all other tensors in BF16.",
+  "profile_id": "zit-w4a4-convrot-main-layers",
+  "description": "Quantize all main Z-Image Turbo transformer layer weights with ConvRot W4A4. Keep non-layer weights unchanged.",
   "default": "keep",
-  "keep_dtype": "BF16",
   "rules": [
     {
-      "action": "int6_convrot",
+      "action": "convrot_w4a4",
       "prefix": "layers.",
       "suffixes": [
         ".adaLN_modulation.0.weight",

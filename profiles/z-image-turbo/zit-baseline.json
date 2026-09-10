@@ -1,0 +1,42 @@
+{
+  "format_version": 1,
+  "profile_id": "z-image-turbo-w4a4-bf16-sensitive-v1",
+  "description": "Z-Image Turbo mixed-precision baseline: keep small, conditioning, AdaLN, embedder, and output-sensitive tensors in BF16 while quantizing the large attention and feed-forward matrices in the main layers and refiners to ConvRot W4A4.",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": [
+    {
+      "action": "convrot_w4a4",
+      "prefix": "context_refiner.",
+      "suffixes": [
+        ".attention.out.weight",
+        ".attention.qkv.weight",
+        ".feed_forward.w1.weight",
+        ".feed_forward.w2.weight",
+        ".feed_forward.w3.weight"
+      ]
+    },
+    {
+      "action": "convrot_w4a4",
+      "prefix": "layers.",
+      "suffixes": [
+        ".attention.out.weight",
+        ".attention.qkv.weight",
+        ".feed_forward.w1.weight",
+        ".feed_forward.w2.weight",
+        ".feed_forward.w3.weight"
+      ]
+    },
+    {
+      "action": "convrot_w4a4",
+      "prefix": "noise_refiner.",
+      "suffixes": [
+        ".attention.out.weight",
+        ".attention.qkv.weight",
+        ".feed_forward.w1.weight",
+        ".feed_forward.w2.weight",
+        ".feed_forward.w3.weight"
+      ]
+    }
+  ]
+}

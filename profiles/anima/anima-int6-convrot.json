@@ -1,0 +1,27 @@
+{
+  "format_version": 1,
+  "profile_id": "anima-turbo-int6-convrot-main-v1",
+  "description": "INT6 ConvRot for the major attention and MLP weights in Anima Turbo main transformer blocks. Keeps AdaLN modulation, norms, LLM adapter, and other tensors in BF16.",
+  "default": "keep",
+  "keep_dtype": "BF16",
+  "rules": [
+    {
+      "action": "int6_convrot",
+      "prefix": "model.diffusion_model.blocks.",
+      "suffixes": [
+        ".cross_attn.k_proj.weight",
+        ".cross_attn.q_proj.weight",
+        ".cross_attn.v_proj.weight",
+        ".cross_attn.output_proj.weight",
+
+        ".self_attn.k_proj.weight",
+        ".self_attn.q_proj.weight",
+        ".self_attn.v_proj.weight",
+        ".self_attn.output_proj.weight",
+
+        ".mlp.layer1.weight",
+        ".mlp.layer2.weight"
+      ]
+    }
+  ]
+}
