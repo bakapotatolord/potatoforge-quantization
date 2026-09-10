@@ -26,13 +26,17 @@ from potatoforge.lora.lora_merge import (
     AdapterMergeInput,
     merge_bf16_adapters,
 )
-from potatoforge.quantization import quantize_int8_tensorwise, quantize_int8_convrot
+from potatoforge.quantization import (
+    quantize_int8_tensorwise,
+    quantize_int8_convrot,
+)
 from potatoforge.quantization.int6_rowwise import quantize_int6_rowwise
 from potatoforge.quantization.int6_packing import pack_int6_row_major
 from potatoforge.profiles import QuantizationProfile
 from potatoforge.source_payloads import tensor_to_raw_bytes
 from potatoforge.quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
+    quantize_convrot_w4a4_mse,
 )
 
 
@@ -381,6 +385,84 @@ class TestConverter(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 convert_model_from_profile(source_path, target_path, profile_path)
+
+    def test_converter_reproduces_w4a4_mse_as_standard_w4a4(self) -> None:
+        weights = torch.linspace(
+            -0.1,
+            0.1,
+            steps=256,
+            dtype=torch.bfloat16,
+        ).reshape(1, 256)
+        weights[0, 0] = 3.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "convrot_w4a4_mse",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            baseline_path = Path(directory) / "baseline.safetensors"
+            save_file({"blocks.0.attn.wq.weight": weights}, str(source_path))
+            convert_model(source_path, target_path, profile, on_entry_started=None)
+            convert_model(
+                source_path,
+                baseline_path,
+                {
+                    "default": "keep",
+                    "rules": (
+                        {
+                            "action": "convrot_w4a4",
+                            "prefix": "blocks.",
+                            "suffixes": (".attn.wq.weight",),
+                        },
+                    ),
+                },
+                on_entry_started=None,
+            )
+            output_tensors = load_file(target_path)
+            output_header = read_header_from_safetensors(target_path)
+            target_size = target_path.stat().st_size
+            baseline_size = baseline_path.stat().st_size
+
+        expected = quantize_convrot_w4a4_mse(weights)
+        baseline = quantize_convrot_w4a4(weights)
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight"],
+                expected.packed_codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight_scale"],
+                expected.scales,
+            )
+        )
+        self.assertEqual(target_size, baseline_size)
+        self.assertTrue(torch.any(expected.scales != baseline.scales))
+        marker = bytes(
+            output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
+        ).decode("utf-8")
+        self.assertEqual(json.loads(marker), CONVROT_W4A4_MARKER)
+        self.assertEqual(
+            output_header["__metadata__"]["potatoforge.quantization"],
+            "convrot_w4a4",
+        )
+        self.assertEqual(
+            json.loads(
+                output_header["__metadata__"][
+                    "potatoforge.quantization_layers"
+                ]
+            ),
+            {"blocks.0.attn.wq.weight": "convrot_w4a4"},
+        )
 
     def test_fused_adapter_quantization_matches_separate_pipeline(self) -> None:
         source_tensors = {
@@ -783,6 +865,143 @@ class TestConverter(unittest.TestCase):
                 bias,
             )
         )
+
+    def test_converter_preserves_fused_qkv_names_for_int8_formats(self) -> None:
+        plain_weights = torch.zeros((3, 256), dtype=torch.bfloat16)
+        plain_weights[0, 0] = 2.0
+        convrot_weights = torch.zeros((3, 256), dtype=torch.bfloat16)
+        convrot_weights[1, 0] = 70.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8",
+                    "prefix": "plain.",
+                    "suffixes": (".attn.in_proj_weight",),
+                },
+                {
+                    "action": "int8_convrot",
+                    "prefix": "rotated.",
+                    "suffixes": (".attn.in_proj_weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            save_file(
+                {
+                    "plain.attn.in_proj_weight": plain_weights,
+                    "rotated.attn.in_proj_weight": convrot_weights,
+                },
+                str(source_path),
+            )
+
+            convert_model(source_path, target_path, profile, on_entry_started=None)
+
+            output_tensors = load_file(target_path)
+            output_header = read_header_from_safetensors(target_path)
+
+        self.assertEqual(
+            set(output_tensors),
+            {
+                "plain.attn.in_proj_weight",
+                "plain.attn.in_proj.weight_scale",
+                "plain.attn.in_proj.comfy_quant",
+                "rotated.attn.in_proj_weight",
+                "rotated.attn.in_proj.weight_scale",
+                "rotated.attn.in_proj.comfy_quant",
+            },
+        )
+        expected_plain = quantize_int8_tensorwise(plain_weights)
+        expected_convrot = quantize_int8_convrot(convrot_weights)
+        self.assertTrue(
+            torch.equal(
+                output_tensors["plain.attn.in_proj_weight"],
+                expected_plain.codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["plain.attn.in_proj.weight_scale"],
+                expected_plain.scales,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["rotated.attn.in_proj_weight"],
+                expected_convrot.codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["rotated.attn.in_proj.weight_scale"],
+                expected_convrot.scales,
+            )
+        )
+        for name, expected_marker in (
+            ("plain.attn.in_proj.comfy_quant", INT8_MARKER),
+            ("rotated.attn.in_proj.comfy_quant", INT8_CONVROT_MARKER),
+        ):
+            marker = bytes(output_tensors[name].tolist()).decode("utf-8")
+            self.assertEqual(json.loads(marker), expected_marker)
+
+        self.assertEqual(
+            json.loads(
+                output_header["__metadata__"][
+                    "potatoforge.quantization_layers"
+                ]
+            ),
+            {
+                "plain.attn.in_proj_weight": "int8",
+                "rotated.attn.in_proj_weight": "int8_convrot",
+            },
+        )
+
+    def test_converter_does_not_fallback_after_primary_quantizer_error(
+        self,
+    ) -> None:
+        weights = torch.zeros(
+            (1, 256),
+            dtype=torch.bfloat16,
+        )
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            save_file(
+                {"blocks.0.attn.wq.weight": weights},
+                str(source_path),
+            )
+
+            with (
+                patch(
+                    "potatoforge.source_payloads.quantize_int8_convrot",
+                    side_effect=RuntimeError("primary quantizer failed"),
+                ),
+                patch(
+                    "potatoforge.source_payloads.quantize_int8_tensorwise",
+                ) as fallback_quantizer,
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "primary quantizer failed",
+                ),
+            ):
+                convert_model(source_path, target_path, profile)
+
+        fallback_quantizer.assert_not_called()
 
     def test_converter_writes_packed_int6_rowwise(self) -> None:
         weights = torch.tensor(

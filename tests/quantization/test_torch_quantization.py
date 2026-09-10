@@ -3,11 +3,10 @@ import unittest
 import torch
 
 from potatoforge.quantization import (
+    dequantize_int8_convrot,
     dequantize_int8_tensorwise,
-    quantize_int8_tensorwise,
     quantize_int8_convrot,
     quantize_int8_tensorwise,
-    dequantize_int8_convrot
 )
 
 

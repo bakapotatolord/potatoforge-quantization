@@ -25,10 +25,12 @@ wheels/
 *.safetensors.partial
 
 # Generated experiment artifacts and other folders
+node_modules/
 reports/
 fixtures/
 docs/
 AGENTS.md
+CONTEXT.md
 comfyui_custom_nodes/*
 
 # Local editor settings

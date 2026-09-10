@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from potatoforge.planning import (
@@ -5,18 +6,69 @@ from potatoforge.planning import (
     CONVROT_W4A4_MARKER_BYTE_COUNT,
     INT6_CONVROT_MARKER_BYTE_COUNT,
     INT6_ROWWISE_MARKER_BYTE_COUNT,
+    INT8_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_BYTE_COUNT,
     TensorDescriptor,
     build_output_layout,
     build_plan,
+    build_quantization_metadata,
+    is_supported_weight_key,
+    logical_layer_name_for_weight,
     layout_to_header,
     plan_input_batches,
+    quantization_family_names,
+    weight_key_for_layer,
 )
 
 from potatoforge.profiles import QuantizationProfile
 
 
 class TestInt8TensorwisePlan(unittest.TestCase):
+    def test_builds_mixed_per_layer_quantization_metadata(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [0, 8],
+            },
+            "blocks.1.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [8, 16],
+            },
+            "blocks.2.bias": {
+                "dtype": "BF16",
+                "shape": [1],
+                "data_offsets": [16, 18],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8",
+                    "prefix": "blocks.0",
+                    "suffixes": (".weight",),
+                },
+                {
+                    "action": "int6_rowwise",
+                    "prefix": "blocks.1",
+                    "suffixes": (".weight",),
+                },
+            ),
+        }
+
+        metadata = build_quantization_metadata(build_plan(header, profile))
+
+        self.assertEqual(metadata["potatoforge.quantization"], "mixed")
+        self.assertEqual(
+            json.loads(metadata["potatoforge.quantization_layers"]),
+            {
+                "blocks.0.weight": "int8",
+                "blocks.1.weight": "int6_rowwise",
+            },
+        )
+
     def test_plans_kept_float32_as_bfloat16(self) -> None:
         header: dict[str, TensorDescriptor] = {
             "tproj.1.weight": {
@@ -163,6 +215,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
             "rules": (
                 {
                     "action": "int8_convrot",
+                    "fallback": "int8",
                     "prefix": "blocks.",
                     "suffixes": (".attn.wq.weight",),
                 },
@@ -189,37 +242,336 @@ class TestInt8TensorwisePlan(unittest.TestCase):
             ],
         )
 
-    def test_plans_all_quantization_methods_for_float16_weights(self) -> None:
+    def test_plans_a_fused_qkv_int8_weight_family(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "foo.attn.in_proj_weight": {
+                "dtype": "BF16",
+                "shape": [3840, 1280],
+                "data_offsets": [0, 3840 * 1280 * 2],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8",
+                    "prefix": "foo.",
+                    "suffixes": (".attn.in_proj_weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+
+        self.assertEqual(entries[0]["action"], "int8")
+        self.assertEqual(
+            [tensor.spec.name for tensor in layout.tensors],
+            [
+                "foo.attn.in_proj_weight",
+                "foo.attn.in_proj.weight_scale",
+                "foo.attn.in_proj.comfy_quant",
+            ],
+        )
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(3840, 1280), (3840, 1), (len(INT8_MARKER_PAYLOAD),)],
+        )
+
+    def test_plans_a_fused_qkv_int8_convrot_weight_family(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "foo.attn.in_proj_weight": {
+                "dtype": "F16",
+                "shape": [3840, 1280],
+                "data_offsets": [0, 3840 * 1280 * 2],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "prefix": "foo.",
+                    "suffixes": (".attn.in_proj_weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+
+        self.assertEqual(entries[0]["action"], "int8_convrot")
+        self.assertEqual(
+            [tensor.spec.name for tensor in layout.tensors],
+            [
+                "foo.attn.in_proj_weight",
+                "foo.attn.in_proj.weight_scale",
+                "foo.attn.in_proj.comfy_quant",
+            ],
+        )
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(3840, 1280), (3840, 1), (INT8_CONVROT_MARKER_BYTE_COUNT,)],
+        )
+
+    def test_fused_qkv_convrot_uses_the_existing_int8_fallback(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "foo.attn.in_proj_weight": {
+                "dtype": "BF16",
+                "shape": [3840, 4],
+                "data_offsets": [0, 3840 * 4 * 2],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "foo.",
+                    "suffixes": (".attn.in_proj_weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+
+        self.assertEqual(entries[0]["action"], "int8")
+        self.assertEqual(
+            [tensor.spec.name for tensor in layout.tensors],
+            [
+                "foo.attn.in_proj_weight",
+                "foo.attn.in_proj.weight_scale",
+                "foo.attn.in_proj.comfy_quant",
+            ],
+        )
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(3840, 4), (3840, 1), (len(INT8_MARKER_PAYLOAD),)],
+        )
+
+    def test_supported_weight_keys_are_narrow_and_resolve_one_family(self) -> None:
+        self.assertTrue(is_supported_weight_key("foo.weight"))
+        self.assertTrue(is_supported_weight_key("foo.attn.in_proj_weight"))
+        self.assertFalse(is_supported_weight_key("foo.some_random_weight"))
+        self.assertEqual(
+            logical_layer_name_for_weight("foo.weight"),
+            "foo",
+        )
+        self.assertEqual(
+            logical_layer_name_for_weight("foo.attn.in_proj_weight"),
+            "foo.attn.in_proj",
+        )
+        self.assertEqual(weight_key_for_layer("foo"), "foo.weight")
+        self.assertEqual(
+            weight_key_for_layer("foo.attn.in_proj"),
+            "foo.attn.in_proj_weight",
+        )
+        self.assertEqual(
+            quantization_family_names("foo.attn.in_proj_weight"),
+            (
+                "foo.attn.in_proj_weight",
+                "foo.attn.in_proj.weight_scale",
+                "foo.attn.in_proj.comfy_quant",
+            ),
+        )
+
+    def test_does_not_quantize_an_unrelated_weight_suffix(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "foo.some_random_weight": {
+                "dtype": "BF16",
+                "shape": [2, 256],
+                "data_offsets": [0, 1024],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8",
+                    "prefix": "foo.",
+                    "suffixes": (".some_random_weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "keep")
+        self.assertIn("weight tensor", entries[0]["reason"])
+
+    def test_falls_back_to_int8_when_convrot_is_ineligible(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 4],
+                "data_offsets": [0, 32],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+
+        self.assertEqual(entries[0]["action"], "int8")
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(2, 4), (2, 1), (len(INT8_MARKER_PAYLOAD),)],
+        )
+
+    def test_keeps_ineligible_convrot_without_a_fallback(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 4],
+                "data_offsets": [0, 32],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "keep")
+        self.assertIn("divisible by 256", entries[0]["reason"])
+
+    def test_keeps_tensor_when_primary_and_fallback_are_ineligible(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2],
+                "data_offsets": [0, 8],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "keep")
+        self.assertIn("two-dimensional", entries[0]["reason"])
+
+    def test_fallback_does_not_apply_to_a_nonmatching_rule(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "conditioner.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 4],
+                "data_offsets": [0, 32],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8_convrot",
+                    "fallback": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "keep")
+
+    def test_plans_w4a4_mse_with_the_standard_w4a4_storage_family(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "BF16",
+                "shape": [2, 256],
+                "data_offsets": [0, 1024],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "convrot_w4a4_mse",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+        metadata = build_quantization_metadata(entries)
+
+        self.assertEqual(entries[0]["action"], "convrot_w4a4_mse")
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(2, 128), (2,), (CONVROT_W4A4_MARKER_BYTE_COUNT,)],
+        )
+        self.assertEqual(metadata["potatoforge.quantization"], "convrot_w4a4")
+        self.assertEqual(
+            json.loads(metadata["potatoforge.quantization_layers"]),
+            {"blocks.0.attn.wq.weight": "convrot_w4a4"},
+        )
+
+    def test_plans_all_quantization_methods_for_float16_and_float32_weights(
+        self,
+    ) -> None:
         actions = (
             ("int8", "int8"),
             ("int6_rowwise", "int6_rowwise"),
             ("int8_convrot", "int8_convrot"),
             ("convrot_w4a4", "convrot_w4a4"),
+            ("convrot_w4a4_mse", "convrot_w4a4_mse"),
         )
 
-        for action, expected_action in actions:
-            with self.subTest(action=action):
-                header: dict[str, TensorDescriptor] = {
-                    "blocks.0.attn.wq.weight": {
-                        "dtype": "F16",
-                        "shape": [2, 256],
-                        "data_offsets": [0, 1024],
-                    },
-                }
-                profile: QuantizationProfile = {
-                    "default": "keep",
-                    "rules": (
-                        {
-                            "action": action,
-                            "prefix": "blocks.",
-                            "suffixes": (".attn.wq.weight",),
+        for source_dtype, input_bytes in (("F16", 1024), ("F32", 2048)):
+            for action, expected_action in actions:
+                with self.subTest(source_dtype=source_dtype, action=action):
+                    header: dict[str, TensorDescriptor] = {
+                        "blocks.0.attn.wq.weight": {
+                            "dtype": source_dtype,
+                            "shape": [2, 256],
+                            "data_offsets": [0, input_bytes],
                         },
-                    ),
-                }
+                    }
+                    profile: QuantizationProfile = {
+                        "default": "keep",
+                        "rules": (
+                            {
+                                "action": action,
+                                "prefix": "blocks.",
+                                "suffixes": (".attn.wq.weight",),
+                            },
+                        ),
+                    }
 
-                entries = build_plan(header, profile)
+                    entries = build_plan(header, profile)
 
-                self.assertEqual(entries[0]["action"], expected_action)
+                    self.assertEqual(entries[0]["action"], expected_action)
 
     def test_plans_int6_rowwise_float32_weights(self) -> None:
         header: dict[str, TensorDescriptor] = {
@@ -324,31 +676,6 @@ class TestInt8TensorwisePlan(unittest.TestCase):
 
         self.assertEqual(entries[0]["action"], "keep")
         self.assertIn("divisible by 256", entries[0]["reason"])
-
-    def test_falls_back_to_int8_when_convrot_is_ineligible(self) -> None:
-        header: dict[str, TensorDescriptor] = {
-            "blocks.0.attn.wq.weight": {
-                "dtype": "F32",
-                "shape": [2, 4],
-                "data_offsets": [0, 32],
-            },
-        }
-        profile: QuantizationProfile = {
-            "default": "keep",
-            "rules": (
-                {
-                    "action": "int8_convrot",
-                    "fallback": "int8",
-                    "prefix": "blocks.",
-                    "suffixes": (".attn.wq.weight",),
-                },
-            ),
-        }
-
-        entries = build_plan(header, profile)
-
-        self.assertEqual(entries[0]["action"], "int8")
-        self.assertEqual(len(entries[0]["output_tensors"]), 3)
 
 class TestInputBatchPlanning(unittest.TestCase):
     def test_keeps_output_batches_and_reads_each_batch_by_source_offset(self) -> None:
