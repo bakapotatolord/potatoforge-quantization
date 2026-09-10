@@ -11,10 +11,19 @@ from typing import Any, Callable
 
 import typer
 
+from .audits.analysis import (
+    print_activation_ranking,
+    print_tensor_analysis,
+    write_analysis_workbook,
+)
+from .audits.activation_profiles import generate_activation_profile
 from .audits.profile_optimizer import (
     SUPPORTED_METHODS,
+    audited_global_relative_l2,
+    generate_profile_sweep,
     load_weight_audit,
     optimize_target_size,
+    validate_weight_audit_against_source,
     write_profile,
 )
 from .audits.weight_audit import (
@@ -39,6 +48,12 @@ from .planning import (
     parse_quantization_layers,
 )
 from .config import load_optimize_config, load_quantize_config
+from .calibration import (
+    ActivationCalibration,
+    merge_activation_calibrations,
+    score_activation_probe,
+)
+from .calibration.activation_probe import activation_pair_paths
 
 
 app = typer.Typer(
@@ -86,6 +101,23 @@ def _write_json(path: Path, document: object, overwrite: bool) -> None:
         output_file.write("\n")
 
 
+def _preflight_audit_outputs(
+    output: Path,
+    activation_probe_output: Path | None,
+    overwrite: bool,
+) -> None:
+    paths = [output]
+    if activation_probe_output is not None:
+        paths.extend(activation_pair_paths(activation_probe_output))
+    resolved_paths = [path.resolve() for path in paths]
+    if len(set(resolved_paths)) != len(resolved_paths):
+        raise ValueError("Audit and activation probe output paths must be different.")
+    if not overwrite:
+        for path in paths:
+            if path.exists():
+                raise FileExistsError(f"Output already exists: {path}")
+
+
 def _parse_quantization_metadata(
     metadata: object,
 ) -> tuple[str, dict[str, str]]:
@@ -128,6 +160,7 @@ def _print_quantization(
     for name, action in layers.items():
         typer.echo(f"  {name}: {action}")
 
+
 def _gib_to_bytes(value: float) -> int:
     if not math.isfinite(value) or value <= 0:
         raise typer.BadParameter("must be a finite positive number")
@@ -137,8 +170,34 @@ def _gib_to_bytes(value: float) -> int:
     return byte_count
 
 
+def _mib_to_bytes(value: float, *, allow_zero: bool = False) -> int:
+    if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+        raise typer.BadParameter("must be a finite positive number")
+    byte_count = int(value * (1024**2))
+    if byte_count <= 0 and not allow_zero:
+        raise typer.BadParameter("must represent at least one byte")
+    return byte_count
+
+
+def _split_comma_separated(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(part.strip() for part in value.split(","))
+
+
 def _print_progress(index: int, count: int, name: str) -> None:
     typer.echo(f"[{index}/{count}] {name}", err=True)
+
+
+def _print_profile_sweep_progress(
+    index: int,
+    count: int,
+    target_bytes: int,
+) -> None:
+    typer.echo(
+        f"[profile {index}/{count}] target={target_bytes / (1024**3):.2f} GiB",
+        err=True,
+    )
 
 
 def _print_patch_progress(message: str) -> None:
@@ -298,14 +357,45 @@ def merge_lora(
 def audit(
     source_path: Path = typer.Argument(...),
     output: Path = typer.Option(..., help="JSON audit report path."),
+    activation_calibration: Path | None = typer.Option(
+        None,
+        "--activation-calibration",
+        help="Activation calibration metadata JSON.",
+    ),
+    method: str | None = typer.Option(
+        None,
+        "--method",
+        help="Audit one candidate method; only convrot_w4a4 is supported.",
+    ),
+    activation_probe_output: Path | None = typer.Option(
+        None,
+        "--activation-probe-output",
+        help=(
+            "Reusable INT8 ConvRot to W4A4 probe cache path; requires "
+            "--activation-calibration with an INT8 ConvRot baseline."
+        ),
+    ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
     """Measure supported weight reconstruction formats."""
     def action() -> None:
-        document = audit_bf16_source(
-            source_path,
-            on_entry_started=_print_progress,
+        _preflight_audit_outputs(output, activation_probe_output, overwrite)
+        calibration = (
+            None
+            if activation_calibration is None
+            else ActivationCalibration.load(activation_calibration)
         )
+        audit_kwargs: dict[str, Any] = {
+            "on_entry_started": _print_progress,
+        }
+        if calibration is not None:
+            audit_kwargs["activation_calibration"] = calibration
+        if method is not None:
+            audit_kwargs["audit_method"] = method
+        if activation_probe_output is not None:
+            audit_kwargs["activation_probe_output"] = activation_probe_output
+            audit_kwargs["activation_probe_overwrite"] = overwrite
+        document = audit_bf16_source(source_path, **audit_kwargs)
         _write_json(output, document, overwrite)
         summary = document["summary"]
         print_weight_audit_table(
@@ -325,22 +415,431 @@ def audit(
     _run("audit", action)
 
 
+@app.command("activation-score")
+def activation_score(
+    probe_cache: Path = typer.Option(
+        ...,
+        "--probe-cache",
+        help="Reusable activation probe metadata JSON.",
+    ),
+    activation_calibration: Path = typer.Option(
+        ...,
+        "--activation-calibration",
+        help="Activation calibration metadata JSON.",
+    ),
+    output: Path = typer.Option(..., "--output", help="Activation score JSON."),
+    overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
+) -> None:
+    """Score one calibration against a reusable activation probe cache."""
+    def action() -> None:
+        report = score_activation_probe(probe_cache, activation_calibration)
+        _write_json(output, report, overwrite)
+        _finish(
+            {
+                "probe_cache": str(probe_cache),
+                "activation_calibration": str(activation_calibration),
+                "score_report": str(output),
+                "scored_tensor_count": report["summary"]["scored_tensor_count"],
+            }
+        )
+
+    _run("activation-score", action)
+
+
+@app.command("calibration-merge")
+def calibration_merge(
+    calibration_paths: list[Path] = typer.Argument(
+        ...,
+        help="Activation calibration JSON files to merge.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        help="Merged calibration pair base path or JSON path.",
+    ),
+    overwrite: bool = typer.Option(False, help="Replace an existing calibration pair."),
+) -> None:
+    """Merge additive activation calibration statistics."""
+    def action() -> None:
+        metadata_path, tensors_path = merge_activation_calibrations(
+            calibration_paths,
+            output,
+            overwrite=overwrite,
+        )
+        _finish(
+            {
+                "input_calibration_count": len(calibration_paths),
+                "metadata_path": str(metadata_path),
+                "tensors_path": str(tensors_path),
+            }
+        )
+
+    _run("calibration-merge", action)
+
+
+@app.command("profile-from-activation")
+def profile_from_activation(
+    activation_score: Path = typer.Option(
+        ...,
+        "--activation-score",
+        help="Completed activation-score JSON report.",
+    ),
+    weight_audit: Path = typer.Option(
+        ...,
+        "--weight-audit",
+        help="Existing weight-audit JSON containing storage estimates.",
+    ),
+    output: Path = typer.Option(..., "--output", help="Output profile JSON."),
+    summary_output: Path | None = typer.Option(
+        None,
+        "--summary-output",
+        help="Optional summary JSON; defaults to <output>-summary.json.",
+    ),
+    target_size_mib: float | None = typer.Option(
+        None,
+        "--target-size-mib",
+        help="Final model-size budget in MiB.",
+    ),
+    target_size_gib: float | None = typer.Option(
+        None,
+        "--target-size-gib",
+        help="Final model-size budget in GiB.",
+    ),
+    promotion_budget_mib: float | None = typer.Option(
+        None,
+        "--promotion-budget-mib",
+        help="Additional storage budget above the W4A4 baseline.",
+    ),
+    promotion_budget_bytes_option: int | None = typer.Option(
+        None,
+        "--promotion-budget-bytes",
+        help="Additional storage budget above the W4A4 baseline in bytes.",
+    ),
+    metric: str = typer.Option(
+        "relative_output_sse",
+        "--metric",
+        help="relative_output_sse, relative_output_error, or relative_l2_error.",
+    ),
+    include_regex: str = typer.Option(
+        r"^blocks\.",
+        "--include-regex",
+        help="Regex selecting eligible weight tensors.",
+    ),
+    profile_id: str | None = typer.Option(
+        None,
+        "--profile-id",
+        help="Generated profile identifier.",
+    ),
+    overwrite: bool = typer.Option(False, help="Replace existing outputs."),
+) -> None:
+    """Generate an offline equal-budget mixed-precision profile."""
+    def action() -> None:
+        budget_options = sum(
+            value is not None
+            for value in (
+                target_size_mib,
+                target_size_gib,
+                promotion_budget_mib,
+                promotion_budget_bytes_option,
+            )
+        )
+        if budget_options != 1:
+            raise ValueError(
+                "Provide exactly one of --target-size-mib, "
+                "--target-size-gib, --promotion-budget-mib, or "
+                "--promotion-budget-bytes."
+            )
+        target_bytes = None
+        promotion_budget_bytes = None
+        if target_size_mib is not None:
+            target_bytes = _mib_to_bytes(target_size_mib)
+        elif target_size_gib is not None:
+            target_bytes = _gib_to_bytes(target_size_gib)
+        elif promotion_budget_bytes_option is not None:
+            if promotion_budget_bytes_option < 0:
+                raise ValueError("--promotion-budget-bytes must be non-negative.")
+            promotion_budget_bytes = promotion_budget_bytes_option
+        else:
+            assert promotion_budget_mib is not None
+            promotion_budget_bytes = _mib_to_bytes(
+                promotion_budget_mib,
+                allow_zero=True,
+            )
+
+        effective_profile_id = profile_id or (
+            "activation-relative"
+            if metric in ("relative_output_sse", "relative_output_error")
+            else "legacy-static"
+        )
+        effective_summary_output = summary_output or output.with_name(
+            f"{output.stem}-summary.json"
+        )
+        resolved_outputs = {
+            output.resolve(),
+            effective_summary_output.resolve(),
+        }
+        if len(resolved_outputs) != 2:
+            raise ValueError("Profile and summary output paths must be different.")
+        if not overwrite:
+            for output_path in (output, effective_summary_output):
+                if output_path.exists():
+                    raise FileExistsError(f"Output already exists: {output_path}")
+
+        generated = generate_activation_profile(
+            activation_score,
+            weight_audit,
+            target_bytes=target_bytes,
+            promotion_budget_bytes=promotion_budget_bytes,
+            profile_id=effective_profile_id,
+            metric=metric,
+            include_regex=include_regex,
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        write_profile(output, generated.optimized.profile, overwrite=overwrite)
+        _write_json(effective_summary_output, generated.summary, overwrite)
+        _finish(
+            {
+                "activation_score": str(activation_score),
+                "weight_audit": str(weight_audit),
+                "profile_path": str(output),
+                "summary_path": str(effective_summary_output),
+                "metric": metric,
+                "target_bytes": generated.optimized.target_bytes,
+                "estimated_output_bytes": generated.optimized.output_bytes,
+                "promoted_int8cr_tensor_count": generated.summary[
+                    "promoted_int8cr_tensor_count"
+                ],
+            }
+        )
+
+    _run("profile-from-activation", action)
+
+
+@app.command("analyze")
+def analyze(
+    audit_path: Path | None = typer.Argument(
+        None,
+        help="Legacy positional JSON weight-audit report.",
+    ),
+    audit: Path | None = typer.Option(
+        None,
+        "--audit",
+        help="Existing JSON weight-audit report.",
+    ),
+    source: Path | None = typer.Option(
+        None,
+        "--source",
+        help="Source safetensors model for selected tensors.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Excel analysis workbook path.",
+    ),
+    tensor: str | None = typer.Option(
+        None,
+        "--tensor",
+        help="Print one exact tensor.",
+    ),
+    tensors: str | None = typer.Option(
+        None,
+        "--tensors",
+        help="Print comma-separated exact tensors.",
+    ),
+    activation_calibration: Path | None = typer.Option(
+        None,
+        "--activation-calibration",
+        help="Activation calibration metadata JSON for --source.",
+    ),
+    target_size_gib: float | None = typer.Option(
+        None,
+        "--target-size-gib",
+        "--target-size",
+        help="Optional selected target output size in GiB.",
+    ),
+    target_size_step_gib: float = typer.Option(
+        0.5,
+        "--target-size-step-gib",
+        help="GiB interval between generated profile options.",
+    ),
+    method: str | None = typer.Option(
+        None,
+        "--method",
+        help="Comma-separated recommendation methods.",
+    ),
+    exclude_prefix: str | None = typer.Option(
+        None,
+        "--exclude-prefix",
+        help="Comma-separated prefixes to keep in BF16.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace an existing Excel workbook.",
+    ),
+) -> None:
+    """Report existing weight-audit measurements."""
+    def action() -> None:
+        if tensor is not None and tensors is not None:
+            raise ValueError("--tensor and --tensors cannot be combined.")
+        tensor_names = (
+            _split_comma_separated(tensors)
+            if tensors is not None
+            else () if tensor is None else (tensor,)
+        )
+        audit_input = audit if audit is not None else audit_path
+        if audit_input is not None and source is not None:
+            raise ValueError("--audit and --source cannot be combined.")
+        if audit_input is None and source is None:
+            raise ValueError("Provide --audit or --source.")
+        if audit_input is not None and activation_calibration is not None:
+            raise ValueError(
+                "--activation-calibration requires --source; "
+                "include it when generating the audit report."
+            )
+        if source is not None:
+            if not tensor_names:
+                raise ValueError("--source requires --tensor or --tensors.")
+            if output is not None:
+                raise ValueError("--source cannot be combined with --output.")
+            if target_size_gib is not None:
+                raise ValueError(
+                    "--source cannot be combined with --target-size-gib."
+                )
+            if method is not None:
+                raise ValueError("--source cannot be combined with --method.")
+            if exclude_prefix is not None:
+                raise ValueError(
+                    "--source cannot be combined with --exclude-prefix."
+                )
+            source_header = read_source_model_header(source)
+            calibration = (
+                None
+                if activation_calibration is None
+                else ActivationCalibration.load(activation_calibration)
+            )
+            audit_kwargs: dict[str, Any] = {
+                "on_entry_started": _print_progress,
+            }
+            if calibration is not None:
+                audit_kwargs["activation_calibration"] = calibration
+            if tensor is not None:
+                audit_kwargs["tensor_name"] = tensor
+            else:
+                audit_kwargs["tensor_names"] = tensor_names
+            audit_document = audit_bf16_source(source, **audit_kwargs)
+            for tensor_name in tensor_names:
+                print_tensor_analysis(audit_document, source_header, tensor_name)
+            print_activation_ranking(audit_document)
+            return
+
+        exclude_prefixes = _split_comma_separated(exclude_prefix)
+        if not tensor_names and output is None:
+            raise ValueError("Full analyze mode requires --output.")
+        audit_document = load_weight_audit(audit_input)
+        source_header = validate_weight_audit_against_source(audit_document)
+        optimized = None
+        profile_sweep = None
+        methods = (
+            _split_comma_separated(method)
+            if method is not None
+            else SUPPORTED_METHODS
+        )
+        allowed_methods = frozenset(methods)
+        if output is not None:
+            selected_target_bytes = (
+                None
+                if target_size_gib is None
+                else _gib_to_bytes(target_size_gib)
+            )
+            profile_sweep = generate_profile_sweep(
+                audit_document,
+                "analysis",
+                _gib_to_bytes(target_size_step_gib),
+                allowed_methods,
+                excluded_prefixes=exclude_prefixes,
+                selected_target_bytes=selected_target_bytes,
+                on_profile_started=_print_profile_sweep_progress,
+            )
+            optimized = (
+                next(
+                    (
+                        profile
+                        for profile in profile_sweep
+                        if target_size_gib is not None
+                        and profile.target_bytes == selected_target_bytes
+                    ),
+                    profile_sweep[-1],
+                )
+                if profile_sweep
+                else None
+            )
+        elif target_size_gib is not None:
+            optimized = optimize_target_size(
+                audit_document,
+                "analysis",
+                _gib_to_bytes(target_size_gib),
+                allowed_methods,
+                excluded_prefixes=exclude_prefixes,
+            )
+
+        for tensor_name in tensor_names:
+            print_tensor_analysis(
+                audit_document,
+                source_header,
+                tensor_name,
+                optimized if target_size_gib is not None else None,
+            )
+        print_activation_ranking(audit_document)
+        if output is not None:
+            if output.resolve() == audit_input.resolve():
+                raise ValueError("Audit and output paths must be different.")
+            write_analysis_workbook(
+                audit_document,
+                source_header,
+                output,
+                optimized,
+                overwrite=overwrite,
+                profile_sweep=profile_sweep,
+                allowed_methods=allowed_methods,
+                excluded_prefixes=exclude_prefixes,
+            )
+            _finish(
+                {
+                    "audit_path": str(audit_input),
+                    "analysis_path": str(output),
+                    "target_bytes": (
+                        None if optimized is None else optimized.target_bytes
+                    ),
+                    "profile_count": (
+                        None if profile_sweep is None else len(profile_sweep)
+                    ),
+                }
+            )
+
+    _run("analyze", action)
+
+
 @app.command("optimize")
 def optimize(
     audit_path: Path | None = typer.Argument(None),
     output_path: Path | None = typer.Argument(None),
     profile_id: str | None = typer.Option(None, help="Generated profile identifier."),
     target_size_gib: float | None = typer.Option(None, help="Target output size in GiB."),
-    method: list[str] | None = typer.Option(
-        None, "--method", help="Allowed method; repeat to select several."
-    ),
-    enable_potatoforge_int6_runtime: bool | None = typer.Option(
-        None,
-        "--enable-potatoforge-int6-runtime/--no-enable-potatoforge-int6-runtime",
+    method: str | None = typer.Option(
+        None, "--method", help="Comma-separated allowed methods."
     ),
     max_relative_l2_error: float | None = typer.Option(None),
-    exclude_prefix: list[str] | None = typer.Option(None, "--exclude-prefix"),
-    exclude_suffix: list[str] | None = typer.Option(None, "--exclude-suffix"),
+    exclude_prefix: str | None = typer.Option(
+        None,
+        "--exclude-prefix",
+        help="Comma-separated prefixes to keep in BF16.",
+    ),
+    exclude_suffix: str | None = typer.Option(
+        None,
+        "--exclude-suffix",
+        help="Comma-separated suffixes to keep in BF16.",
+    ),
     overwrite: bool | None = typer.Option(
         None,
         "--overwrite/--no-overwrite",
@@ -371,11 +870,10 @@ def optimize(
                 if target_size_gib is not None
                 else optimize_config.target_size_gib
             )
-            effective_methods = method or list(optimize_config.methods)
-            effective_enable_int6 = (
-                enable_potatoforge_int6_runtime
-                if enable_potatoforge_int6_runtime is not None
-                else optimize_config.enable_potatoforge_int6_runtime
+            effective_methods = (
+                _split_comma_separated(method)
+                if method is not None
+                else list(optimize_config.methods)
             )
             effective_max_error = (
                 max_relative_l2_error
@@ -383,12 +881,12 @@ def optimize(
                 else optimize_config.max_relative_l2_error
             )
             effective_prefixes = (
-                tuple(exclude_prefix)
+                _split_comma_separated(exclude_prefix)
                 if exclude_prefix is not None
                 else optimize_config.exclude_prefixes
             )
             effective_suffixes = (
-                tuple(exclude_suffix)
+                _split_comma_separated(exclude_suffix)
                 if exclude_suffix is not None
                 else optimize_config.exclude_suffixes
             )
@@ -414,20 +912,23 @@ def optimize(
             effective_output_path = output_path
             effective_profile_id = profile_id
             effective_target_size_gib = target_size_gib
-            effective_methods = method or list(SUPPORTED_METHODS)
-            effective_enable_int6 = bool(enable_potatoforge_int6_runtime)
+            effective_methods = (
+                _split_comma_separated(method)
+                if method is not None
+                else list(SUPPORTED_METHODS)
+            )
             effective_max_error = max_relative_l2_error
-            effective_prefixes = tuple(exclude_prefix or ())
-            effective_suffixes = tuple(exclude_suffix or ())
+            effective_prefixes = _split_comma_separated(exclude_prefix)
+            effective_suffixes = _split_comma_separated(exclude_suffix)
             effective_overwrite = bool(overwrite)
 
+        audit_document = load_weight_audit(effective_audit_path)
         optimized = optimize_target_size(
-            load_weight_audit(effective_audit_path),
+            audit_document,
             effective_profile_id,
             _gib_to_bytes(effective_target_size_gib),
             frozenset(effective_methods),
             effective_max_error,
-            effective_enable_int6,
             effective_prefixes,
             effective_suffixes,
         )
@@ -444,7 +945,11 @@ def optimize(
                 "profile_id": effective_profile_id,
                 "target_bytes": optimized.target_bytes,
                 "estimated_output_bytes": optimized.output_bytes,
-                "proxy_distortion": optimized.proxy_distortion,
+                "reconstruction_sse": optimized.reconstruction_sse,
+                "audited_global_relative_l2": audited_global_relative_l2(
+                    audit_document,
+                    optimized.reconstruction_sse,
+                ),
                 "dry_run": dry_run,
                 "warning": "Generated profiles still require artifact and runtime validation.",
             },
