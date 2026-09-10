@@ -27,7 +27,6 @@ profile = "profiles/zit/generated.json"
 profile_id = "zit"
 target_size_gib = 4.3
 methods = ["int6", "int8"]
-enable_potatoforge_int6_runtime = true
 exclude_prefixes = ["final_layer."]
 exclude_suffixes = [".bias"]
 """,
@@ -130,7 +129,7 @@ methods = ["int8"]
             with self.assertRaisesRegex(ValueError, "Unknown config field"):
                 load_optimize_config(config_path)
 
-    def test_int6_requires_runtime_opt_in(self) -> None:
+    def test_rejects_removed_int6_runtime_field(self) -> None:
         with TemporaryDirectory() as directory:
             config_path = self._write(
                 directory,
@@ -145,10 +144,11 @@ profile = "profile.json"
 profile_id = "invalid"
 target_size_gib = 1.0
 methods = ["int6"]
+enable_potatoforge_int6_runtime = true
 """,
             )
 
-            with self.assertRaisesRegex(ValueError, "INT6 methods require"):
+            with self.assertRaisesRegex(ValueError, r"Unknown \[optimize\] field"):
                 load_optimize_config(config_path)
 
 

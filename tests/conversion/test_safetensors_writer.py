@@ -7,9 +7,11 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from potatoforge.planning import (
+    OutputTensorSpec,
     TensorHeader,
     build_output_layout,
     build_plan,
+    build_layout_from_specs,
 )
 from potatoforge.profiles import QuantizationProfile
 from potatoforge.quantization import quantize_int8_tensorwise
@@ -39,6 +41,22 @@ def raw_tensor_bytes(tensor: torch.Tensor) -> bytes:
 
 
 class TestSafetensorsWriter(unittest.TestCase):
+    def test_writes_chunked_payloads(self) -> None:
+        layout = build_layout_from_specs(
+            (OutputTensorSpec("chunked", "U8", (5,), 5),)
+        )
+
+        with TemporaryDirectory() as directory:
+            output_path = Path(directory) / "chunked.safetensors"
+            write_safetensors_file(
+                output_path,
+                layout,
+                (("chunked", iter((b"12", b"345"))),),
+            )
+            tensors = load_file(output_path)
+
+        self.assertEqual(tensors["chunked"].tolist(), [49, 50, 51, 52, 53])
+
     def test_writes_a_valid_planned_file(self) -> None:
         source_header: TensorHeader= {
             "model.diffusion_model.blocks.1.attn.wq.weight": {

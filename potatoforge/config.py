@@ -34,7 +34,6 @@ class OptimizeConfig:
     profile_id: str
     target_size_gib: float
     methods: tuple[QuantizationMethod, ...]
-    enable_potatoforge_int6_runtime: bool
     max_relative_l2_error: float | None
     exclude_prefixes: tuple[str, ...]
     exclude_suffixes: tuple[str, ...]
@@ -203,7 +202,6 @@ def _load_optimize_settings(value: object) -> dict[str, object]:
             "profile_id",
             "target_size_gib",
             "methods",
-            "enable_potatoforge_int6_runtime",
             "max_relative_l2_error",
             "exclude_prefixes",
             "exclude_suffixes",
@@ -230,11 +228,6 @@ def _load_optimize_settings(value: object) -> dict[str, object]:
     unknown = sorted(set(methods_value) - MEASURED_METHODS)
     if unknown:
         raise ValueError(f"Unknown optimize method(s): {', '.join(unknown)}.")
-    enable_int6 = table.get("enable_potatoforge_int6_runtime", False)
-    if type(enable_int6) is not bool:
-        raise ValueError("optimize.enable_potatoforge_int6_runtime must be a boolean.")
-    if {"int6", "int6_convrot"} & set(methods_value) and not enable_int6:
-        raise ValueError("INT6 methods require optimize.enable_potatoforge_int6_runtime = true.")
     max_error = table.get("max_relative_l2_error")
     if max_error is not None and (
         not isinstance(max_error, (int, float))
@@ -250,7 +243,6 @@ def _load_optimize_settings(value: object) -> dict[str, object]:
         "profile_id": profile_id,
         "target_size_gib": float(target_size_gib),
         "methods": tuple(cast(QuantizationMethod, method) for method in methods_value),
-        "enable_potatoforge_int6_runtime": enable_int6,
         "max_relative_l2_error": None if max_error is None else float(max_error),
         "exclude_prefixes": _string_list(table.get("exclude_prefixes", []), "optimize.exclude_prefixes"),
         "exclude_suffixes": _string_list(table.get("exclude_suffixes", []), "optimize.exclude_suffixes"),

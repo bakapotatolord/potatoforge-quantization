@@ -6,7 +6,7 @@ from typing import TypeAlias
 from .planning import METADATA_KEY, SafetensorsLayout, layout_to_header
 
 
-TensorPayload: TypeAlias = tuple[str, bytes]
+TensorPayload: TypeAlias = tuple[str, bytes | Iterable[bytes]]
 TensorPayloadStream: TypeAlias = Iterable[TensorPayload]
 
 
@@ -61,14 +61,37 @@ def write_safetensors_file(
                     f"{payload_name}."
                 )
 
-            if len(payload) != tensor.spec.byte_count:
+            if isinstance(payload, bytes):
+                if len(payload) != tensor.spec.byte_count:
+                    raise ValueError(
+                        f"{payload_name} needs "
+                        f"{tensor.spec.byte_count} bytes, got "
+                        f"{len(payload)}."
+                    )
+
+                file.write(payload)
+                continue
+
+            written_bytes = 0
+            for chunk in payload:
+                if not isinstance(chunk, bytes):
+                    raise ValueError(
+                        f"{payload_name} payload chunks must be bytes."
+                    )
+                written_bytes += len(chunk)
+                if written_bytes > tensor.spec.byte_count:
+                    raise ValueError(
+                        f"{payload_name} needs "
+                        f"{tensor.spec.byte_count} bytes, got more."
+                    )
+                file.write(chunk)
+
+            if written_bytes != tensor.spec.byte_count:
                 raise ValueError(
                     f"{payload_name} needs "
                     f"{tensor.spec.byte_count} bytes, got "
-                    f"{len(payload)}."
+                    f"{written_bytes}."
                 )
-
-            file.write(payload)
 
         try:
             unexpected_name, _ = next(payload_iterator)
