@@ -1,15 +1,66 @@
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from typer.testing import CliRunner
 
 from potatoforge.cli import app
+from potatoforge.audits.activation_comparison import V2_ACTIVATION_METRICS
 from potatoforge.audits.activation_profiles import ActivationProfileResult
 from potatoforge.audits.profile_optimizer import OptimizedProfile
 
 
 class TestActivationCli(unittest.TestCase):
+    def test_activation_audit_passes_v2_cache_arguments(self) -> None:
+        calibration = Mock(
+            session_id="test-session",
+            tensor_names=Mock(return_value=("blocks.0.attn.wq.weight",)),
+        )
+        with (
+            patch(
+                "potatoforge.cli.ActivationCalibration.load",
+                return_value=calibration,
+            ),
+            patch(
+                "potatoforge.cli.run_activation_audit",
+                return_value=(Path("cache.json"), Path("cache.safetensors")),
+            ) as audit_mock,
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "activation-audit",
+                    "model.safetensors",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "cache",
+                    "--method",
+                    "int8, bf16",
+                    "--tensor",
+                    "blocks.0.attn.wq.weight",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        audit_mock.assert_called_once()
+        self.assertEqual(
+            audit_mock.call_args.args[:3],
+            (
+                Path("model.safetensors"),
+                calibration,
+                Path("cache"),
+            ),
+        )
+        self.assertEqual(
+            audit_mock.call_args.kwargs["requested_methods"],
+            ("int8", "bf16"),
+        )
+        self.assertEqual(
+            audit_mock.call_args.kwargs["tensor_names"],
+            ("blocks.0.attn.wq.weight",),
+        )
+
     def test_audit_loads_activation_calibration(self) -> None:
         document = {
             "results": [],
@@ -129,6 +180,77 @@ class TestActivationCli(unittest.TestCase):
             False,
         )
 
+    def test_activation_score_can_score_v2_audit_cache(self) -> None:
+        report = {"summary": {"available_candidate_count": 2}}
+        with (
+            patch(
+                "potatoforge.cli.score_activation_audit",
+                return_value=report,
+            ) as score_mock,
+            patch("potatoforge.cli._write_json"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "activation-score",
+                    "--audit-cache",
+                    "cache.json",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "scores.json",
+                    "--metric",
+                    "eval_p95_observed_relative_sse",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        score_mock.assert_called_once_with(
+            Path("cache.json"),
+            Path("calibration.json"),
+            metric="eval_p95_observed_relative_sse",
+        )
+
+    def test_activation_inspect_writes_report(self) -> None:
+        report = {"summary": {"layer_count": 1}}
+        with (
+            patch(
+                "potatoforge.cli.inspect_activation_audit",
+                return_value=report,
+            ) as inspect_mock,
+            patch("potatoforge.cli._write_json") as write_mock,
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "activation-inspect",
+                    "--audit-cache",
+                    "cache.json",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--tensor",
+                    "blocks.0.attn.wq.weight",
+                    "--top-n",
+                    "3",
+                    "--output",
+                    "inspection.json",
+                    "--overwrite",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        inspect_mock.assert_called_once_with(
+            Path("cache.json"),
+            Path("calibration.json"),
+            tensor_name="blocks.0.attn.wq.weight",
+            top_n=3,
+        )
+        write_mock.assert_called_once_with(
+            Path("inspection.json"),
+            report,
+            True,
+        )
+
     def test_calibration_merge_passes_all_input_paths(self) -> None:
         with (
             patch(
@@ -217,6 +339,53 @@ class TestActivationCli(unittest.TestCase):
             Path("relative-summary.json"),
             generated.summary,
             True,
+        )
+
+    def test_activation_compare_passes_all_profile_options(self) -> None:
+        summary = {"workbook_path": "comparison.xlsx", "metric_count": 14}
+        with patch(
+            "potatoforge.cli.generate_activation_comparison_workbook",
+            return_value=summary,
+        ) as compare_mock:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "activation-compare",
+                    "--audit-cache",
+                    "cache.json",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "comparison.xlsx",
+                    "--target-size-gib",
+                    "8.5",
+                    "--method",
+                    "convrot_w4a4,int8_convrot",
+                    "--baseline-method",
+                    "convrot_w4a4",
+                    "--exclude-prefix",
+                    "first.,last.",
+                    "--top-n",
+                    "10",
+                    "--overwrite",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        compare_mock.assert_called_once_with(
+            Path("cache.json"),
+            Path("calibration.json"),
+            Path("comparison.xlsx"),
+            source_path=None,
+            target_bytes=int(8.5 * 1024**3),
+            promotion_budget_bytes=None,
+            allowed_methods=frozenset({"convrot_w4a4", "int8_convrot"}),
+            baseline_method="convrot_w4a4",
+            excluded_prefixes=("first.", "last."),
+            excluded_suffixes=(),
+            metrics=V2_ACTIVATION_METRICS,
+            top_n=10,
+            overwrite=True,
         )
 
     def test_source_analyze_passes_activation_calibration(self) -> None:

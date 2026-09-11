@@ -9,9 +9,12 @@ from safetensors.torch import save_file
 
 from potatoforge.audits.activation_profiles import (
     _runtime_profile,
+    generate_activation_cache_profile,
     generate_activation_profile,
     load_activation_score,
 )
+from potatoforge.audits.activation_audit import ActivationAuditCache
+from potatoforge.audits.activation_measurements import CandidateMeasurement
 from potatoforge.audits.profile_compaction import compact_runtime_rules
 from potatoforge.audits.profile_optimizer import (
     estimate_profile_bytes,
@@ -24,6 +27,89 @@ from potatoforge.profiles import resolve_profile
 
 
 class TestActivationProfiles(unittest.TestCase):
+    def test_cache_profile_reuses_existing_optimizer_choices(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.safetensors"
+            tensor_name = "blocks.0.attn.wq.weight"
+            save_file(
+                {tensor_name: torch.zeros((2, 256), dtype=torch.bfloat16)},
+                str(source_path),
+            )
+            cache = ActivationAuditCache(
+                source_model_path=str(source_path.resolve()),
+                calibration_metadata_path=str((root / "calibration.json").resolve()),
+                calibration_stats_path=str(
+                    (root / "calibration.safetensors").resolve()
+                ),
+                calibration_session_id="session",
+                calibration_version=2,
+                baseline_label="bf16",
+                requested_methods=("bf16", "int8"),
+                measurements={
+                    tensor_name: {
+                        "bf16": CandidateMeasurement(
+                            "bf16",
+                            "keep",
+                            True,
+                            1024,
+                            torch.zeros((1, 2)),
+                        ),
+                        "int8": CandidateMeasurement(
+                            "int8",
+                            "int8",
+                            True,
+                            600,
+                            torch.ones((1, 2)),
+                        ),
+                    }
+                },
+                layer_shapes={tensor_name: (256, 2, 1)},
+            )
+            calibration = object()
+            score_report = {
+                "objective": {"metric_version": 1},
+                "results": [
+                    {
+                        "tensor_name": tensor_name,
+                        "method": "bf16",
+                        "objective_cost": 0.0,
+                    },
+                    {
+                        "tensor_name": tensor_name,
+                        "method": "int8",
+                        "objective_cost": 1.0,
+                    },
+                ],
+            }
+            with (
+                patch(
+                    "potatoforge.audits.activation_profiles.ActivationCalibration.load",
+                    return_value=calibration,
+                ),
+                patch(
+                    "potatoforge.audits.activation_profiles.score_activation_audit",
+                    return_value=score_report,
+                ),
+                patch(
+                    "potatoforge.audits.activation_profiles.compact_runtime_rules",
+                    wraps=compact_runtime_rules,
+                ) as compact_rules,
+            ):
+                generated = generate_activation_cache_profile(
+                    cache,
+                    root / "calibration.json",
+                    promotion_budget_bytes=0,
+                )
+
+        self.assertEqual(
+            resolve_profile(generated.optimized.profile, tensor_name),
+            "int8",
+        )
+        self.assertTrue(compact_rules.called)
+        self.assertEqual(compact_rules.call_args.args[1], "keep")
+        self.assertEqual(generated.summary["metric"], "aggregate_observed_relative_sse")
+
     def test_rejects_score_without_relative_metric_schema(self) -> None:
         with TemporaryDirectory() as directory:
             score_path = Path(directory) / "old-score.json"

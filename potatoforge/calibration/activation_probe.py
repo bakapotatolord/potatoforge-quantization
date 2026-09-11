@@ -9,7 +9,10 @@ from typing import Any, Literal, NamedTuple
 import torch
 from safetensors.torch import load_file, save_file
 
-from .activation import ActivationCalibration
+from .activation import (
+    ActivationCalibration,
+    merge_v2_activation_calibrations,
+)
 
 
 _PROBE_FORMAT = "potatoforge_activation_probe"
@@ -475,6 +478,14 @@ def merge_activation_calibrations(
         for metadata_path in metadata_paths
     ]
     first = calibrations[0]
+    if any(calibration.version != first.version for calibration in calibrations[1:]):
+        raise ValueError("Cannot merge activation calibrations across versions.")
+    if first.version == 2:
+        return merge_v2_activation_calibrations(
+            calibrations,
+            output_path,
+            overwrite=overwrite,
+        )
     for index, calibration in enumerate(calibrations[1:], start=2):
         for field in (
             "baseline_label",

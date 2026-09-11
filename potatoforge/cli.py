@@ -16,7 +16,21 @@ from .audits.analysis import (
     print_tensor_analysis,
     write_analysis_workbook,
 )
-from .audits.activation_profiles import generate_activation_profile
+from .audits.activation_audit import (
+    activation_audit_pair_paths,
+    inspect_activation_audit,
+    run_activation_audit,
+    score_activation_audit,
+)
+from .audits.activation_comparison import (
+    V2_ACTIVATION_METRICS,
+    generate_activation_comparison_workbook,
+)
+from .audits.activation_measurements import MEASUREMENT_METHODS
+from .audits.activation_profiles import (
+    generate_activation_cache_profile,
+    generate_activation_profile,
+)
 from .audits.profile_optimizer import (
     SUPPORTED_METHODS,
     audited_global_relative_l2,
@@ -177,6 +191,37 @@ def _mib_to_bytes(value: float, *, allow_zero: bool = False) -> int:
     if byte_count <= 0 and not allow_zero:
         raise typer.BadParameter("must represent at least one byte")
     return byte_count
+
+
+def _resolve_profile_budget(
+    target_size_mib: float | None,
+    target_size_gib: float | None,
+    promotion_budget_mib: float | None,
+    promotion_budget_bytes_option: int | None,
+    *,
+    option_error: str = "Provide exactly one target-size or promotion-budget option.",
+) -> tuple[int | None, int | None]:
+    budget_options = sum(
+        value is not None
+        for value in (
+            target_size_mib,
+            target_size_gib,
+            promotion_budget_mib,
+            promotion_budget_bytes_option,
+        )
+    )
+    if budget_options != 1:
+        raise ValueError(option_error)
+    if target_size_mib is not None:
+        return _mib_to_bytes(target_size_mib), None
+    if target_size_gib is not None:
+        return _gib_to_bytes(target_size_gib), None
+    if promotion_budget_bytes_option is not None:
+        if promotion_budget_bytes_option < 0:
+            raise ValueError("--promotion-budget-bytes must be non-negative.")
+        return None, promotion_budget_bytes_option
+    assert promotion_budget_mib is not None
+    return None, _mib_to_bytes(promotion_budget_mib, allow_zero=True)
 
 
 def _split_comma_separated(value: str | None) -> tuple[str, ...]:
@@ -415,12 +460,88 @@ def audit(
     _run("audit", action)
 
 
+@app.command("activation-audit")
+def activation_audit(
+    source_path: Path = typer.Argument(...),
+    activation_calibration: Path = typer.Option(
+        ...,
+        "--activation-calibration",
+        help="V2 activation calibration metadata JSON.",
+    ),
+    output: Path = typer.Option(..., "--output", help="Activation audit cache."),
+    calibration_stats: Path | None = typer.Option(
+        None,
+        "--calibration-stats",
+        help="Optional calibration Safetensors path.",
+    ),
+    method: str | None = typer.Option(
+        None,
+        "--method",
+        help=(
+            "Comma-separated candidate methods; defaults to: "
+            + ", ".join(MEASUREMENT_METHODS)
+        ),
+    ),
+    tensor: str | None = typer.Option(
+        None,
+        "--tensor",
+        help="Optional comma-separated calibration tensor names.",
+    ),
+    overwrite: bool = typer.Option(False, help="Replace an existing cache pair."),
+) -> None:
+    """Build a reusable activation-aware candidate measurement cache."""
+    def action() -> None:
+        requested_methods = _split_comma_separated(method) or None
+        tensor_names = _split_comma_separated(tensor) or None
+        calibration = ActivationCalibration.load(
+            activation_calibration,
+            calibration_stats,
+        )
+        pair_paths = activation_audit_pair_paths(output)
+        if not overwrite:
+            for output_path in pair_paths:
+                if output_path.exists():
+                    raise FileExistsError(f"Output already exists: {output_path}")
+        metadata_path, tensors_path = run_activation_audit(
+            source_path,
+            calibration,
+            output,
+            calibration_metadata_path=activation_calibration,
+            calibration_stats_path=calibration_stats,
+            requested_methods=requested_methods,
+            tensor_names=tensor_names,
+            on_tensor_started=_print_progress,
+            overwrite=overwrite,
+        )
+        _finish(
+            {
+                "source_path": str(source_path),
+                "calibration_session_id": calibration.session_id,
+                "metadata_path": str(metadata_path),
+                "tensors_path": str(tensors_path),
+                "method_count": len(
+                    MEASUREMENT_METHODS
+                    if requested_methods is None
+                    else requested_methods
+                ),
+                "layer_count": len(calibration.tensor_names()),
+            }
+        )
+
+    _run("activation-audit", action)
+
+
 @app.command("activation-score")
 def activation_score(
-    probe_cache: Path = typer.Option(
-        ...,
+    probe_cache: Path | None = typer.Option(
+        None,
         "--probe-cache",
         help="Reusable activation probe metadata JSON.",
+    ),
+    audit_cache: Path | None = typer.Option(
+        None,
+        "--audit-cache",
+        help="Reusable V2 activation-audit metadata JSON.",
     ),
     activation_calibration: Path = typer.Option(
         ...,
@@ -428,22 +549,278 @@ def activation_score(
         help="Activation calibration metadata JSON.",
     ),
     output: Path = typer.Option(..., "--output", help="Activation score JSON."),
+    metric: str = typer.Option(
+        "aggregate_observed_relative_sse",
+        "--metric",
+        help="V2 cache metric when --audit-cache is used.",
+    ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
-    """Score one calibration against a reusable activation probe cache."""
+    """Score a reusable activation probe or V2 activation-audit cache."""
     def action() -> None:
-        report = score_activation_probe(probe_cache, activation_calibration)
+        if (probe_cache is None) == (audit_cache is None):
+            raise ValueError(
+                "Provide exactly one of --probe-cache or --audit-cache."
+            )
+        if probe_cache is not None:
+            report = score_activation_probe(probe_cache, activation_calibration)
+            scored_count = report["summary"]["scored_tensor_count"]
+        else:
+            assert audit_cache is not None
+            report = score_activation_audit(
+                audit_cache,
+                activation_calibration,
+                metric=metric,
+            )
+            scored_count = report["summary"]["available_candidate_count"]
         _write_json(output, report, overwrite)
         _finish(
             {
-                "probe_cache": str(probe_cache),
+                "probe_cache": None if probe_cache is None else str(probe_cache),
+                "audit_cache": None if audit_cache is None else str(audit_cache),
                 "activation_calibration": str(activation_calibration),
                 "score_report": str(output),
-                "scored_tensor_count": report["summary"]["scored_tensor_count"],
+                "scored_tensor_count": scored_count,
             }
         )
 
     _run("activation-score", action)
+
+
+@app.command("activation-inspect")
+def activation_inspect(
+    audit_cache: Path = typer.Option(
+        ...,
+        "--audit-cache",
+        help="V2 activation-audit metadata JSON.",
+    ),
+    activation_calibration: Path = typer.Option(
+        ...,
+        "--activation-calibration",
+        help="Activation calibration metadata JSON.",
+    ),
+    tensor: str | None = typer.Option(
+        None,
+        "--tensor",
+        help="Optional tensor name; inspect all cached layers by default.",
+    ),
+    top_n: int = typer.Option(5, "--top-n", help="Worst evaluations to report."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional inspection report JSON path.",
+    ),
+    overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
+) -> None:
+    """Inspect cached activation errors without requantizing weights."""
+    def action() -> None:
+        report = inspect_activation_audit(
+            audit_cache,
+            activation_calibration,
+            tensor_name=tensor,
+            top_n=top_n,
+        )
+        if output is None:
+            typer.echo(json.dumps(report, indent=2))
+            return
+        _write_json(output, report, overwrite)
+        _finish(
+            {
+                "audit_cache": str(audit_cache),
+                "inspection_report": str(output),
+                "layer_count": report["summary"]["layer_count"],
+            }
+        )
+
+    _run("activation-inspect", action)
+
+
+@app.command("activation-optimize")
+def activation_optimize(
+    audit_cache: Path = typer.Option(
+        ...,
+        "--audit-cache",
+        help="V2 activation-audit metadata JSON.",
+    ),
+    activation_calibration: Path = typer.Option(
+        ...,
+        "--activation-calibration",
+        help="V2 activation calibration metadata JSON.",
+    ),
+    output: Path = typer.Option(..., "--output", help="Output profile JSON."),
+    summary_output: Path | None = typer.Option(
+        None,
+        "--summary-output",
+        help="Optional optimization summary JSON.",
+    ),
+    source_path: Path | None = typer.Option(
+        None,
+        "--source",
+        help="Optional source checkpoint override.",
+    ),
+    target_size_mib: float | None = typer.Option(None, "--target-size-mib"),
+    target_size_gib: float | None = typer.Option(None, "--target-size-gib"),
+    promotion_budget_mib: float | None = typer.Option(
+        None,
+        "--promotion-budget-mib",
+    ),
+    promotion_budget_bytes_option: int | None = typer.Option(
+        None,
+        "--promotion-budget-bytes",
+    ),
+    metric: str = typer.Option(
+        "aggregate_observed_relative_sse",
+        "--metric",
+    ),
+    method: str | None = typer.Option(
+        None,
+        "--method",
+        help="Comma-separated methods allowed in the optimizer.",
+    ),
+    baseline_method: str = typer.Option(
+        "bf16",
+        "--baseline-method",
+        help="Profile baseline method; use convrot_w4a4 for W4A4 baseline.",
+    ),
+    exclude_prefix: str | None = typer.Option(None, "--exclude-prefix"),
+    exclude_suffix: str | None = typer.Option(None, "--exclude-suffix"),
+    profile_id: str = typer.Option("activation-audit", "--profile-id"),
+    overwrite: bool = typer.Option(False, help="Replace existing outputs."),
+) -> None:
+    """Generate a runtime profile from cache-only activation costs."""
+    def action() -> None:
+        target_bytes, promotion_budget_bytes = _resolve_profile_budget(
+            target_size_mib,
+            target_size_gib,
+            promotion_budget_mib,
+            promotion_budget_bytes_option,
+        )
+        effective_summary_output = summary_output or output.with_name(
+            f"{output.stem}-summary.json"
+        )
+        if output.resolve() == effective_summary_output.resolve():
+            raise ValueError("Profile and summary output paths must be different.")
+        if not overwrite:
+            for output_path in (output, effective_summary_output):
+                if output_path.exists():
+                    raise FileExistsError(f"Output already exists: {output_path}")
+
+        generated = generate_activation_cache_profile(
+            audit_cache,
+            activation_calibration,
+            source_path=source_path,
+            target_bytes=target_bytes,
+            promotion_budget_bytes=promotion_budget_bytes,
+            profile_id=profile_id,
+            metric=metric,
+            allowed_methods=(
+                None
+                if method is None
+                else frozenset(_split_comma_separated(method))
+            ),
+            baseline_method=baseline_method,
+            excluded_prefixes=_split_comma_separated(exclude_prefix),
+            excluded_suffixes=_split_comma_separated(exclude_suffix),
+        )
+        write_profile(output, generated.optimized.profile, overwrite=overwrite)
+        _write_json(effective_summary_output, generated.summary, overwrite)
+        _finish(
+            {
+                "audit_cache": str(audit_cache),
+                "profile_path": str(output),
+                "summary_path": str(effective_summary_output),
+                "metric": metric,
+                "target_bytes": generated.optimized.target_bytes,
+                "estimated_output_bytes": generated.optimized.output_bytes,
+            }
+        )
+
+    _run("activation-optimize", action)
+
+
+@app.command("activation-compare")
+def activation_compare(
+    audit_cache: Path = typer.Option(
+        ...,
+        "--audit-cache",
+        help="V2 activation-audit metadata JSON.",
+    ),
+    activation_calibration: Path = typer.Option(
+        ...,
+        "--activation-calibration",
+        help="V2 activation calibration metadata JSON.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        help="Excel comparison workbook.",
+    ),
+    source_path: Path | None = typer.Option(
+        None,
+        "--source",
+        help="Optional source checkpoint override.",
+    ),
+    target_size_mib: float | None = typer.Option(None, "--target-size-mib"),
+    target_size_gib: float | None = typer.Option(None, "--target-size-gib"),
+    promotion_budget_mib: float | None = typer.Option(
+        None,
+        "--promotion-budget-mib",
+    ),
+    promotion_budget_bytes_option: int | None = typer.Option(
+        None,
+        "--promotion-budget-bytes",
+    ),
+    method: str | None = typer.Option(
+        None,
+        "--method",
+        help="Comma-separated methods allowed in every comparison profile.",
+    ),
+    baseline_method: str = typer.Option(
+        "bf16",
+        "--baseline-method",
+        help="Profile baseline method; use convrot_w4a4 for W4A4 baseline.",
+    ),
+    exclude_prefix: str | None = typer.Option(None, "--exclude-prefix"),
+    exclude_suffix: str | None = typer.Option(None, "--exclude-suffix"),
+    metrics: str | None = typer.Option(
+        None,
+        "--metrics",
+        help="Optional comma-separated metric list; defaults to all V2 metrics.",
+    ),
+    top_n: int = typer.Option(20, "--top-n", help="Ranked rows per metric/method."),
+    overwrite: bool = typer.Option(False, help="Replace an existing workbook."),
+) -> None:
+    """Compare all V2 activation metrics in one workbook."""
+    def action() -> None:
+        target_bytes, promotion_budget_bytes = _resolve_profile_budget(
+            target_size_mib,
+            target_size_gib,
+            promotion_budget_mib,
+            promotion_budget_bytes_option,
+        )
+        requested_metrics = _split_comma_separated(metrics) or V2_ACTIVATION_METRICS
+        summary = generate_activation_comparison_workbook(
+            audit_cache,
+            activation_calibration,
+            output,
+            source_path=source_path,
+            target_bytes=target_bytes,
+            promotion_budget_bytes=promotion_budget_bytes,
+            allowed_methods=(
+                None
+                if method is None
+                else frozenset(_split_comma_separated(method))
+            ),
+            baseline_method=baseline_method,
+            excluded_prefixes=_split_comma_separated(exclude_prefix),
+            excluded_suffixes=_split_comma_separated(exclude_suffix),
+            metrics=requested_metrics,
+            top_n=top_n,
+            overwrite=overwrite,
+        )
+        _finish(summary)
+
+    _run("activation-compare", action)
 
 
 @app.command("calibration-merge")
@@ -534,37 +911,16 @@ def profile_from_activation(
 ) -> None:
     """Generate an offline equal-budget mixed-precision profile."""
     def action() -> None:
-        budget_options = sum(
-            value is not None
-            for value in (
-                target_size_mib,
-                target_size_gib,
-                promotion_budget_mib,
-                promotion_budget_bytes_option,
-            )
+        target_bytes, promotion_budget_bytes = _resolve_profile_budget(
+            target_size_mib,
+            target_size_gib,
+            promotion_budget_mib,
+            promotion_budget_bytes_option,
+            option_error=(
+                "Provide exactly one of --target-size-mib, --target-size-gib, "
+                "--promotion-budget-mib, or --promotion-budget-bytes."
+            ),
         )
-        if budget_options != 1:
-            raise ValueError(
-                "Provide exactly one of --target-size-mib, "
-                "--target-size-gib, --promotion-budget-mib, or "
-                "--promotion-budget-bytes."
-            )
-        target_bytes = None
-        promotion_budget_bytes = None
-        if target_size_mib is not None:
-            target_bytes = _mib_to_bytes(target_size_mib)
-        elif target_size_gib is not None:
-            target_bytes = _gib_to_bytes(target_size_gib)
-        elif promotion_budget_bytes_option is not None:
-            if promotion_budget_bytes_option < 0:
-                raise ValueError("--promotion-budget-bytes must be non-negative.")
-            promotion_budget_bytes = promotion_budget_bytes_option
-        else:
-            assert promotion_budget_mib is not None
-            promotion_budget_bytes = _mib_to_bytes(
-                promotion_budget_mib,
-                allow_zero=True,
-            )
 
         effective_profile_id = profile_id or (
             "activation-relative"
