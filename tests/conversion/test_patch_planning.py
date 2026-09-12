@@ -50,6 +50,34 @@ class TestPatchPlanning(unittest.TestCase):
         self.assertEqual(plan.generated_tensor_count, 3)
         self.assertEqual(plan.source_bytes_to_read, 8)
 
+    def test_plans_every_weight_with_a_prefix(self) -> None:
+        source_header = {
+            **self.source_header,
+            "blocks.0.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [24, 32],
+            },
+            "blocks.1.weight": {
+                "dtype": "BF16",
+                "shape": [1, 4],
+                "data_offsets": [32, 40],
+            },
+        }
+
+        plan = build_patch_plan(
+            source_header,
+            "blocks.*",
+            "int8",
+            "blocks-patch",
+        )
+
+        self.assertEqual(
+            [entry.source_tensor_name for entry in plan.entries],
+            ["blocks.0.weight", "blocks.1.weight"],
+        )
+        self.assertEqual(plan.selected_tensor_count, 2)
+
     def test_plans_a_fused_qkv_family(self) -> None:
         source_header = {
             **self.source_header,

@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from typer.testing import CliRunner
@@ -28,11 +29,60 @@ class TestCli(unittest.TestCase):
             "analyze",
             "optimize",
             "quantize",
-            "patch-sweep",
+            "patch",
             "extract",
             "test",
         ):
             self.assertIn(command, result.stdout)
+
+    def test_patch_accepts_a_tensor_prefix(self) -> None:
+        plan = SimpleNamespace(selected_tensor_count=2)
+
+        def write_patch(
+            _source: Path,
+            output: Path,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            output.write_bytes(b"patch")
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "blocks.safetensors"
+            with (
+                patch(
+                    "potatoforge.cli.read_source_model_header",
+                    return_value=SimpleNamespace(tensors={}),
+                ),
+                patch(
+                    "potatoforge.cli.build_patch_plan",
+                    return_value=plan,
+                ) as build_plan_mock,
+                patch("potatoforge.cli.build_patch_metadata", return_value={}),
+                patch(
+                    "potatoforge.cli.execute_patch_plan",
+                    side_effect=write_patch,
+                ),
+            ):
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "patch",
+                        "source.safetensors",
+                        str(output),
+                        "--tensor",
+                        "blocks.*",
+                        "--action",
+                        "int8",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        build_plan_mock.assert_called_once_with(
+            {},
+            "blocks.*",
+            "int8",
+            "blocks",
+        )
 
     def test_version_is_available(self) -> None:
         result = self.runner.invoke(app, ["--version"])

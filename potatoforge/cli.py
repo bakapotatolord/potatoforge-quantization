@@ -54,12 +54,14 @@ from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
 from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
-from .patch_sweep import generate_patch_sweep_from_profile
+from .patch_planning import build_patch_metadata, build_patch_plan
+from .patching import execute_patch_plan
 from .planning import (
     QUANTIZATION_LAYERS_METADATA_KEY,
     QUANTIZATION_METADATA_KEY,
     parse_quantization_layers,
 )
+from .profiles import validate_quantization_action
 from .config import load_optimize_config, load_quantize_config
 from .calibration import (
     ActivationCalibration,
@@ -1429,46 +1431,53 @@ def quantize(
     _run("quantize", action)
 
 
-@app.command("patch-sweep")
-def patch_sweep(
-    source_path: Path = typer.Option(
+@app.command("patch")
+def patch(
+    source_path: Path = typer.Argument(...),
+    output_path: Path = typer.Argument(...),
+    tensor: str = typer.Option(
         ...,
-        "--source",
-        help="Original source checkpoint containing the selected weights.",
+        "--tensor",
+        help="Exact tensor name or a prefix ending in .*.",
     ),
-    profile_path: Path = typer.Option(
+    action_name: str = typer.Option(
         ...,
-        "--profile",
-        help="JSON sweep profile listing exact layers and actions.",
-    ),
-    output_dir: Path = typer.Option(
-        ...,
-        "--output-dir",
-        help="Directory for group quantization patches.",
+        "--action",
+        help="Quantization action for the selected tensor(s).",
     ),
 ) -> None:
-    """Generate one quantization patch per profile group."""
-    def action() -> None:
-        result = generate_patch_sweep_from_profile(
+    """Write one quantization patch for an exact tensor or prefix."""
+    def run() -> None:
+        action = validate_quantization_action(
+            action_name,
+            "--action",
+            allow_keep=False,
+        )
+        plan = build_patch_plan(
+            read_source_model_header(source_path).tensors,
+            tensor,
+            action,
+            output_path.stem,
+        )
+        execute_patch_plan(
             source_path,
-            profile_path,
-            output_dir,
+            output_path,
+            plan,
+            metadata=build_patch_metadata(plan, source_path),
             on_progress=_print_patch_progress,
         )
         _finish(
             {
                 "source_path": str(source_path),
-                "profile_path": str(profile_path),
-                "profile_id": result.plan.profile_id,
-                "output_dir": str(output_dir),
-                "generated_patch_count": result.generated_patch_count,
-                "failed_patch_count": 0,
-                "total_patch_bytes": result.total_patch_bytes,
-                "elapsed_seconds": round(result.elapsed_seconds, 3),
+                "tensor": tensor,
+                "action": action,
+                "selected_tensor_count": plan.selected_tensor_count,
+                "output_path": str(output_path),
+                "output_bytes": output_path.stat().st_size,
             }
         )
 
-    _run("patch-sweep", action)
+    _run("patch", run)
 
 
 @app.command("extract")

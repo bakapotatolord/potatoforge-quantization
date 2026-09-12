@@ -12,6 +12,44 @@ from potatoforge.patching import execute_patch_plan
 
 
 class TestPatchWriter(unittest.TestCase):
+    def test_writes_one_patch_for_a_tensor_prefix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.safetensors"
+            output = root / "patch.safetensors"
+            save_file(
+                {
+                    "blocks.0.weight": torch.tensor(
+                        [[1.0, 2.0, 3.0, 4.0]], dtype=torch.bfloat16
+                    ),
+                    "blocks.1.weight": torch.tensor(
+                        [[4.0, 3.0, 2.0, 1.0]], dtype=torch.bfloat16
+                    ),
+                },
+                str(source),
+            )
+            plan = build_patch_plan(
+                read_source_model_header(source).tensors,
+                "blocks.*",
+                "int8",
+                "blocks",
+            )
+
+            execute_patch_plan(source, output, plan)
+
+            header = read_source_model_header(output)
+            self.assertEqual(
+                list(header.tensors),
+                [
+                    "blocks.0.weight",
+                    "blocks.0.weight_scale",
+                    "blocks.0.comfy_quant",
+                    "blocks.1.weight",
+                    "blocks.1.weight_scale",
+                    "blocks.1.comfy_quant",
+                ],
+            )
+
     def test_refuses_collisions_and_cleans_partial_output(self) -> None:
         weight = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.bfloat16)
         with TemporaryDirectory() as directory:

@@ -103,48 +103,80 @@ def build_patch_plan(
     action: QuantizationAction,
     patch_id: str,
 ) -> PatchPlan:
-    if tensor_name not in source_header:
-        raise ValueError(
-            f"Patch layer does not exist in source checkpoint: {tensor_name}"
-        )
-    if not is_supported_weight_key(tensor_name):
-        raise ValueError(
-            f"Patch layer must be a canonical supported weight tensor: "
-            f"{tensor_name}"
+    if tensor_name.endswith(".*"):
+        prefix = tensor_name[:-2]
+        selected_names = [
+            name for name in source_header if name.startswith(prefix)
+        ]
+        if not selected_names:
+            raise ValueError(
+                f"Patch tensor prefix does not match source checkpoint: "
+                f"{prefix}"
+            )
+    else:
+        if tensor_name not in source_header:
+            raise ValueError(
+                f"Patch layer does not exist in source checkpoint: "
+                f"{tensor_name}"
+            )
+        selected_names = [tensor_name]
+
+    entries: list[PatchEntry] = []
+    for selected_name in selected_names:
+        if not is_supported_weight_key(selected_name):
+            raise ValueError(
+                f"Patch layer must be a canonical supported weight tensor: "
+                f"{selected_name}"
+            )
+
+        descriptor = source_header[selected_name]
+        try:
+            quantized_plan = build_quantized_tensor_plan(
+                action,
+                selected_name,
+                descriptor,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"Cannot patch {selected_name} as {action}: {error}"
+            ) from error
+
+        entries.append(
+            PatchEntry(
+                source_tensor_name=selected_name,
+                logical_layer_name=logical_layer_name_for_weight(selected_name),
+                source_data_offsets=_validated_offsets(
+                    descriptor,
+                    selected_name,
+                ),
+                source_dtype=_validated_dtype(descriptor, selected_name),
+                source_shape=_validated_shape(descriptor, selected_name),
+                source_input_bytes=source_bytes(descriptor),
+                action=action,
+                output_tensors=quantized_plan.output_tensors,
+                estimated_bytes=quantized_plan.estimated_bytes,
+            )
         )
 
-    descriptor = source_header[tensor_name]
-    try:
-        quantized_plan = build_quantized_tensor_plan(
-            action,
-            tensor_name,
-            descriptor,
-        )
-    except ValueError as error:
-        raise ValueError(
-            f"Cannot patch {tensor_name} as {action}: {error}"
-        ) from error
-
-    entry = PatchEntry(
-        source_tensor_name=tensor_name,
-        logical_layer_name=logical_layer_name_for_weight(tensor_name),
-        source_data_offsets=_validated_offsets(descriptor, tensor_name),
-        source_dtype=_validated_dtype(descriptor, tensor_name),
-        source_shape=_validated_shape(descriptor, tensor_name),
-        source_input_bytes=source_bytes(descriptor),
-        action=action,
-        output_tensors=quantized_plan.output_tensors,
-        estimated_bytes=quantized_plan.estimated_bytes,
+    entries.sort(key=lambda entry: entry.source_data_offsets[0])
+    frozen_entries = tuple(entries)
+    output_tensors = tuple(
+        tensor
+        for entry in frozen_entries
+        for tensor in entry.output_tensors
     )
-    output_tensors = quantized_plan.output_tensors
     return PatchPlan(
         patch_id=patch_id,
-        entries=(entry,),
+        entries=frozen_entries,
         layout=build_layout_from_specs(output_tensors),
-        selected_tensor_count=1,
+        selected_tensor_count=len(frozen_entries),
         generated_tensor_count=len(output_tensors),
-        source_bytes_to_read=entry.source_input_bytes,
-        replacement_bytes=entry.estimated_bytes,
+        source_bytes_to_read=sum(
+            entry.source_input_bytes for entry in frozen_entries
+        ),
+        replacement_bytes=sum(
+            entry.estimated_bytes for entry in frozen_entries
+        ),
     )
 
 
