@@ -1,8 +1,6 @@
 from pathlib import Path
 import unittest
 import json
-from contextlib import redirect_stdout
-from io import StringIO
 from safetensors.torch import save_file, load_file
 from tempfile import TemporaryDirectory
 import torch
@@ -15,11 +13,9 @@ from potatoforge.planning import (
     INT8_CONVROT_MARKER,
 )
 from potatoforge.converter import (
-    ResolvedIOMode,
     convert_model,
     convert_model_from_profile,
     estimate_output_bytes,
-    resolve_io_mode,
 )
 from potatoforge.headers.header_reader import read_header_from_safetensors
 from potatoforge.lora.lora_merge import (
@@ -33,7 +29,6 @@ from potatoforge.quantization import (
 from potatoforge.quantization.int6_rowwise import quantize_int6_rowwise
 from potatoforge.quantization.int6_packing import pack_int6_row_major
 from potatoforge.profiles import QuantizationProfile
-from potatoforge.source_payloads import tensor_to_raw_bytes
 from potatoforge.quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
@@ -62,38 +57,6 @@ class TestConverter(unittest.TestCase):
         )
         return profile_path
 
-    def test_converter_prints_selected_io_mode(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            source_path = root / "source.safetensors"
-            output_path = root / "output.safetensors"
-            save_file(
-                {"tensor": torch.tensor([1.0], dtype=torch.bfloat16)},
-                str(source_path),
-            )
-            profile: QuantizationProfile = {
-                "default": "keep",
-                "rules": (),
-            }
-            output = StringIO()
-
-            with (
-                patch(
-                    "potatoforge.converter.resolve_io_mode",
-                    return_value=ResolvedIOMode("serial", "test selection"),
-                ),
-                redirect_stdout(output),
-            ):
-                convert_model(
-                    source_path,
-                    output_path,
-                    profile,
-                    on_entry_started=lambda *_args: None,
-                    io_mode="batched",
-                )
-
-        self.assertIn("I/O mode: serial (test selection)", output.getvalue())
-
     def test_estimate_output_bytes_matches_conversion(self) -> None:
         with TemporaryDirectory() as directory:
             source_path = Path(directory) / "source.safetensors"
@@ -115,90 +78,12 @@ class TestConverter(unittest.TestCase):
                 output_path,
                 profile_path,
                 on_entry_started=None,
-                io_mode="serial",
             )
             actual_bytes = output_path.stat().st_size
 
         self.assertEqual(estimated_bytes, actual_bytes)
 
-    def test_batched_falls_back_to_serial_without_an_input_buffer(self) -> None:
-        result = resolve_io_mode("batched", None)
-
-        self.assertEqual(
-            result,
-            ResolvedIOMode(
-                "serial",
-                "batched mode has no input buffer; falling back to serial",
-            ),
-        )
-
-    def test_buffered_conversions_match_serial_for_non_physical_header_order(
-        self,
-    ) -> None:
-        late = torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16)
-        middle = torch.tensor([4.0], dtype=torch.bfloat16)
-        early = torch.tensor([5.0, 6.0], dtype=torch.bfloat16)
-        tensors = {
-            "late": late,
-            "middle": middle,
-            "early": early,
-        }
-        physical_order = ("early", "late", "middle")
-        header_order = ("late", "middle", "early")
-
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            source_path = root / "source.safetensors"
-            serial_path = root / "serial.safetensors"
-            batched_path = root / "batched.safetensors"
-
-            offsets: dict[str, tuple[int, int]] = {}
-            raw_payload = bytearray()
-            for name in physical_order:
-                payload = tensor_to_raw_bytes(tensors[name])
-                start = len(raw_payload)
-                raw_payload.extend(payload)
-                offsets[name] = (start, len(raw_payload))
-
-            header = {
-                name: {
-                    "dtype": "BF16",
-                    "shape": list(tensors[name].shape),
-                    "data_offsets": list(offsets[name]),
-                }
-                for name in header_order
-            }
-            header_bytes = json.dumps(
-                header,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            source_path.write_bytes(
-                len(header_bytes).to_bytes(8, "little")
-                + header_bytes
-                + raw_payload
-            )
-
-            profile: QuantizationProfile = {
-                "default": "keep",
-                "rules": (),
-            }
-            convert_model(
-                source_path,
-                serial_path,
-                profile,
-                on_entry_started=None,
-            )
-            convert_model(
-                source_path,
-                batched_path,
-                profile,
-                on_entry_started=None,
-                io_mode="batched",
-                input_buffer_bytes=5,
-            )
-            self.assertEqual(serial_path.read_bytes(), batched_path.read_bytes())
-
-    def test_batched_propagates_source_read_errors(self) -> None:
+    def test_serial_propagates_source_read_errors(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             source_path = root / "source.safetensors"
@@ -231,8 +116,6 @@ class TestConverter(unittest.TestCase):
                     output_path,
                     profile,
                     on_entry_started=None,
-                    io_mode="batched",
-                    input_buffer_bytes=4,
                 )
 
             self.assertFalse(output_path.exists())
@@ -521,8 +404,6 @@ class TestConverter(unittest.TestCase):
                 profile,
                 on_entry_started=None,
                 adapters=(adapter_input,),
-                io_mode="batched",
-                input_buffer_bytes=8,
             )
 
             self.assertEqual(
@@ -581,8 +462,6 @@ class TestConverter(unittest.TestCase):
                 source_path,
                 target_path,
                 profile,
-                io_mode="batched",
-                input_buffer_bytes=512,
             )
 
             output_tensors = load_file(target_path)

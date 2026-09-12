@@ -5,7 +5,6 @@ from typing import BinaryIO, Callable, TypeAlias
 
 from .planning import (
     CONVROT_W4A4_MARKER_PAYLOAD,
-    InputBatchPlan,
     INT6_CONVROT_MARKER_PAYLOAD,
     INT6_ROWWISE_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_PAYLOAD,
@@ -72,27 +71,6 @@ def read_source_tensor_bytes(
 
     return raw_bytes
 
-
-def _read_source_batch(
-    file: BinaryIO,
-    raw_data_start: int,
-    batch: InputBatchPlan,
-) -> dict[str, bytes]:
-    staged: dict[str, bytes] = {}
-
-    for tensor in batch.tensors:
-        if tensor.name in staged:
-            raise ValueError(
-                f"Batch contains duplicate source tensor: {tensor.name}."
-            )
-        staged[tensor.name] = read_source_tensor_bytes(
-            file,
-            raw_data_start,
-            (tensor.data_start, tensor.data_end),
-            tensor.nbytes,
-        )
-
-    return staged
 
 
 def tensor_from_raw_bytes(
@@ -266,7 +244,6 @@ def stream_quantized_payloads(
     }
     yield from _stream_entry_payloads(entry, source_bytes)
 
-
 def stream_output_payloads(
     source_path: str | Path,
     entries: Sequence[PlanEntry],
@@ -296,76 +273,3 @@ def stream_output_payloads(
                 source_bytes = source_payload_transform(entry, source_bytes)
 
             yield from _stream_entry_payloads(entry, source_bytes)
-
-
-def _stream_staged_batch_payloads(
-    batch: InputBatchPlan,
-    staged: dict[str, bytes],
-    entry_lookup: dict[str, tuple[int, PlanEntry]],
-    entry_count: int,
-    on_entry_started: ProgressReporter | None,
-    source_payload_transform: SourcePayloadTransform | None,
-) -> Iterator[TensorPayload]:
-    batch_entries: list[tuple[int, PlanEntry]] = []
-    for tensor in batch.tensors:
-        indexed_entry = entry_lookup.get(tensor.name)
-        if indexed_entry is None:
-            raise ValueError(
-                f"Batch references unknown source tensor: {tensor.name}."
-            )
-        batch_entries.append(indexed_entry)
-
-    batch_entries.sort(
-        key=lambda indexed_entry: indexed_entry[0]
-    )
-
-    for entry_index, entry in batch_entries:
-        if on_entry_started is not None:
-            on_entry_started(
-                entry_index + 1,
-                entry_count,
-                entry,
-            )
-        source_bytes = staged[entry["tensor_name"]]
-        if source_payload_transform is not None:
-            source_bytes = source_payload_transform(entry, source_bytes)
-        yield from _stream_entry_payloads(entry, source_bytes)
-
-
-def stream_batched_output_payloads(
-    source_path: str | Path,
-    entries: Sequence[PlanEntry],
-    batches: Sequence[InputBatchPlan],
-    on_entry_started: ProgressReporter | None = None,
-    *,
-    source_payload_transform: SourcePayloadTransform | None = None,
-) -> Iterator[TensorPayload]:
-    entry_count = len(entries)
-    entry_lookup = {
-        entry["tensor_name"]: (entry_index, entry)
-        for entry_index, entry in enumerate(entries)
-    }
-
-    with open(str(source_path), "rb") as source_file:
-        raw_data_start = read_raw_data_start(
-            source_file,
-            file_label="Source file",
-        )
-
-        for batch in batches:
-            staged = _read_source_batch(
-                source_file,
-                raw_data_start,
-                batch,
-            )
-            try:
-                yield from _stream_staged_batch_payloads(
-                    batch,
-                    staged,
-                    entry_lookup,
-                    entry_count,
-                    on_entry_started,
-                    source_payload_transform,
-                )
-            finally:
-                staged.clear()

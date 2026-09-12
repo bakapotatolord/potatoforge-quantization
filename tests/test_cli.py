@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 
 from potatoforge.audits.profile_optimizer import OptimizedProfile
 from potatoforge.cli import app
-from potatoforge.converter import ResolvedIOMode
 from potatoforge.lora.lora_merge import AdapterMergeInput
 from potatoforge.config import ConfigPaths, OptimizeConfig, QuantizeConfig
 
@@ -511,7 +510,7 @@ class TestCli(unittest.TestCase):
         convert_mock.assert_not_called()
         self.assertIn("estimated_output_bytes: 123", result.output)
 
-    def test_quantize_passes_batched_io_options(self) -> None:
+    def test_quantize_passes_adapter_options(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             output_path = root / "output.safetensors"
@@ -520,10 +519,6 @@ class TestCli(unittest.TestCase):
             with patch(
                 "potatoforge.cli.convert_model_from_profile"
             ) as convert_mock:
-                convert_mock.return_value = ResolvedIOMode(
-                    "batched",
-                    "requested mode",
-                )
                 result = self.runner.invoke(
                     app,
                     [
@@ -532,10 +527,6 @@ class TestCli(unittest.TestCase):
                         str(output_path),
                         "--profile",
                         str(root / "profile.json"),
-                        "--io-mode",
-                        "batched",
-                        "--input-buffer-gib",
-                        "2",
                         "--adapter-path",
                         str(root / "first.safetensors"),
                         "--adapter-strength",
@@ -549,14 +540,6 @@ class TestCli(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.stdout)
         self.assertEqual(
-            convert_mock.call_args.kwargs["io_mode"],
-            "batched",
-        )
-        self.assertEqual(
-            convert_mock.call_args.kwargs["input_buffer_bytes"],
-            2 * 1024**3,
-        )
-        self.assertEqual(
             convert_mock.call_args.kwargs["adapters"],
             (
                 AdapterMergeInput(root / "first.safetensors", 0.75),
@@ -564,7 +547,7 @@ class TestCli(unittest.TestCase):
             ),
         )
 
-    def test_quantize_loads_config_and_allows_io_override(self) -> None:
+    def test_quantize_loads_config_and_allows_cli_adapter_override(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             output_path = root / "output.safetensors"
@@ -575,8 +558,6 @@ class TestCli(unittest.TestCase):
                     profile=root / "profile.json",
                     quantized_output=output_path,
                 ),
-                io_mode="batched",
-                input_buffer_gib=4.0,
             )
 
             with (
@@ -588,18 +569,12 @@ class TestCli(unittest.TestCase):
                     "potatoforge.cli.convert_model_from_profile"
                 ) as convert_mock,
             ):
-                convert_mock.return_value = ResolvedIOMode(
-                    "batched",
-                    "requested mode",
-                )
                 result = self.runner.invoke(
                     app,
                     [
                         "quantize",
                         "--config",
                     str(root / "config.toml"),
-                        "--io-mode",
-                        "batched",
                         "--adapter-path",
                         str(root / "adapter.safetensors"),
                         "--adapter-strength",
@@ -617,14 +592,6 @@ class TestCli(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            convert_mock.call_args.kwargs["io_mode"],
-            "batched",
-        )
-        self.assertEqual(
-            convert_mock.call_args.kwargs["input_buffer_bytes"],
-            4 * 1024**3,
-        )
-        self.assertEqual(
             convert_mock.call_args.kwargs["adapters"],
             (AdapterMergeInput(root / "adapter.safetensors", 0.5),),
         )
@@ -640,8 +607,6 @@ class TestCli(unittest.TestCase):
                     profile=root / "profile.json",
                     quantized_output=output_path,
                 ),
-                io_mode="serial",
-                input_buffer_gib=None,
                 adapters=(AdapterMergeInput(root / "config-adapter.safetensors", 0.65),),
             )
 
@@ -654,10 +619,6 @@ class TestCli(unittest.TestCase):
                     "potatoforge.cli.convert_model_from_profile"
                 ) as convert_mock,
             ):
-                convert_mock.return_value = ResolvedIOMode(
-                    "serial",
-                    "requested mode",
-                )
                 result = self.runner.invoke(
                     app,
                     [

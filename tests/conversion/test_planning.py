@@ -15,7 +15,6 @@ from potatoforge.planning import (
     is_supported_weight_key,
     logical_layer_name_for_weight,
     layout_to_header,
-    plan_input_batches,
     quantization_family_names,
     weight_key_for_layer,
 )
@@ -676,72 +675,3 @@ class TestInt8TensorwisePlan(unittest.TestCase):
 
         self.assertEqual(entries[0]["action"], "keep")
         self.assertIn("divisible by 256", entries[0]["reason"])
-
-class TestInputBatchPlanning(unittest.TestCase):
-    def test_keeps_output_batches_and_reads_each_batch_by_source_offset(self) -> None:
-        entries = [
-            {
-                "tensor_name": "late",
-                "source_dtype": "BF16",
-                "shape": (3,),
-                "input_bytes": 6,
-                "action": "keep",
-                "estimated_bytes": 6,
-                "output_tensors": (),
-                "source_data_offsets": (4, 10),
-            },
-            {
-                "tensor_name": "middle",
-                "source_dtype": "BF16",
-                "shape": (1,),
-                "input_bytes": 2,
-                "action": "keep",
-                "estimated_bytes": 2,
-                "output_tensors": (),
-                "source_data_offsets": (10, 12),
-            },
-            {
-                "tensor_name": "early",
-                "source_dtype": "BF16",
-                "shape": (2,),
-                "input_bytes": 4,
-                "action": "keep",
-                "estimated_bytes": 4,
-                "output_tensors": (),
-                "source_data_offsets": (0, 4),
-            },
-        ]
-
-        batches = plan_input_batches(entries, 7)
-
-        self.assertEqual(
-            [[tensor.name for tensor in batch.tensors] for batch in batches],
-            [["late"], ["early", "middle"]],
-        )
-        self.assertEqual(
-            [batch.total_input_bytes for batch in batches],
-            [6, 6],
-        )
-        self.assertFalse(batches[0].oversized)
-
-    def test_plans_oversized_tensor_alone(self) -> None:
-        entry = {
-            "tensor_name": "large",
-            "source_dtype": "BF16",
-            "shape": (6,),
-            "input_bytes": 12,
-            "action": "keep",
-            "estimated_bytes": 12,
-            "output_tensors": (),
-            "source_data_offsets": (0, 12),
-        }
-
-        batches = plan_input_batches([entry], 8)
-
-        self.assertEqual(len(batches), 1)
-        self.assertEqual(batches[0].tensors[0].nbytes, 12)
-        self.assertTrue(batches[0].oversized)
-
-    def test_rejects_non_positive_budget(self) -> None:
-        with self.assertRaisesRegex(ValueError, "positive integer"):
-            plan_input_batches([], 0)

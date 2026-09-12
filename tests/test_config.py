@@ -54,9 +54,6 @@ profile = "profiles/kroma/kroma-v0.1-balanced.json"
 quantized_output = "outputs/quantized.safetensors"
 
 [quantize]
-io_mode = "batched"
-input_buffer_gib = 4.0
-
 [[quantize.adapters]]
 path = "models/style-a.safetensors"
 strength = 0.65
@@ -70,8 +67,6 @@ strength = 0.40
             config = load_quantize_config(config_path)
 
         project_root = Path.cwd().resolve()
-        self.assertEqual(config.io_mode, "batched")
-        self.assertEqual(config.input_buffer_gib, 4.0)
         self.assertEqual(config.paths.source, project_root / "models/source.safetensors")
         self.assertEqual(
             config.paths.quantized_output,
@@ -84,28 +79,6 @@ strength = 0.40
                 AdapterMergeInput(project_root / "models/style-b.safetensors", 0.40),
             ),
         )
-
-    def test_allows_batched_quantize_without_a_buffer_for_fallback(self) -> None:
-        with TemporaryDirectory() as directory:
-            config_path = self._write(
-                directory,
-                """
-format_version = 1
-
-[paths]
-source = "source.safetensors"
-profile = "profile.json"
-quantized_output = "output.safetensors"
-
-[quantize]
-io_mode = "batched"
-""",
-            )
-
-            config = load_quantize_config(config_path)
-
-        self.assertEqual(config.io_mode, "batched")
-        self.assertIsNone(config.input_buffer_gib)
 
     def test_rejects_inert_legacy_fields(self) -> None:
         with TemporaryDirectory() as directory:

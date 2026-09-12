@@ -252,26 +252,6 @@ Each adapter path is paired with the strength at the same option position.
 Adapters are loaded into CPU memory once; the large source checkpoint remains
 streamed through the profile quantization pass.
 
-#### Choose serial or batched input staging
-
-The default is synchronous whole-tensor RAM staging. Batched mode reads each
-complete input batch before quantization and writing:
-
-```powershell
-uv run potatoforge quantize `
-    path\to\source.safetensors `
-    path\to\quantized.safetensors `
-    --profile profiles\kroma\kroma-v0.1-balanced.json `
-    --io-mode batched `
-    --input-buffer-gib 4
-```
-
-Batched mode is bounded staging only; it does not enable concurrent
-prefetching or parallel quantization.
-
-If no input buffer is supplied, batched mode falls back to serial. Use
-`--io-mode serial` to force serial processing.
-
 #### Use a quantization TOML config
 
 Repeat a quantization run from a TOML config:
@@ -280,22 +260,18 @@ Repeat a quantization run from a TOML config:
 uv run potatoforge quantize --config configs\quantize.toml
 ```
 
-The config stores source, profile, output, I/O settings, and optional adapters.
+The config stores source, profile, output, and optional adapters.
 Use one ordered `[[quantize.adapters]]` table per adapter:
 
 ```toml
 [quantize]
-io_mode = "batched"
-input_buffer_gib = 4.0
-
 [[quantize.adapters]]
 path = "models/style-a.safetensors"
 strength = 0.65
 ```
 
 Adapter paths are relative to the project root unless absolute. Direct CLI
-values remain available as overrides, for example `--io-mode batched` or a
-repeat of the adapter options.
+adapter options remain available as overrides.
 
 #### Generate a target-size profile
 
@@ -310,9 +286,9 @@ commands use direct arguments and do not have config files.
 
 #### Audit reconstruction and storage
 
-Compare every BF16, F16, or F32 2-D `.weight` tensor against all supported formats,
-without a profile. The command prints a storage/error table and writes the
-same data as JSON:
+Compare every BF16, F16, or F32 2-D `.weight` tensor against the four default
+ConvRot formats, without a profile. The command prints a storage/error table
+and writes the same data as JSON:
 
 ```powershell
 uv run potatoforge audit `
@@ -320,8 +296,8 @@ uv run potatoforge audit `
     --output reports\weight-audit.json
 ```
 
-Plain INT6 is unavailable when a layer's input width is not divisible by four;
-ConvRot methods are unavailable when it is not divisible by the current group
+Plain INT8 and INT6 are not part of the default audit. ConvRot methods are
+unavailable when a layer's input width is not divisible by the current group
 size of 256. This measures storage and weight reconstruction only, not ComfyUI
 runtime compatibility, speed, or image quality.
 
@@ -396,9 +372,9 @@ fraction; the selected recommendation table shows a read-only next-method
 upgrade candidate and its SSE-reduction-per-MiB score.
 P95 means 95% of audited tensors have error at or below that value; the maximum
 error column exposes the worst tensor separately.
-Use `--method int8,int6` and `--exclude-prefix blocks.0.,blocks.1.` to keep
-matching layers in BF16. The chart and errors are audit proxies only; they do
-not validate runtime behavior or image quality. Or use
+Use `--method int8_convrot,convrot_w4a4_mse` and `--exclude-prefix
+blocks.0.,blocks.1.` to keep matching layers in BF16. The chart and errors are
+audit proxies only; they do not validate runtime behavior or image quality. Or use
 `--tensor blocks.12.mlp.down.weight` to print one exact tensor, or
 `--tensors blocks.11.mlp.down.weight,blocks.12.mlp.down.weight` to print
 several, without creating a workbook.
@@ -480,9 +456,7 @@ INT6 formats store four values in three bytes.
 
 The exporter reads only the safetensors header first, plans the complete
 output layout, and then reads, transforms, and writes one source tensor at a
-time. Batched mode provides bounded whole-tensor staging; serial mode is
-available as a fallback and is selected automatically when batched mode has no
-input buffer.
+time.
 
 The writer validates tensor names, order, offsets, and byte counts as payloads
 arrive. Conversion, LoRA merging, and extraction refuse source/output

@@ -56,7 +56,6 @@ from .lora.lora_discovery import inspect_adapter_header
 from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
 from .patch_sweep import generate_patch_sweep_from_profile
 from .planning import (
-    IOMode,
     QUANTIZATION_LAYERS_METADATA_KEY,
     QUANTIZATION_METADATA_KEY,
     parse_quantization_layers,
@@ -1322,15 +1321,6 @@ def quantize(
         None,
         help="JSON quantization profile; required without --config.",
     ),
-    io_mode: IOMode | None = typer.Option(
-        None,
-        "--io-mode",
-        help="Source I/O mode for this conversion.",
-    ),
-    input_buffer_gib: float | None = typer.Option(
-        None,
-        "--input-buffer-gib",
-        help="Whole-tensor input staging target for batched mode.",
     ),
     adapter_path: list[Path] = typer.Option(
         [],
@@ -1367,16 +1357,6 @@ def quantize(
             effective_source_path = quantize_config.paths.source
             effective_output_path = quantize_config.paths.quantized_output
             effective_profile = profile or quantize_config.paths.profile
-            effective_io_mode = (
-                io_mode
-                if io_mode is not None
-                else quantize_config.io_mode
-            )
-            effective_input_buffer_gib = (
-                input_buffer_gib
-                if input_buffer_gib is not None
-                else quantize_config.input_buffer_gib
-            )
             effective_adapters = (
                 cli_adapters if cli_adapters else quantize_config.adapters
             )
@@ -1394,8 +1374,6 @@ def quantize(
             effective_source_path = source_path
             effective_output_path = output_path
             effective_profile = profile
-            effective_io_mode = io_mode or "batched"
-            effective_input_buffer_gib = input_buffer_gib
             effective_adapters = cli_adapters
 
         if effective_source_path is None or effective_profile is None:
@@ -1431,19 +1409,12 @@ def quantize(
                 "Quantize config requires paths.quantized_output."
             )
 
-        input_buffer_bytes = (
-            None
-            if effective_input_buffer_gib is None
-            else _gib_to_bytes(effective_input_buffer_gib)
-        )
-        resolved_io_mode = convert_model_from_profile(
+        convert_model_from_profile(
             effective_source_path,
             effective_output_path,
             effective_profile,
             on_entry_started=print_conversion_progress,
             adapters=effective_adapters,
-            io_mode=effective_io_mode,
-            input_buffer_bytes=input_buffer_bytes,
         )
         _finish(
             {
@@ -1451,10 +1422,6 @@ def quantize(
                 "profile_path": str(effective_profile),
                 "output_path": str(effective_output_path),
                 "output_bytes": effective_output_path.stat().st_size,
-                "io_mode": resolved_io_mode.mode,
-                "io_mode_requested": effective_io_mode,
-                "io_mode_reason": resolved_io_mode.reason,
-                "input_buffer_bytes": input_buffer_bytes,
                 "adapter_count": len(effective_adapters),
             },
         )

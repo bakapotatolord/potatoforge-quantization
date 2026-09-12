@@ -5,12 +5,6 @@ source = "models/source.safetensors"
 profile = "profiles/generic/f32-to-bf16.json"
 quantized_output = "models/quantized.safetensors"
 
-[quantize]
-# Choose batched or serial. Batched falls back to serial without a buffer.
-io_mode = "batched"
-# Whole-tensor staging budget used by batched mode.
-input_buffer_gib = 4.0
-
 # Optional fused LoRA adapters. Repeat this table for each adapter.
 # [[quantize.adapters]]
 # path = "models/style-a.safetensors"

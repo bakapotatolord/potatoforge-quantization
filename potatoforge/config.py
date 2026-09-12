@@ -11,7 +11,6 @@ from typing import Mapping, cast
 from .audits.profile_optimizer import MEASURED_METHODS
 from .audits.weight_audit import QuantizationMethod
 from .lora.lora_merge import AdapterMergeInput
-from .planning import IOMode
 
 
 _TOP_LEVEL_FIELDS = frozenset(
@@ -43,8 +42,6 @@ class OptimizeConfig:
 @dataclass(frozen=True)
 class QuantizeConfig:
     paths: ConfigPaths
-    io_mode: IOMode
-    input_buffer_gib: float | None
     adapters: tuple[AdapterMergeInput, ...] = ()
 
 
@@ -147,46 +144,6 @@ def _load_quantize_adapters(
         )
 
     return tuple(adapters)
-
-
-def _load_quantize_settings(
-    value: object | None,
-) -> tuple[IOMode, float | None, tuple[AdapterMergeInput, ...]]:
-    if value is None:
-        return "batched", None, ()
-
-    table = _table(value, "[quantize]")
-    _validate_keys(
-        table,
-        frozenset(("io_mode", "input_buffer_gib", "adapters")),
-        "[quantize]",
-    )
-
-    io_mode = table.get("io_mode", "batched")
-    if io_mode not in ("serial", "batched"):
-        raise ValueError(
-            "quantize.io_mode must be serial or batched."
-        )
-
-    input_buffer_gib = table.get("input_buffer_gib")
-    if input_buffer_gib is not None and (
-        not isinstance(input_buffer_gib, (int, float))
-        or isinstance(input_buffer_gib, bool)
-        or not math.isfinite(float(input_buffer_gib))
-        or input_buffer_gib <= 0
-    ):
-        raise ValueError(
-            "quantize.input_buffer_gib must be finite and positive."
-        )
-
-    return (
-        cast(IOMode, io_mode),
-        None if input_buffer_gib is None else float(input_buffer_gib),
-        _load_quantize_adapters(
-            table.get("adapters"),
-            _find_project_root(),
-        ),
-    )
 
 
 def _string_list(value: object, label: str) -> tuple[str, ...]:
@@ -301,12 +258,21 @@ def load_quantize_config(config_path: str | Path) -> QuantizeConfig:
         ("source", "profile", "quantized_output"),
         "Quantize",
     )
-    io_mode, input_buffer_gib, adapters = _load_quantize_settings(
-        document.get("quantize")
-    )
+    quantize_value = document.get("quantize")
+    if quantize_value is None:
+        adapters = ()
+    else:
+        quantize_table = _table(quantize_value, "[quantize]")
+        _validate_keys(
+            quantize_table,
+            frozenset(("adapters",)),
+            "[quantize]",
+        )
+        adapters = _load_quantize_adapters(
+            quantize_table.get("adapters"),
+            _find_project_root(),
+        )
     return QuantizeConfig(
         paths=paths,
-        io_mode=io_mode,
-        input_buffer_gib=input_buffer_gib,
         adapters=adapters,
     )

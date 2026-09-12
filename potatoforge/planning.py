@@ -3,7 +3,6 @@ from math import prod
 from typing import (
     Callable,
     Final,
-    Literal,
     NamedTuple,
     NotRequired,
     TypeAlias,
@@ -17,28 +16,6 @@ from .profiles import (
     find_profile_rule,
 )
 from .quantization.hadamard import CONVROT_GROUP_SIZE
-
-
-IOMode = Literal["serial", "batched"]
-
-
-class ResolvedIOMode(NamedTuple):
-    mode: IOMode
-    reason: str
-
-
-def resolve_io_mode(
-    requested_mode: IOMode,
-    input_buffer_bytes: int | None,
-) -> ResolvedIOMode:
-    if requested_mode not in ("serial", "batched"):
-        raise ValueError(f"Unknown I/O mode: {requested_mode}")
-    if requested_mode == "batched" and input_buffer_bytes is None:
-        return ResolvedIOMode(
-            "serial",
-            "batched mode has no input buffer; falling back to serial",
-        )
-    return ResolvedIOMode(requested_mode, "requested mode")
 
 
 class TensorDescriptor(TypedDict):
@@ -71,19 +48,6 @@ class PlanEntry(TypedDict):
     output_tensors: tuple[OutputTensorSpec, ...]
     reason: NotRequired[str]
     source_data_offsets: tuple[int, int]
-
-
-class TensorReadPlan(NamedTuple):
-    name: str
-    data_start: int
-    data_end: int
-    nbytes: int
-
-
-class InputBatchPlan(NamedTuple):
-    tensors: tuple[TensorReadPlan, ...]
-    total_input_bytes: int
-    oversized: bool
 
 
 class ScheduledOutputTensor(NamedTuple):
@@ -559,72 +523,6 @@ def update_quantization_metadata(
         **metadata,
         **_quantization_metadata_for_layers(existing_layers),
     }
-
-
-def plan_input_batches(
-    entries: Iterable[PlanEntry],
-    input_buffer_bytes: int,
-) -> tuple[InputBatchPlan, ...]:
-    """Plan output-ordered batches with physical-order reads within each batch."""
-    if type(input_buffer_bytes) is not int or input_buffer_bytes <= 0:
-        raise ValueError("Input staging budget must be a positive integer.")
-
-    batches: list[InputBatchPlan] = []
-    current: list[TensorReadPlan] = []
-    current_bytes = 0
-
-    def emit(*, oversized: bool) -> None:
-        nonlocal current, current_bytes
-        batches.append(
-            InputBatchPlan(
-                tensors=tuple(
-                    sorted(
-                        current,
-                        key=lambda tensor: (
-                            tensor.data_start,
-                            tensor.data_end,
-                            tensor.name,
-                        ),
-                    )
-                ),
-                total_input_bytes=current_bytes,
-                oversized=oversized,
-            )
-        )
-        current = []
-        current_bytes = 0
-
-    for entry in entries:
-        data_start, data_end = entry["source_data_offsets"]
-        if data_start < 0 or data_end < data_start:
-            raise ValueError(
-                f"Invalid source offsets for {entry['tensor_name']}."
-            )
-        if entry["input_bytes"] != data_end - data_start:
-            raise ValueError(
-                f"Source offsets do not match input bytes for "
-                f"{entry['tensor_name']}."
-            )
-
-        tensor = TensorReadPlan(
-            name=entry["tensor_name"],
-            data_start=data_start,
-            data_end=data_end,
-            nbytes=entry["input_bytes"],
-        )
-        if current and current_bytes + tensor.nbytes > input_buffer_bytes:
-            emit(oversized=False)
-
-        current.append(tensor)
-        current_bytes += tensor.nbytes
-
-        if len(current) == 1 and tensor.nbytes > input_buffer_bytes:
-            emit(oversized=True)
-
-    if current:
-        emit(oversized=False)
-
-    return tuple(batches)
 
 
 def build_output_layout(
