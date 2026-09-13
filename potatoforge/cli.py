@@ -13,7 +13,6 @@ from typing import Any, Callable, Literal
 import typer
 
 from .audits.analysis import (
-    print_activation_ranking,
     print_tensor_analysis,
     write_analysis_workbook,
 )
@@ -25,13 +24,12 @@ from .audits.activation_audit import (
     score_activation_audit,
 )
 from .audits.activation_comparison import (
-    V2_ACTIVATION_METRICS,
+    ACTIVATION_METRICS,
     generate_activation_comparison_workbook,
 )
 from .audits.activation_measurements import MEASUREMENT_METHODS
 from .audits.activation_profiles import (
     generate_activation_cache_profile,
-    generate_activation_profile,
 )
 from .audits.profile_optimizer import (
     SUPPORTED_METHODS,
@@ -68,9 +66,7 @@ from .config import load_optimize_config, load_quantize_config
 from .calibration import (
     ActivationCalibration,
     merge_activation_calibrations,
-    score_activation_probe,
 )
-from .calibration.activation_probe import activation_pair_paths
 from .timing import TimingCollector
 
 
@@ -119,21 +115,9 @@ def _write_json(path: Path, document: object, overwrite: bool) -> None:
         output_file.write("\n")
 
 
-def _preflight_audit_outputs(
-    output: Path,
-    activation_probe_output: Path | None,
-    overwrite: bool,
-) -> None:
-    paths = [output]
-    if activation_probe_output is not None:
-        paths.extend(activation_pair_paths(activation_probe_output))
-    resolved_paths = [path.resolve() for path in paths]
-    if len(set(resolved_paths)) != len(resolved_paths):
-        raise ValueError("Audit and activation probe output paths must be different.")
-    if not overwrite:
-        for path in paths:
-            if path.exists():
-                raise FileExistsError(f"Output already exists: {path}")
+def _preflight_audit_output(output: Path, overwrite: bool) -> None:
+    if not overwrite and output.exists():
+        raise FileExistsError(f"Output already exists: {output}")
 
 
 def _parse_quantization_metadata(
@@ -414,46 +398,16 @@ def audit(
             "W4A4, and packed ConvRot INT6; plain INT8/INT6 stay on CPU."
         ),
     ),
-    activation_calibration: Path | None = typer.Option(
-        None,
-        "--activation-calibration",
-        help="Activation calibration metadata JSON.",
-    ),
-    method: str | None = typer.Option(
-        None,
-        "--method",
-        help="Audit one candidate method; only convrot_w4a4 is supported.",
-    ),
-    activation_probe_output: Path | None = typer.Option(
-        None,
-        "--activation-probe-output",
-        help=(
-            "Reusable INT8 ConvRot to W4A4 probe cache path; requires "
-            "--activation-calibration with an INT8 ConvRot baseline."
-        ),
-    ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
     """Measure supported weight reconstruction formats."""
     def action() -> None:
-        _preflight_audit_outputs(output, activation_probe_output, overwrite)
-        calibration = (
-            None
-            if activation_calibration is None
-            else ActivationCalibration.load(activation_calibration)
-        )
+        _preflight_audit_output(output, overwrite)
         audit_kwargs: dict[str, Any] = {
             "on_entry_started": _print_progress,
             "device": device,
             "include_plain_methods": False,
         }
-        if calibration is not None:
-            audit_kwargs["activation_calibration"] = calibration
-        if method is not None:
-            audit_kwargs["audit_method"] = method
-        if activation_probe_output is not None:
-            audit_kwargs["activation_probe_output"] = activation_probe_output
-            audit_kwargs["activation_probe_overwrite"] = overwrite
         document = audit_bf16_source(source_path, **audit_kwargs)
         _write_json(output, document, overwrite)
         summary = document["summary"]
@@ -488,7 +442,7 @@ def activation_audit(
     activation_calibration: Path = typer.Option(
         ...,
         "--activation-calibration",
-        help="V2 activation calibration metadata JSON.",
+        help="Activation calibration metadata JSON.",
     ),
     output: Path = typer.Option(..., "--output", help="Activation audit cache."),
     calibration_stats: Path | None = typer.Option(
@@ -576,15 +530,10 @@ def activation_audit(
 
 @app.command("activation-score")
 def activation_score(
-    probe_cache: Path | None = typer.Option(
-        None,
-        "--probe-cache",
-        help="Reusable activation probe metadata JSON.",
-    ),
-    audit_cache: Path | None = typer.Option(
-        None,
+    audit_cache: Path = typer.Option(
+        ...,
         "--audit-cache",
-        help="Reusable V2 activation-audit metadata JSON.",
+        help="Reusable activation-audit metadata JSON.",
     ),
     activation_calibration: Path = typer.Option(
         ...,
@@ -595,32 +544,22 @@ def activation_score(
     metric: str = typer.Option(
         "aggregate_observed_relative_sse",
         "--metric",
-        help="V2 cache metric when --audit-cache is used.",
+        help="Cache metric when --audit-cache is used.",
     ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
-    """Score a reusable activation probe or V2 activation-audit cache."""
+    """Score a reusable activation-audit cache."""
     def action() -> None:
-        if (probe_cache is None) == (audit_cache is None):
-            raise ValueError(
-                "Provide exactly one of --probe-cache or --audit-cache."
-            )
-        if probe_cache is not None:
-            report = score_activation_probe(probe_cache, activation_calibration)
-            scored_count = report["summary"]["scored_tensor_count"]
-        else:
-            assert audit_cache is not None
-            report = score_activation_audit(
-                audit_cache,
-                activation_calibration,
-                metric=metric,
-            )
-            scored_count = report["summary"]["available_candidate_count"]
+        report = score_activation_audit(
+            audit_cache,
+            activation_calibration,
+            metric=metric,
+        )
+        scored_count = report["summary"]["available_candidate_count"]
         _write_json(output, report, overwrite)
         _finish(
             {
-                "probe_cache": None if probe_cache is None else str(probe_cache),
-                "audit_cache": None if audit_cache is None else str(audit_cache),
+                "audit_cache": str(audit_cache),
                 "activation_calibration": str(activation_calibration),
                 "score_report": str(output),
                 "scored_tensor_count": scored_count,
@@ -635,7 +574,7 @@ def activation_inspect(
     audit_cache: Path = typer.Option(
         ...,
         "--audit-cache",
-        help="V2 activation-audit metadata JSON.",
+        help="Activation-audit metadata JSON.",
     ),
     activation_calibration: Path = typer.Option(
         ...,
@@ -683,12 +622,12 @@ def activation_optimize(
     audit_cache: Path = typer.Option(
         ...,
         "--audit-cache",
-        help="V2 activation-audit metadata JSON.",
+        help="Activation-audit metadata JSON.",
     ),
     activation_calibration: Path = typer.Option(
         ...,
         "--activation-calibration",
-        help="V2 activation calibration metadata JSON.",
+        help="Activation calibration metadata JSON.",
     ),
     output: Path = typer.Option(..., "--output", help="Output profile JSON."),
     summary_output: Path | None = typer.Option(
@@ -786,12 +725,12 @@ def activation_compare(
     audit_cache: Path = typer.Option(
         ...,
         "--audit-cache",
-        help="V2 activation-audit metadata JSON.",
+        help="Activation-audit metadata JSON.",
     ),
     activation_calibration: Path = typer.Option(
         ...,
         "--activation-calibration",
-        help="V2 activation calibration metadata JSON.",
+        help="Activation calibration metadata JSON.",
     ),
     output: Path = typer.Option(
         ...,
@@ -828,12 +767,12 @@ def activation_compare(
     metrics: str | None = typer.Option(
         None,
         "--metrics",
-        help="Optional comma-separated metric list; defaults to all V2 metrics.",
+        help="Optional comma-separated metric list; defaults to all metrics.",
     ),
     top_n: int = typer.Option(20, "--top-n", help="Ranked rows per metric/method."),
     overwrite: bool = typer.Option(False, help="Replace an existing workbook."),
 ) -> None:
-    """Compare all V2 activation metrics in one workbook."""
+    """Compare all activation metrics in one workbook."""
     def action() -> None:
         target_bytes, promotion_budget_bytes = _resolve_profile_budget(
             target_size_mib,
@@ -841,7 +780,7 @@ def activation_compare(
             promotion_budget_mib,
             promotion_budget_bytes_option,
         )
-        requested_metrics = _split_comma_separated(metrics) or V2_ACTIVATION_METRICS
+        requested_metrics = _split_comma_separated(metrics) or ACTIVATION_METRICS
         summary = generate_activation_comparison_workbook(
             audit_cache,
             activation_calibration,
@@ -897,123 +836,6 @@ def calibration_merge(
     _run("calibration-merge", action)
 
 
-@app.command("profile-from-activation")
-def profile_from_activation(
-    activation_score: Path = typer.Option(
-        ...,
-        "--activation-score",
-        help="Completed activation-score JSON report.",
-    ),
-    weight_audit: Path = typer.Option(
-        ...,
-        "--weight-audit",
-        help="Existing weight-audit JSON containing storage estimates.",
-    ),
-    output: Path = typer.Option(..., "--output", help="Output profile JSON."),
-    summary_output: Path | None = typer.Option(
-        None,
-        "--summary-output",
-        help="Optional summary JSON; defaults to <output>-summary.json.",
-    ),
-    target_size_mib: float | None = typer.Option(
-        None,
-        "--target-size-mib",
-        help="Final model-size budget in MiB.",
-    ),
-    target_size_gib: float | None = typer.Option(
-        None,
-        "--target-size-gib",
-        help="Final model-size budget in GiB.",
-    ),
-    promotion_budget_mib: float | None = typer.Option(
-        None,
-        "--promotion-budget-mib",
-        help="Additional storage budget above the W4A4 baseline.",
-    ),
-    promotion_budget_bytes_option: int | None = typer.Option(
-        None,
-        "--promotion-budget-bytes",
-        help="Additional storage budget above the W4A4 baseline in bytes.",
-    ),
-    metric: str = typer.Option(
-        "relative_output_sse",
-        "--metric",
-        help="relative_output_sse, relative_output_error, or relative_l2_error.",
-    ),
-    include_regex: str = typer.Option(
-        r"^blocks\.",
-        "--include-regex",
-        help="Regex selecting eligible weight tensors.",
-    ),
-    profile_id: str | None = typer.Option(
-        None,
-        "--profile-id",
-        help="Generated profile identifier.",
-    ),
-    overwrite: bool = typer.Option(False, help="Replace existing outputs."),
-) -> None:
-    """Generate an offline equal-budget mixed-precision profile."""
-    def action() -> None:
-        target_bytes, promotion_budget_bytes = _resolve_profile_budget(
-            target_size_mib,
-            target_size_gib,
-            promotion_budget_mib,
-            promotion_budget_bytes_option,
-            option_error=(
-                "Provide exactly one of --target-size-mib, --target-size-gib, "
-                "--promotion-budget-mib, or --promotion-budget-bytes."
-            ),
-        )
-
-        effective_profile_id = profile_id or (
-            "activation-relative"
-            if metric in ("relative_output_sse", "relative_output_error")
-            else "legacy-static"
-        )
-        effective_summary_output = summary_output or output.with_name(
-            f"{output.stem}-summary.json"
-        )
-        resolved_outputs = {
-            output.resolve(),
-            effective_summary_output.resolve(),
-        }
-        if len(resolved_outputs) != 2:
-            raise ValueError("Profile and summary output paths must be different.")
-        if not overwrite:
-            for output_path in (output, effective_summary_output):
-                if output_path.exists():
-                    raise FileExistsError(f"Output already exists: {output_path}")
-
-        generated = generate_activation_profile(
-            activation_score,
-            weight_audit,
-            target_bytes=target_bytes,
-            promotion_budget_bytes=promotion_budget_bytes,
-            profile_id=effective_profile_id,
-            metric=metric,
-            include_regex=include_regex,
-        )
-        output.parent.mkdir(parents=True, exist_ok=True)
-        write_profile(output, generated.optimized.profile, overwrite=overwrite)
-        _write_json(effective_summary_output, generated.summary, overwrite)
-        _finish(
-            {
-                "activation_score": str(activation_score),
-                "weight_audit": str(weight_audit),
-                "profile_path": str(output),
-                "summary_path": str(effective_summary_output),
-                "metric": metric,
-                "target_bytes": generated.optimized.target_bytes,
-                "estimated_output_bytes": generated.optimized.output_bytes,
-                "promoted_int8cr_tensor_count": generated.summary[
-                    "promoted_int8cr_tensor_count"
-                ],
-            }
-        )
-
-    _run("profile-from-activation", action)
-
-
 @app.command("analyze")
 def analyze(
     audit_path: Path | None = typer.Argument(
@@ -1044,11 +866,6 @@ def analyze(
         None,
         "--tensors",
         help="Print comma-separated exact tensors.",
-    ),
-    activation_calibration: Path | None = typer.Option(
-        None,
-        "--activation-calibration",
-        help="Activation calibration metadata JSON for --source.",
     ),
     target_size_gib: float | None = typer.Option(
         None,
@@ -1091,11 +908,6 @@ def analyze(
             raise ValueError("--audit and --source cannot be combined.")
         if audit_input is None and source is None:
             raise ValueError("Provide --audit or --source.")
-        if audit_input is not None and activation_calibration is not None:
-            raise ValueError(
-                "--activation-calibration requires --source; "
-                "include it when generating the audit report."
-            )
         if source is not None:
             if not tensor_names:
                 raise ValueError("--source requires --tensor or --tensors.")
@@ -1112,16 +924,9 @@ def analyze(
                     "--source cannot be combined with --exclude-prefix."
                 )
             source_header = read_source_model_header(source)
-            calibration = (
-                None
-                if activation_calibration is None
-                else ActivationCalibration.load(activation_calibration)
-            )
             audit_kwargs: dict[str, Any] = {
                 "on_entry_started": _print_progress,
             }
-            if calibration is not None:
-                audit_kwargs["activation_calibration"] = calibration
             if tensor is not None:
                 audit_kwargs["tensor_name"] = tensor
             else:
@@ -1129,7 +934,6 @@ def analyze(
             audit_document = audit_bf16_source(source, **audit_kwargs)
             for tensor_name in tensor_names:
                 print_tensor_analysis(audit_document, source_header, tensor_name)
-            print_activation_ranking(audit_document)
             return
 
         exclude_prefixes = _split_comma_separated(exclude_prefix)
@@ -1189,7 +993,6 @@ def analyze(
                 tensor_name,
                 optimized if target_size_gib is not None else None,
             )
-        print_activation_ranking(audit_document)
         if output is not None:
             if output.resolve() == audit_input.resolve():
                 raise ValueError("Audit and output paths must be different.")

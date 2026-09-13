@@ -802,42 +802,6 @@ def print_tensor_analysis(
         display = "n/a" if value is None else f"{value:.6f}"
         print(f"{label:<28}{display}")
 
-    activation = result.get("activation")
-    if activation is not None:
-        print()
-        print("Activation calibration")
-        print("----------------------")
-        print(f"Metric:             {activation['metric_variant']}")
-        print(
-            "Baseline:           "
-            + str(activation.get("calibration_baseline") or "n/a")
-        )
-        print(
-            "Reference:          "
-            + str(activation.get("activation_reference") or "n/a")
-        )
-        print(
-            "Candidate:          "
-            + str(activation.get("candidate_format") or "n/a")
-        )
-        print(f"Samples:            {activation['sample_count']}")
-        print(f"Invocations:        {activation['invocation_count']}")
-        print(f"Input features:     {activation['input_features']}")
-        energy = activation["activation_energy_sum"]
-        print(
-            "Activation energy:  "
-            + ("n/a" if energy is None else f"{energy:.6e}")
-        )
-        print()
-        print("Activation-aware error")
-        print("----------------------")
-        error = activation["error"]
-        print(
-            "Raw score:          "
-            + ("n/a" if error is None else f"{error:.6e}")
-        )
-        print(f"Status:              {activation['status']}")
-
     if optimized is None:
         return
 
@@ -871,61 +835,3 @@ def print_tensor_analysis(
             else f"{float(measurement['relative_l2_error']) ** 2 * result['weight_l2_sq']:.6f}"
         )
     )
-
-
-def print_activation_ranking(audit: WeightAuditDocument) -> None:
-    if not isinstance(audit, dict):
-        return
-    status_counts: Counter[str] = Counter()
-    metric_variants: set[str] = set()
-    references: set[str] = set()
-    baselines: set[str] = set()
-    ranked: list[tuple[str, float]] = []
-    for result in audit.get("results", ()):
-        activation = result.get("activation")
-        if activation is None:
-            continue
-        status_counts[activation["status"]] += 1
-        metric_variants.add(activation["metric_variant"])
-        reference = activation.get("activation_reference")
-        if reference is not None:
-            references.add(reference)
-        baseline = activation.get("calibration_baseline")
-        if baseline is not None:
-            baselines.add(baseline)
-        if activation["status"] == "ok" and activation["error"] is not None:
-            ranked.append((result["tensor_name"], activation["error"]))
-
-    if not status_counts:
-        return
-
-    print()
-    print("Activation-aware ConvRot W4A4 ranking")
-    print("--------------------------------------")
-    if metric_variants:
-        print(f"Metric: {', '.join(sorted(metric_variants))}")
-    if baselines:
-        print(f"Baseline: {', '.join(sorted(baselines))}")
-    if references:
-        print(f"Reference: {', '.join(sorted(references))}")
-    for index, (tensor_name, error) in enumerate(
-        sorted(ranked, key=lambda item: item[1], reverse=True)[:20],
-        start=1,
-    ):
-        print(f"{index:>3}  {tensor_name:<52} {error:.3e}")
-    if not ranked:
-        print("No tensors with a valid activation score.")
-
-    coverage = [f"scored: {len(ranked)}"]
-    if status_counts["missing_calibration"]:
-        coverage.append(
-            f"missing: {status_counts['missing_calibration']}"
-        )
-    unavailable = sum(
-        count
-        for status, count in status_counts.items()
-        if status not in {"ok", "missing_calibration"}
-    )
-    if unavailable:
-        coverage.append(f"unavailable: {unavailable}")
-    print("Coverage: " + ", ".join(coverage))

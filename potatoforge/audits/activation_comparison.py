@@ -1,4 +1,4 @@
-"""Compare every V2 activation metric in one Excel workbook."""
+"""Compare every activation metric in one Excel workbook."""
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -25,7 +25,7 @@ from .activation_profiles import (
 )
 
 
-V2_ACTIVATION_METRICS: Final[tuple[str, ...]] = ACTIVATION_AUDIT_METRICS
+ACTIVATION_METRICS: Final[tuple[str, ...]] = ACTIVATION_AUDIT_METRICS
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _ACTION_FILLS = {
@@ -48,7 +48,7 @@ def generate_activation_comparison_workbook(
     baseline_method: str = "bf16",
     excluded_prefixes: tuple[str, ...] = (),
     excluded_suffixes: tuple[str, ...] = (),
-    metrics: Sequence[str] = V2_ACTIVATION_METRICS,
+    metrics: Sequence[str] = ACTIVATION_METRICS,
     top_n: int = 20,
     overwrite: bool = False,
 ) -> dict[str, object]:

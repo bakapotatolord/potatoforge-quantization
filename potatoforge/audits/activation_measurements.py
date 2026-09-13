@@ -14,22 +14,27 @@ from ..planning import (
 )
 from ..profiles import QuantizationAction
 from ..quantization.convrot_w4a4 import (
+    ConvRotW4A4Result,
     dequantize_convrot_w4a4,
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
 )
 from ..quantization.int6_rowwise import (
     dequantize_int6_convrot,
+    dequantize_int6_convrot_packed,
     dequantize_int6_rowwise,
     quantize_int6_convrot,
+    quantize_int6_convrot_packed,
     quantize_int6_rowwise,
 )
 from ..quantization.int8_tensorwise import (
+    Int8TensorwiseResult,
     dequantize_int8_convrot,
     dequantize_int8_tensorwise,
     quantize_int8_convrot,
     quantize_int8_tensorwise,
 )
+from ..timing import timed_stage
 from .activation_metrics import (
     sampled_diagonal_approximation_ratio,
     sampled_diagonal_sse,
@@ -47,7 +52,12 @@ METHOD_ACTIONS: Final[dict[str, QuantizationAction]] = {
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
 }
-MEASUREMENT_METHODS: Final[tuple[str, ...]] = tuple(METHOD_ACTIONS)
+MEASUREMENT_METHODS: Final[tuple[str, ...]] = (
+    "convrot_w4a4",
+    "convrot_w4a4_mse",
+    "int6_convrot",
+    "int8_convrot",
+)
 
 
 @dataclass(frozen=True)
@@ -73,19 +83,48 @@ def measure_activation_candidates(
     weights: torch.Tensor,
     calibration: LayerCalibration,
     methods: Sequence[str] | None = None,
+    *,
+    device: str = "cpu",
+    method_timings: dict[str, float] | None = None,
 ) -> tuple[CandidateMeasurement, ...]:
     """Measure selected quantization candidates for one source weight."""
     requested_methods = MEASUREMENT_METHODS if methods is None else tuple(methods)
-    return tuple(
-        measure_activation_candidate(
-            tensor_name,
-            descriptor,
-            weights,
-            calibration,
-            method,
+    if method_timings is None:
+        return tuple(
+            measure_activation_candidate(
+                tensor_name,
+                descriptor,
+                weights,
+                calibration,
+                method,
+                device=device,
+            )
+            for method in requested_methods
         )
-        for method in requested_methods
+
+    target_device = torch.device(device)
+    synchronize = (
+        torch.cuda.synchronize if target_device.type == "cuda" else None
     )
+    results: list[CandidateMeasurement] = []
+    for method in requested_methods:
+        with timed_stage(
+            method_timings,
+            method,
+            synchronize=synchronize,
+            synchronize_arg=target_device,
+        ):
+            results.append(
+                measure_activation_candidate(
+                    tensor_name,
+                    descriptor,
+                    weights,
+                    calibration,
+                    method,
+                    device=device,
+                )
+            )
+    return tuple(results)
 
 
 def measure_activation_candidate(
@@ -94,6 +133,8 @@ def measure_activation_candidate(
     weights: torch.Tensor,
     calibration: LayerCalibration,
     method: str,
+    *,
+    device: str = "cpu",
 ) -> CandidateMeasurement:
     action = METHOD_ACTIONS.get(method)
     if action is None:
@@ -127,7 +168,7 @@ def measure_activation_candidate(
             dtype=torch.float32,
         )
     else:
-        reconstructed = _reconstruct_candidate(weights, method)
+        reconstructed = _reconstruct_candidate(weights, method, device=device)
         error_by_eval_output = _measure_output_error(
             weights,
             reconstructed,
@@ -192,21 +233,45 @@ def _validate_inputs(
         )
 
 
-def _reconstruct_candidate(weights: torch.Tensor, method: str) -> torch.Tensor:
+def _reconstruct_candidate(
+    weights: torch.Tensor,
+    method: str,
+    *,
+    device: str = "cpu",
+) -> torch.Tensor:
     if method == "int8":
         return dequantize_int8_tensorwise(quantize_int8_tensorwise(weights))
     if method == "int6":
         return dequantize_int6_rowwise(quantize_int6_rowwise(weights))
     if method == "int8_convrot":
-        return dequantize_int8_convrot(quantize_int8_convrot(weights))
+        result = quantize_int8_convrot(weights, device=device)
+        if torch.device(device).type == "cuda":
+            result = Int8TensorwiseResult(
+                result.codes.to(device=device),
+                result.scales.to(device=device),
+            )
+        return dequantize_int8_convrot(result)
     if method == "int6_convrot":
-        return dequantize_int6_convrot(quantize_int6_convrot(weights))
+        if torch.device(device).type != "cuda":
+            return dequantize_int6_convrot(quantize_int6_convrot(weights))
+        packed = quantize_int6_convrot_packed(weights, device=device)
+        return dequantize_int6_convrot_packed(packed, device=device)
     if method == "convrot_w4a4":
-        return dequantize_convrot_w4a4(quantize_convrot_w4a4(weights))
+        result = quantize_convrot_w4a4(weights, device=device)
+        if torch.device(device).type == "cuda":
+            result = ConvRotW4A4Result(
+                result.packed_codes.to(device=device),
+                result.scales.to(device=device),
+            )
+        return dequantize_convrot_w4a4(result)
     if method == "convrot_w4a4_mse":
-        return dequantize_convrot_w4a4(
-            quantize_convrot_w4a4_mse(weights)
-        )
+        result = quantize_convrot_w4a4_mse(weights, device=device)
+        if torch.device(device).type == "cuda":
+            result = ConvRotW4A4Result(
+                result.packed_codes.to(device=device),
+                result.scales.to(device=device),
+            )
+        return dequantize_convrot_w4a4(result)
     raise ValueError(f"Unsupported activation measurement method: {method!r}")
 
 
@@ -215,7 +280,10 @@ def _measure_output_error(
     reconstructed: torch.Tensor,
     calibration: LayerCalibration,
 ) -> torch.Tensor:
-    reference = weights.float()
+    reference = weights.to(
+        device=reconstructed.device,
+        dtype=torch.float32,
+    )
     candidate = reconstructed.float()
     if candidate.shape != reference.shape:
         raise ValueError("Quantizer reconstruction shape does not match source weight.")
@@ -249,9 +317,15 @@ def _measure_sampled_diagnostics(
             "sample_unavailable_reason": "Calibration sample_x contains no valid rows."
         }
 
-    reference = weights.float()
+    reference = weights.to(
+        device=reconstructed.device,
+        dtype=torch.float32,
+    )
     candidate = reconstructed.float()
-    sample = sample_x.float()
+    sample = sample_x.to(
+        device=reconstructed.device,
+        dtype=torch.float32,
+    )
     error_output = sampled_output_error(sample, reference, candidate)
     sample_error_sse = error_output.square().sum(dim=1).contiguous()
     reference_output = torch.mm(sample, reference.transpose(0, 1))

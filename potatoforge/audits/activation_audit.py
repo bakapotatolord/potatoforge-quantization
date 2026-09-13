@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
+import struct
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -13,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Final
 
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 
 from ..calibration import ActivationCalibration, LayerCalibration
 from ..planning import (
@@ -54,6 +56,56 @@ ACTIVATION_AUDIT_METRICS: Final[tuple[str, ...]] = (
     "channel_p95_bias_free_global_contribution",
     "channel_cvar20_bias_free_global_contribution",
 )
+
+
+def _validate_activation_audit_device(device: str) -> None:
+    if device not in ("cpu", "cuda"):
+        raise ValueError("Activation audit device must be cpu or cuda.")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA device requested but CUDA is unavailable.")
+
+
+def render_activation_audit_timing(
+    total_seconds: float,
+    method_seconds: Mapping[str, float],
+    *,
+    device: str,
+    tensor_count: int,
+) -> str:
+    """Render optional full-run activation-audit timings."""
+    total = max(0.0, total_seconds)
+    recorded = sum(max(0.0, seconds) for seconds in method_seconds.values())
+    other = max(0.0, total - recorded)
+
+    def percent(seconds: float) -> float:
+        return 0.0 if total <= 0.0 else seconds / total * 100.0
+
+    lines = [
+        "Activation audit timing",
+        "=" * 56,
+        f"Device: {device}",
+        f"Tensors: {tensor_count}",
+        "",
+        f"{'Candidate method':<24} {'Time':>12} {'% total':>10}",
+        "-" * 50,
+    ]
+    for method, seconds in sorted(
+        method_seconds.items(),
+        key=lambda item: (-item[1], item[0]),
+    ):
+        seconds = max(0.0, seconds)
+        lines.append(
+            f"{method:<24} {seconds:>8.3f} s {percent(seconds):>8.1f}%"
+        )
+    lines.extend(
+        (
+            "-" * 50,
+            f"{'other':<24} {other:>8.3f} s {percent(other):>8.1f}%",
+            "  (calibration, header/source handling, bias metrics, cache write)",
+            f"{'total':<24} {total:>8.3f} s {percent(total):>8.1f}%",
+        )
+    )
+    return "\n".join(lines)
 
 
 def activation_audit_pair_paths(
@@ -233,11 +285,14 @@ def run_activation_audit(
     requested_methods: Sequence[str] | None = None,
     tensor_names: Sequence[str] | None = None,
     on_tensor_started: Callable[[int, int, str], None] | None = None,
+    device: str = "cpu",
+    method_timings: dict[str, float] | None = None,
     overwrite: bool = False,
 ) -> tuple[Path, Path]:
-    """Measure every selected V2 calibration layer and write its cache."""
-    if calibration.version != 2:
-        raise ValueError("Activation audit requires V2 calibration.")
+    """Measure every selected activation calibration layer and write its cache."""
+    _validate_activation_audit_device(device)
+    if calibration.version != 1:
+        raise ValueError("Activation audit requires the current calibration format.")
     source_header = calibration.validate_against_source(source_path)
     descriptors = {
         tensor_name: descriptor
@@ -272,6 +327,7 @@ def run_activation_audit(
         (tensor_name, descriptors[tensor_name])
         for tensor_name in selected_names
     )
+    requested = _normalise_requested_methods(requested_methods)
     bias_descriptors: dict[str, tuple[str, Mapping[str, object]]] = {}
     bias_names: dict[str, str | None] = {}
     bias_reasons: dict[str, str | None] = {}
@@ -299,69 +355,73 @@ def run_activation_audit(
         bias_names[tensor_name] = bias_name
         bias_reasons[tensor_name] = None
 
-    bias_values: dict[str, torch.Tensor] = {}
-    bias_descriptor_items = tuple(
-        (bias_name, descriptor)
-        for bias_name, descriptor in (
-            bias_descriptors[tensor_name]
-            for tensor_name in selected_names
-            if tensor_name in bias_descriptors
-        )
-    )
-    for bias_name, bias in stream_bf16_source_tensors(
-        source_path,
-        bias_descriptor_items,
-    ):
-        bias_values[bias_name] = bias
-
-    measurements: dict[str, tuple[CandidateMeasurement, ...]] = {}
-    bias_energy: dict[str, torch.Tensor] = {}
-    for tensor_name, weights in stream_bf16_source_tensors(
-        source_path,
-        descriptor_items,
-        on_tensor_started,
-    ):
-        layer = calibration.get(tensor_name)
-        if not isinstance(layer, LayerCalibration):
-            raise ValueError(
-                f"Activation audit calibration layer is not V2: {tensor_name}"
-            )
-        try:
-            measurements[tensor_name] = measure_activation_candidates(
-                tensor_name,
-                descriptors[tensor_name],
-                weights,
-                layer,
-                requested_methods,
-            )
-            bias_descriptor = bias_descriptors.get(tensor_name)
-            if bias_descriptor is not None:
-                bias_name, _ = bias_descriptor
-                bias_energy[tensor_name] = bias_free_output_energy(
-                    layer.eval_sum_y,
-                    layer.eval_sum_y2,
-                    layer.eval_sample_counts,
-                    bias_values[bias_name],
-                )
-        except ValueError as error:
-            raise ValueError(
-                f"Activation audit failed: tensor={tensor_name} "
-                f"reason={error}"
-            ) from error
-
-    return write_activation_audit_cache(
+    writer = _StreamingActivationAuditWriter(
         output_path,
         source_path,
         calibration,
-        measurements,
         calibration_metadata_path=calibration_metadata_path,
         calibration_stats_path=calibration_stats_path,
-        requested_methods=requested_methods,
+        requested_methods=requested,
         bias_names=bias_names,
-        bias_free_output_energy=bias_energy,
         bias_unavailable_reasons=bias_reasons,
         overwrite=overwrite,
     )
+    try:
+        for tensor_name, weights in stream_bf16_source_tensors(
+            source_path,
+            descriptor_items,
+            on_tensor_started,
+        ):
+            layer = calibration.get(tensor_name)
+            if not isinstance(layer, LayerCalibration):
+                raise ValueError(
+                    "Activation audit calibration layer is not valid: "
+                    f"{tensor_name}"
+                )
+            bias_value: torch.Tensor | None = None
+            bias_descriptor = bias_descriptors.get(tensor_name)
+            if bias_descriptor is not None:
+                bias_name, descriptor = bias_descriptor
+                bias_reader = stream_bf16_source_tensors(
+                    source_path,
+                    ((bias_name, descriptor),),
+                )
+                try:
+                    _, bias_value = next(bias_reader)
+                finally:
+                    bias_reader.close()
+            try:
+                candidates = measure_activation_candidates(
+                    tensor_name,
+                    descriptors[tensor_name],
+                    weights,
+                    layer,
+                    requested,
+                    device=device,
+                    method_timings=method_timings,
+                )
+                bias_energy = None
+                if bias_value is not None:
+                    bias_energy = bias_free_output_energy(
+                        layer.eval_sum_y,
+                        layer.eval_sum_y2,
+                        layer.eval_sample_counts,
+                        bias_value,
+                    )
+            except ValueError as error:
+                raise ValueError(
+                    f"Activation audit failed: tensor={tensor_name} "
+                    f"reason={error}"
+                ) from error
+            writer.add_layer(
+                tensor_name,
+                candidates,
+                bias_free_output_energy=bias_energy,
+            )
+        return writer.finish()
+    except Exception:
+        writer.abort()
+        raise
 
 
 def score_activation_audit(
@@ -393,7 +453,8 @@ def score_activation_audit(
         layer = activation_calibration.get(tensor_name)
         if not isinstance(layer, LayerCalibration):
             raise ValueError(
-                f"Activation audit calibration layer is not V2: {tensor_name}"
+                "Activation audit calibration layer is not valid: "
+                f"{tensor_name}"
             )
         for method in activation_cache.requested_methods:
             candidate = activation_cache.get(tensor_name, method)
@@ -545,7 +606,8 @@ def inspect_activation_audit(
         layer = activation_calibration.get(selected_name)
         if not isinstance(layer, LayerCalibration):
             raise ValueError(
-                f"Activation audit calibration layer is not V2: {selected_name}"
+                "Activation audit calibration layer is not valid: "
+                f"{selected_name}"
             )
         input_features, output_features, evaluation_count = (
             activation_cache.layer_shapes[selected_name]
@@ -600,71 +662,34 @@ def inspect_activation_audit(
                     f"tensor={selected_name} method={method}"
                 )
             try:
-                evaluation_scores = evaluation_relative_sse(
+                observed_components = _candidate_metric_components(
                     error,
                     layer.eval_sum_y2,
+                    0.0,
                 )
-                channel_contributions = global_channel_contribution(
-                    error,
-                    layer.eval_sum_y2,
+                _, evaluation_scores, _ = observed_components
+                method_report["metrics"] = _candidate_metric_values(
+                    observed_components
                 )
-                method_report["metrics"] = {
-                    "aggregate_observed_relative_sse": (
-                        aggregate_observed_relative_sse(
-                            error,
-                            layer.eval_sum_y2,
-                        )
-                    ),
-                    "eval_mean_observed_relative_sse": reduce_evaluation_scores(
-                        evaluation_scores,
-                        "mean",
-                    ),
-                    "eval_p95_observed_relative_sse": reduce_evaluation_scores(
-                        evaluation_scores,
-                        "p95",
-                    ),
-                    "eval_cvar20_observed_relative_sse": reduce_evaluation_scores(
-                        evaluation_scores,
-                        "cvar20",
-                    ),
-                    "channel_p95_global_contribution": reduce_evaluation_scores(
-                        channel_contributions,
-                        "p95",
-                    ),
-                    "channel_cvar20_global_contribution": (
-                        reduce_evaluation_scores(channel_contributions, "cvar20")
-                    ),
-                }
                 if bias_energy is not None:
                     try:
+                        bias_free_metrics = _candidate_metric_values(
+                            _candidate_metric_components(
+                                error,
+                                bias_energy,
+                                0.0,
+                            )
+                        )
                         method_report["bias_free_metrics"] = {
-                            "aggregate_bias_free_observed_relative_sse": (
-                                _score_candidate(
-                                    "aggregate_observed_relative_sse",
-                                    error,
-                                    layer,
-                                    0.0,
-                                    output_energy=bias_energy,
-                                )
-                            ),
-                            "eval_p95_bias_free_observed_relative_sse": (
-                                _score_candidate(
-                                    "eval_p95_observed_relative_sse",
-                                    error,
-                                    layer,
-                                    0.0,
-                                    output_energy=bias_energy,
-                                )
-                            ),
-                            "eval_cvar20_bias_free_observed_relative_sse": (
-                                _score_candidate(
-                                    "eval_cvar20_observed_relative_sse",
-                                    error,
-                                    layer,
-                                    0.0,
-                                    output_energy=bias_energy,
-                                )
-                            ),
+                            "aggregate_bias_free_observed_relative_sse": bias_free_metrics[
+                                "aggregate_observed_relative_sse"
+                            ],
+                            "eval_p95_bias_free_observed_relative_sse": bias_free_metrics[
+                                "eval_p95_observed_relative_sse"
+                            ],
+                            "eval_cvar20_bias_free_observed_relative_sse": bias_free_metrics[
+                                "eval_cvar20_observed_relative_sse"
+                            ],
                         }
                     except ValueError as error:
                         raise ValueError(
@@ -883,6 +908,59 @@ def _top_ranked(
     )[:top_n]
 
 
+def _candidate_metric_components(
+    error: torch.Tensor,
+    denominator: torch.Tensor,
+    absolute_floor: float,
+) -> tuple[float, torch.Tensor, torch.Tensor]:
+    return (
+        aggregate_observed_relative_sse(
+            error,
+            denominator,
+            absolute_floor=absolute_floor,
+        ),
+        evaluation_relative_sse(
+            error,
+            denominator,
+            absolute_floor=absolute_floor,
+        ),
+        global_channel_contribution(
+            error,
+            denominator,
+            absolute_floor=absolute_floor,
+        ),
+    )
+
+
+def _candidate_metric_values(
+    components: tuple[float, torch.Tensor, torch.Tensor],
+) -> dict[str, float]:
+    aggregate, evaluation_scores, channel_contributions = components
+    return {
+        "aggregate_observed_relative_sse": aggregate,
+        "eval_mean_observed_relative_sse": reduce_evaluation_scores(
+            evaluation_scores,
+            "mean",
+        ),
+        "eval_p95_observed_relative_sse": reduce_evaluation_scores(
+            evaluation_scores,
+            "p95",
+        ),
+        "eval_cvar20_observed_relative_sse": reduce_evaluation_scores(
+            evaluation_scores,
+            "cvar20",
+        ),
+        "channel_p95_global_contribution": reduce_evaluation_scores(
+            channel_contributions,
+            "p95",
+        ),
+        "channel_cvar20_global_contribution": reduce_evaluation_scores(
+            channel_contributions,
+            "cvar20",
+        ),
+    }
+
+
 def _score_candidate(
     metric: str,
     error: torch.Tensor,
@@ -961,6 +1039,350 @@ def _matching_bias_name(weight_name: str) -> str:
     raise ValueError(f"Unsupported activation audit weight name: {weight_name}")
 
 
+class _StreamingSafeTensorWriter:
+    def __init__(self, output_path: Path) -> None:
+        handle, spool_name = tempfile.mkstemp(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".payload.tmp",
+        )
+        self._spool_path = Path(spool_name)
+        self._spool = os.fdopen(handle, "wb")
+        self._entries: dict[str, dict[str, object]] = {}
+        self._payload_size = 0
+        self._finished = False
+
+    def add(self, name: str, tensor: torch.Tensor) -> None:
+        if name in self._entries:
+            raise ValueError(f"Duplicate activation audit tensor key: {name}")
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"Activation audit tensor is invalid: {name}")
+
+        tensor = tensor.detach().to(device="cpu", dtype=torch.float32)
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+        raw_bytes = (
+            b""
+            if tensor.numel() == 0
+            else tensor.view(torch.uint8).reshape(-1).numpy().tobytes()
+        )
+        start = self._payload_size
+        self._spool.write(raw_bytes)
+        self._payload_size += len(raw_bytes)
+        self._entries[name] = {
+            "dtype": "F32",
+            "shape": [int(dimension) for dimension in tensor.shape],
+            "data_offsets": [start, self._payload_size],
+        }
+
+    def write_to(self, output_path: Path) -> None:
+        if self._finished:
+            raise RuntimeError("Activation audit tensor writer is already closed.")
+        self._spool.close()
+        header = json.dumps(
+            self._entries,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        header += b" " * ((8 - len(header) % 8) % 8)
+
+        try:
+            with output_path.open("wb") as output_file:
+                output_file.write(struct.pack("<Q", len(header)))
+                output_file.write(header)
+                with self._spool_path.open("rb") as payload_file:
+                    shutil.copyfileobj(payload_file, output_file, length=1024 * 1024)
+        finally:
+            self._spool_path.unlink(missing_ok=True)
+            self._finished = True
+
+    def abort(self) -> None:
+        if self._finished:
+            return
+        self._spool.close()
+        self._spool_path.unlink(missing_ok=True)
+        self._finished = True
+
+
+class _StreamingActivationAuditWriter:
+    def __init__(
+        self,
+        output_path: str | Path,
+        source_model_path: str | Path,
+        calibration: ActivationCalibration,
+        *,
+        calibration_metadata_path: str | Path,
+        calibration_stats_path: str | Path | None,
+        requested_methods: tuple[str, ...],
+        bias_names: Mapping[str, str | None],
+        bias_unavailable_reasons: Mapping[str, str | None],
+        overwrite: bool,
+    ) -> None:
+        self.metadata_path, self.tensors_path = activation_audit_pair_paths(
+            output_path
+        )
+        if not overwrite and (
+            self.metadata_path.exists() or self.tensors_path.exists()
+        ):
+            raise FileExistsError(
+                f"Activation audit output already exists: {self.metadata_path}"
+            )
+        if calibration.version != 1:
+            raise ValueError(
+                "Activation audit caches require the current calibration format."
+            )
+        session_id = calibration.session_id
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("Activation audit calibration session_id is required.")
+
+        self._calibration = calibration
+        self._source_model_path = source_model_path
+        self._calibration_metadata_path = calibration_metadata_path
+        self._calibration_stats_path = calibration_stats_path
+        self._requested_methods = requested_methods
+        self._layer_names = set(calibration.tensor_names())
+        self._layer_indices = {
+            tensor_name: layer_index
+            for layer_index, tensor_name in enumerate(sorted(self._layer_names))
+        }
+        self._bias_names = dict(bias_names)
+        self._bias_reasons = dict(bias_unavailable_reasons)
+        self._seen_layers: set[str] = set()
+        self._serialized_layers: dict[str, dict[str, object]] = {}
+        self._availability: dict[str, dict[str, int]] = {
+            method: {"available": 0, "unavailable": 0}
+            for method in requested_methods
+        }
+        self._next_key = 0
+        self._tensor_writer: _StreamingSafeTensorWriter | None = None
+
+        for mapping_name, mapping in (
+            ("bias_names", self._bias_names),
+            ("bias_unavailable_reasons", self._bias_reasons),
+        ):
+            if not set(mapping).issubset(self._layer_names):
+                raise ValueError(
+                    f"Activation audit {mapping_name} contains unknown layers."
+                )
+
+        self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        self._tensor_writer = _StreamingSafeTensorWriter(self.tensors_path)
+        self._previously_existing = {
+            self.metadata_path: self.metadata_path.exists(),
+            self.tensors_path: self.tensors_path.exists(),
+        }
+        self._finished = False
+
+    def add_layer(
+        self,
+        tensor_name: str,
+        records: Sequence[CandidateMeasurement]
+        | Mapping[str, CandidateMeasurement],
+        *,
+        bias_free_output_energy: torch.Tensor | None = None,
+    ) -> None:
+        if tensor_name not in self._layer_names:
+            raise ValueError(
+                f"Activation audit measurement tensor is unknown: {tensor_name}"
+            )
+        if tensor_name in self._seen_layers:
+            raise ValueError(
+                f"Duplicate activation audit measurement tensor: {tensor_name}"
+            )
+        layer = self._calibration.get(tensor_name)
+        if not isinstance(layer, LayerCalibration):
+            raise ValueError(
+                "Activation audit requires a valid calibration layer: "
+                f"{tensor_name}"
+            )
+
+        try:
+            by_method = _normalise_layer_measurements(
+                tensor_name,
+                records,
+                self._requested_methods,
+            )
+            layer_index = self._layer_indices[tensor_name]
+            bias_name = self._bias_names.get(tensor_name)
+            bias_reason = self._bias_reasons.get(tensor_name)
+            bias_key: str | None = None
+            if bias_name is not None and (
+                not isinstance(bias_name, str) or not bias_name
+            ):
+                raise ValueError(
+                    f"Activation audit bias_name is invalid: {tensor_name}"
+                )
+            if bias_reason is not None and (
+                not isinstance(bias_reason, str) or not bias_reason
+            ):
+                raise ValueError(
+                    f"Activation audit bias reason is invalid: {tensor_name}"
+                )
+            if bias_free_output_energy is not None:
+                if bias_name is None or bias_reason is not None:
+                    raise ValueError(
+                        f"Activation audit bias metadata is inconsistent: "
+                        f"{tensor_name}"
+                    )
+                bias_value = bias_free_output_energy.detach().to(
+                    device="cpu",
+                    dtype=torch.float32,
+                )
+                expected_bias_shape = (
+                    layer.evaluation_count,
+                    layer.output_features,
+                )
+                if tuple(bias_value.shape) != expected_bias_shape:
+                    raise ValueError(
+                        f"Activation audit bias energy shape mismatch: "
+                        f"tensor={tensor_name} expected={expected_bias_shape} "
+                        f"observed={tuple(bias_value.shape)}"
+                    )
+                if not bool(torch.isfinite(bias_value).all().item()) or bool(
+                    (bias_value < 0).any().item()
+                ):
+                    raise ValueError(
+                        f"Activation audit bias energy contains invalid values: "
+                        f"tensor={tensor_name}"
+                    )
+                bias_key = f"b{layer_index:06d}"
+                assert self._tensor_writer is not None
+                self._tensor_writer.add(bias_key, bias_value)
+
+            serialized_methods: dict[str, dict[str, object]] = {}
+            for method in self._requested_methods:
+                candidate = by_method[method]
+                record, tensor_key = _serialize_candidate(
+                    tensor_name,
+                    method,
+                    candidate,
+                    layer,
+                    self._next_key,
+                )
+                if candidate.available:
+                    assert tensor_key is not None
+                    assert candidate.error_by_eval_output is not None
+                    assert self._tensor_writer is not None
+                    self._tensor_writer.add(
+                        tensor_key,
+                        candidate.error_by_eval_output,
+                    )
+                    for metadata_name, field_name in (
+                        ("sample_error_sse_key", "sample_error_sse"),
+                        (
+                            "sample_reference_energy_key",
+                            "sample_reference_energy",
+                        ),
+                        ("sample_direction_error_key", "sample_direction_error"),
+                    ):
+                        sample_key = record.get(metadata_name)
+                        if sample_key is not None:
+                            sample_tensor = getattr(candidate, field_name)
+                            assert isinstance(sample_tensor, torch.Tensor)
+                            self._tensor_writer.add(sample_key, sample_tensor)
+                    self._availability[method]["available"] += 1
+                    self._next_key += 1
+                else:
+                    self._availability[method]["unavailable"] += 1
+                serialized_methods[method] = record
+
+            self._serialized_layers[tensor_name] = {
+                "input_features": layer.input_features,
+                "output_features": layer.output_features,
+                "sample_count": layer.sample_count,
+                "sampled_sample_count": (
+                    None
+                    if layer.sample_x is None
+                    else int(layer.sample_x.shape[0])
+                ),
+                "invocation_count": layer.invocation_count,
+                "evaluation_count": layer.evaluation_count,
+                "bias_name": bias_name,
+                "bias_free_output_energy_key": bias_key,
+                "bias_unavailable_reason": bias_reason,
+                "methods": serialized_methods,
+            }
+            self._seen_layers.add(tensor_name)
+        finally:
+            layer.clear_cached_tensors()
+
+    def finish(self) -> tuple[Path, Path]:
+        if self._finished:
+            raise RuntimeError("Activation audit writer is already closed.")
+        if self._seen_layers != self._layer_names:
+            missing = sorted(self._layer_names - self._seen_layers)
+            extra = sorted(self._seen_layers - self._layer_names)
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if extra:
+                details.append(f"unexpected={extra}")
+            raise ValueError(
+                "Activation audit measurement tensor names must match "
+                "calibration: "
+                + ", ".join(details)
+            )
+
+        stats_path = (
+            Path(self._calibration_metadata_path).with_suffix(".safetensors")
+            if self._calibration_stats_path is None
+            else Path(self._calibration_stats_path)
+        )
+        document = {
+            "format": ACTIVATION_AUDIT_FORMAT,
+            "format_version": ACTIVATION_AUDIT_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_path": str(Path(self._source_model_path).resolve()),
+            "calibration_metadata_path": str(
+                Path(self._calibration_metadata_path).resolve()
+            ),
+            "calibration_stats_path": str(stats_path.resolve()),
+            "calibration_session_id": self._calibration.session_id,
+            "calibration_version": self._calibration.version,
+            "baseline_label": self._calibration.baseline_label,
+            "requested_methods": list(self._requested_methods),
+            "layer_count": len(self._serialized_layers),
+            "method_availability_counts": self._availability,
+            "layers": self._serialized_layers,
+        }
+
+        temporary_paths: list[Path] = []
+        replaced_paths: list[Path] = []
+        try:
+            tensors_temp = _temporary_path(self.tensors_path, ".safetensors")
+            metadata_temp = _temporary_path(self.metadata_path, ".json")
+            temporary_paths.extend((tensors_temp, metadata_temp))
+            assert self._tensor_writer is not None
+            self._tensor_writer.write_to(tensors_temp)
+            metadata_temp.write_text(
+                json.dumps(document, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(tensors_temp, self.tensors_path)
+            replaced_paths.append(self.tensors_path)
+            os.replace(metadata_temp, self.metadata_path)
+            replaced_paths.append(self.metadata_path)
+            self._finished = True
+            return self.metadata_path, self.tensors_path
+        except Exception:
+            for replaced_path in replaced_paths:
+                if not self._previously_existing[replaced_path]:
+                    replaced_path.unlink(missing_ok=True)
+            raise
+        finally:
+            if self._tensor_writer is not None:
+                self._tensor_writer.abort()
+            for temporary_path in temporary_paths:
+                temporary_path.unlink(missing_ok=True)
+
+    def abort(self) -> None:
+        if self._finished:
+            return
+        if self._tensor_writer is not None:
+            self._tensor_writer.abort()
+        self._finished = True
+
+
 def write_activation_audit_cache(
     output_path: str | Path,
     source_model_path: str | Path,
@@ -980,19 +1402,7 @@ def write_activation_audit_cache(
     overwrite: bool = False,
 ) -> tuple[Path, Path]:
     """Write a validated activation-audit cache as an atomic pair."""
-    metadata_path, tensors_path = activation_audit_pair_paths(output_path)
-    if not overwrite and (metadata_path.exists() or tensors_path.exists()):
-        raise FileExistsError(
-            f"Activation audit output already exists: {metadata_path}"
-        )
-
     requested = _normalise_requested_methods(requested_methods)
-    if calibration.version != 2:
-        raise ValueError("Activation audit caches require V2 calibration.")
-    session_id = calibration.session_id
-    if not isinstance(session_id, str) or not session_id:
-        raise ValueError("Activation audit calibration session_id is required.")
-
     layer_names = set(calibration.tensor_names())
     if set(measurements) != layer_names:
         raise ValueError(
@@ -1011,174 +1421,31 @@ def write_activation_audit_cache(
         ("bias_unavailable_reasons", serialized_bias_reasons),
     ):
         if not set(mapping).issubset(layer_names):
-            raise ValueError(
-                f"Activation audit {mapping_name} contains unknown layers."
-            )
-
-    serialized_tensors: dict[str, torch.Tensor] = {}
-    serialized_layers: dict[str, dict[str, object]] = {}
-    availability: dict[str, dict[str, int]] = {
-        method: {"available": 0, "unavailable": 0}
-        for method in requested
-    }
-    next_key = 0
-
-    for layer_index, tensor_name in enumerate(sorted(layer_names)):
-        layer = calibration.get(tensor_name)
-        if not isinstance(layer, LayerCalibration):
-            raise ValueError(
-                f"Activation audit requires V2 layer calibration: {tensor_name}"
-            )
-        records = _normalise_layer_measurements(
-            tensor_name,
-            measurements[tensor_name],
-            requested,
-        )
-        serialized_methods: dict[str, dict[str, object]] = {}
-        bias_name = serialized_bias_names.get(tensor_name)
-        bias_value = serialized_bias_energy.get(tensor_name)
-        bias_reason = serialized_bias_reasons.get(tensor_name)
-        bias_key: str | None = None
-        if bias_name is not None and (
-            not isinstance(bias_name, str) or not bias_name
-        ):
-            raise ValueError(f"Activation audit bias_name is invalid: {tensor_name}")
-        if bias_reason is not None and (
-            not isinstance(bias_reason, str) or not bias_reason
-        ):
-            raise ValueError(
-                f"Activation audit bias reason is invalid: {tensor_name}"
-            )
-        if bias_value is not None:
-            if bias_name is None or bias_reason is not None:
                 raise ValueError(
-                    f"Activation audit bias metadata is inconsistent: {tensor_name}"
+                    f"Activation audit {mapping_name} contains unknown layers."
                 )
-            bias_value = bias_value.detach().to(device="cpu", dtype=torch.float32)
-            expected_bias_shape = (
-                layer.evaluation_count,
-                layer.output_features,
-            )
-            if tuple(bias_value.shape) != expected_bias_shape:
-                raise ValueError(
-                    f"Activation audit bias energy shape mismatch: "
-                    f"tensor={tensor_name} expected={expected_bias_shape} "
-                    f"observed={tuple(bias_value.shape)}"
-                )
-            if not bool(torch.isfinite(bias_value).all().item()) or bool(
-                (bias_value < 0).any().item()
-            ):
-                raise ValueError(
-                    f"Activation audit bias energy contains invalid values: "
-                    f"tensor={tensor_name}"
-                )
-            bias_key = f"b{layer_index:06d}"
-            serialized_tensors[bias_key] = bias_value.contiguous()
-        for method in requested:
-            candidate = records[method]
-            record, tensor_key = _serialize_candidate(
-                tensor_name,
-                method,
-                candidate,
-                layer,
-                next_key,
-            )
-            if candidate.available:
-                assert tensor_key is not None
-                serialized_tensors[tensor_key] = (
-                    candidate.error_by_eval_output.detach()
-                    .to(device="cpu", dtype=torch.float32)
-                    .contiguous()
-                )
-                for metadata_name, field_name in (
-                    ("sample_error_sse_key", "sample_error_sse"),
-                    ("sample_reference_energy_key", "sample_reference_energy"),
-                    ("sample_direction_error_key", "sample_direction_error"),
-                ):
-                    sample_key = record.get(metadata_name)
-                    if sample_key is not None:
-                        sample_tensor = getattr(candidate, field_name)
-                        assert isinstance(sample_tensor, torch.Tensor)
-                        serialized_tensors[sample_key] = (
-                            sample_tensor.detach()
-                            .to(device="cpu", dtype=torch.float32)
-                            .contiguous()
-                        )
-                availability[method]["available"] += 1
-                next_key += 1
-            else:
-                availability[method]["unavailable"] += 1
-            serialized_methods[method] = record
-
-        serialized_layers[tensor_name] = {
-            "input_features": layer.input_features,
-            "output_features": layer.output_features,
-            "sample_count": layer.sample_count,
-            "sampled_sample_count": (
-                None
-                if layer.sample_x is None
-                else int(layer.sample_x.shape[0])
-            ),
-            "invocation_count": layer.invocation_count,
-            "evaluation_count": layer.evaluation_count,
-            "bias_name": bias_name,
-            "bias_free_output_energy_key": bias_key,
-            "bias_unavailable_reason": bias_reason,
-            "methods": serialized_methods,
-        }
-
-    stats_path = (
-        Path(calibration_metadata_path).with_suffix(".safetensors")
-        if calibration_stats_path is None
-        else Path(calibration_stats_path)
+    writer = _StreamingActivationAuditWriter(
+        output_path,
+        source_model_path,
+        calibration,
+        calibration_metadata_path=calibration_metadata_path,
+        calibration_stats_path=calibration_stats_path,
+        requested_methods=requested,
+        bias_names=serialized_bias_names,
+        bias_unavailable_reasons=serialized_bias_reasons,
+        overwrite=overwrite,
     )
-    document = {
-        "format": ACTIVATION_AUDIT_FORMAT,
-        "format_version": ACTIVATION_AUDIT_VERSION,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_path": str(Path(source_model_path).resolve()),
-        "calibration_metadata_path": str(
-            Path(calibration_metadata_path).resolve()
-        ),
-        "calibration_stats_path": str(stats_path.resolve()),
-        "calibration_session_id": session_id,
-        "calibration_version": calibration.version,
-        "baseline_label": calibration.baseline_label,
-        "requested_methods": list(requested),
-        "layer_count": len(serialized_layers),
-        "method_availability_counts": availability,
-        "layers": serialized_layers,
-    }
-
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_paths: list[Path] = []
-    replaced_paths: list[Path] = []
-    previously_existing = {
-        metadata_path: metadata_path.exists(),
-        tensors_path: tensors_path.exists(),
-    }
     try:
-        tensors_temp = _temporary_path(tensors_path, ".safetensors")
-        metadata_temp = _temporary_path(metadata_path, ".json")
-        temporary_paths.extend((tensors_temp, metadata_temp))
-        save_file(serialized_tensors, str(tensors_temp))
-        metadata_temp.write_text(
-            json.dumps(document, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tensors_temp, tensors_path)
-        replaced_paths.append(tensors_path)
-        os.replace(metadata_temp, metadata_path)
-        replaced_paths.append(metadata_path)
+        for tensor_name in sorted(layer_names):
+            writer.add_layer(
+                tensor_name,
+                measurements[tensor_name],
+                bias_free_output_energy=serialized_bias_energy.get(tensor_name),
+            )
+        return writer.finish()
     except Exception:
-        for replaced_path in replaced_paths:
-            if not previously_existing[replaced_path]:
-                replaced_path.unlink(missing_ok=True)
+        writer.abort()
         raise
-    finally:
-        for temporary_path in temporary_paths:
-            temporary_path.unlink(missing_ok=True)
-    return metadata_path, tensors_path
 
 
 def _temporary_path(path: Path, suffix: str) -> Path:
@@ -1512,8 +1779,10 @@ def _validate_metadata(
         _require_string(document.get(key), key)
     if type(document.get("calibration_version")) is not int or document[
         "calibration_version"
-    ] != 2:
-        raise ValueError("Activation audit calibration_version must be 2.")
+    ] != 1:
+        raise ValueError(
+            "Activation audit calibration_version must use the current format."
+        )
 
     requested_raw = document.get("requested_methods")
     if not isinstance(requested_raw, list):
@@ -1913,7 +2182,8 @@ def _validate_calibration_match(
         layer = calibration.get(tensor_name)
         if not isinstance(layer, LayerCalibration):
             raise ValueError(
-                f"Activation audit calibration layer is not V2: {tensor_name}"
+                "Activation audit calibration layer is not valid: "
+                f"{tensor_name}"
             )
         input_features, output_features, evaluation_count = cache.layer_shapes[
             tensor_name
@@ -1981,6 +2251,7 @@ __all__ = [
     "ActivationAuditCache",
     "activation_audit_pair_paths",
     "inspect_activation_audit",
+    "render_activation_audit_timing",
     "run_activation_audit",
     "score_activation_audit",
     "write_activation_audit_cache",

@@ -105,7 +105,7 @@ class TestCli(unittest.TestCase):
                 "potatoforge.cli.audit_bf16_source",
                 return_value=audit_document,
             ) as audit_mock,
-            patch("potatoforge.cli._preflight_audit_outputs"),
+            patch("potatoforge.cli._preflight_audit_output"),
             patch("potatoforge.cli._write_json"),
             patch("potatoforge.cli.print_weight_audit_table"),
         ):

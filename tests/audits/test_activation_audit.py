@@ -13,6 +13,7 @@ from potatoforge.audits.activation_audit import (
     ActivationAuditCache,
     activation_audit_pair_paths,
     inspect_activation_audit,
+    render_activation_audit_timing,
     run_activation_audit,
     score_activation_audit,
     write_activation_audit_cache,
@@ -96,7 +97,7 @@ class TestActivationAudit(unittest.TestCase):
                 self._descriptor(2, 2),
                 torch.eye(2, dtype=torch.bfloat16),
                 layer,
-                ("convrot_w4a4",),
+                ("int8",),
             )
             metadata_path, _ = write_activation_audit_cache(
                 root / "sampled",
@@ -104,7 +105,7 @@ class TestActivationAudit(unittest.TestCase):
                 calibration,
                 {"blocks.0.attn.wq.weight": candidates},
                 calibration_metadata_path=calibration_metadata,
-                requested_methods=("convrot_w4a4",),
+                requested_methods=("int8",),
             )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             metadata["layers"]["blocks.0.attn.wq.weight"].pop(
@@ -116,7 +117,7 @@ class TestActivationAudit(unittest.TestCase):
                 calibration=calibration,
             )
 
-        loaded = cache.get("blocks.0.attn.wq.weight", "convrot_w4a4")
+        loaded = cache.get("blocks.0.attn.wq.weight", "int8")
         assert loaded is not None
         assert loaded.sample_error_sse is not None
         self.assertEqual(loaded.sample_error_sse.shape, (2,))
@@ -235,7 +236,7 @@ class TestActivationAudit(unittest.TestCase):
     def test_run_audit_streams_matching_source_weights(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            calibration, _, calibration_metadata, calibration_tensors = (
+            calibration, layer, calibration_metadata, calibration_tensors = (
                 self._write_calibration(root, 4)
             )
             weights = torch.tensor(
@@ -248,6 +249,7 @@ class TestActivationAudit(unittest.TestCase):
                 str(source_path),
             )
             progress: list[tuple[int, int, str]] = []
+            method_timings: dict[str, float] = {}
             metadata_path, _ = run_activation_audit(
                 source_path,
                 calibration,
@@ -258,14 +260,33 @@ class TestActivationAudit(unittest.TestCase):
                 on_tensor_started=lambda index, total, name: progress.append(
                     (index, total, name)
                 ),
+                method_timings=method_timings,
             )
+            self.assertEqual(layer._cache, {})
+            self.assertIsNone(layer._sample_x)
             cache = ActivationAuditCache.load(
                 metadata_path,
                 calibration=calibration,
             )
 
         self.assertEqual(progress, [(1, 1, "blocks.0.attn.wq.weight")])
+        self.assertIn("bf16", method_timings)
+        self.assertIn("int8", method_timings)
         self.assertIsNotNone(cache.get("blocks.0.attn.wq.weight", "int8"))
+
+    def test_render_timing_reports_method_and_clamped_other(self) -> None:
+        report = render_activation_audit_timing(
+            10.0,
+            {"int8": 4.0, "convrot_w4a4": 7.0},
+            device="cuda",
+            tensor_count=3,
+        )
+
+        self.assertIn("Device: cuda", report)
+        self.assertIn("Tensors: 3", report)
+        self.assertIn("convrot_w4a4", report)
+        self.assertIn("other", report)
+        self.assertIn("0.000 s", report)
 
     def test_run_audit_records_unambiguous_bias_free_energy(self) -> None:
         with TemporaryDirectory() as directory:
@@ -471,7 +492,7 @@ class TestActivationAudit(unittest.TestCase):
         ).repeat(2, 1)
         metadata = {
             "format": "potatoforge_activation_calibration",
-            "version": 2,
+            "version": 1,
             "session_id": session_id,
             "baseline_label": "bf16",
             "activation_basis": "logical_linear_input",

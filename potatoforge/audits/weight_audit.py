@@ -1,15 +1,10 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, NamedTuple, NotRequired, TypedDict, cast
+from typing import Literal, NamedTuple, TypedDict, cast
 
 import torch
 
-from ..calibration import ActivationCalibration, ActivationStats
-from ..calibration.activation_probe import (
-    ActivationProbeRecord,
-    write_activation_probe_cache,
-)
 from ..planning import (
     QUANTIZATION_SOURCE_DTYPES,
     TensorDescriptor,
@@ -22,12 +17,10 @@ from ..planning import (
 )
 from .all_comparison import (
     compare_all_reconstructions,
-    compare_w4a4_reconstruction,
 )
 from ..quantization.hadamard import CONVROT_GROUP_SIZE
 from ..headers.source_header import read_source_model_header
 from ..source_payloads import stream_bf16_source_tensors
-from .activation_error import ActivationErrorResult
 
 
 QuantizationMethod = Literal[
@@ -41,17 +34,11 @@ QuantizationMethod = Literal[
 ]
 
 AuditProgressReporter = Callable[[int, int, str], None]
-ActivationStatus = Literal[
-    "ok",
-    "missing_calibration",
-    "unsupported_reference",
-    "unsupported_candidate",
-]
-_ACTIVATION_METRIC_VARIANT = "diagonal_activation_energy_v1"
-_ACTIVATION_CANDIDATE = "convrot_w4a4"
-_ACTIVATION_PROBE_REFERENCE = "int8_convrot"
-_SUPPORTED_ACTIVATION_REFERENCES = frozenset(("bf16", "int8_convrot"))
-_SUPPORTED_AUDIT_METHODS = frozenset(("convrot_w4a4",))
+def _validate_audit_device(device: str) -> None:
+    if device not in ("cpu", "cuda"):
+        raise ValueError("Audit device must be cpu or cuda.")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA device requested but CUDA is unavailable.")
 
 
 class MethodAudit(NamedTuple):
@@ -81,26 +68,12 @@ class ErrorDeltas(NamedTuple):
     convrot_w4a4_vs_int8_convrot: float | None
 
 
-class ActivationAuditResult(NamedTuple):
-    status: ActivationStatus
-    metric_variant: str
-    calibration_baseline: str | None
-    activation_reference: str | None
-    candidate_format: str
-    error: float | None
-    activation_energy_sum: float | None
-    sample_count: int | None
-    invocation_count: int | None
-    input_features: int | None
-
-
 class WeightAuditResult(NamedTuple):
     tensor_name: str
     shape: tuple[int, ...]
     weight_l2_sq: float
     methods: MethodAudits
     error_deltas: ErrorDeltas
-    activation: ActivationAuditResult | None = None
 
 
 class MethodAuditRecord(TypedDict):
@@ -130,26 +103,12 @@ class ErrorDeltasRecord(TypedDict):
     convrot_w4a4_vs_int8_convrot: float | None
 
 
-class ActivationRecord(TypedDict):
-    status: ActivationStatus
-    metric_variant: str
-    calibration_baseline: str | None
-    activation_reference: str | None
-    candidate_format: str
-    error: float | None
-    activation_energy_sum: float | None
-    sample_count: int | None
-    invocation_count: int | None
-    input_features: int | None
-
-
 class WeightAuditRecord(TypedDict):
     tensor_name: str
     shape: list[int]
     weight_l2_sq: float
     methods: MethodAuditsRecord
     error_deltas: ErrorDeltasRecord
-    activation: NotRequired[ActivationRecord]
 
 
 class WeightAuditSummary(TypedDict):
@@ -204,143 +163,28 @@ def _method_audit(
     )
 
 
-def _build_activation_audit(
-    calibration: ActivationCalibration | None,
-    stats: ActivationStats | None,
-    metric: ActivationErrorResult | None,
-    activation_reference: str | None,
-) -> ActivationAuditResult | None:
-    if calibration is None:
-        return None
-    baseline = calibration.baseline_label
-    common = {
-        "calibration_baseline": baseline,
-        "activation_reference": activation_reference,
-        "candidate_format": _ACTIVATION_CANDIDATE,
-    }
-    if stats is None:
-        return ActivationAuditResult(
-            status="missing_calibration",
-            metric_variant=_ACTIVATION_METRIC_VARIANT,
-            **common,
-            error=None,
-            activation_energy_sum=None,
-            sample_count=None,
-            invocation_count=None,
-            input_features=None,
-        )
-    if activation_reference is None:
-        return ActivationAuditResult(
-            status="unsupported_reference",
-            metric_variant=_ACTIVATION_METRIC_VARIANT,
-            **common,
-            error=None,
-            activation_energy_sum=None,
-            sample_count=stats.sample_count,
-            invocation_count=stats.invocation_count,
-            input_features=stats.input_features,
-        )
-    if metric is None:
-        return ActivationAuditResult(
-            status="unsupported_candidate",
-            metric_variant=_ACTIVATION_METRIC_VARIANT,
-            **common,
-            error=None,
-            activation_energy_sum=None,
-            sample_count=stats.sample_count,
-            invocation_count=stats.invocation_count,
-            input_features=stats.input_features,
-        )
-    return ActivationAuditResult(
-        status="ok",
-        metric_variant=_ACTIVATION_METRIC_VARIANT,
-        **common,
-        error=metric.activation_error,
-        activation_energy_sum=metric.activation_energy_sum,
-        sample_count=stats.sample_count,
-        invocation_count=stats.invocation_count,
-        input_features=metric.input_features,
-    )
-
-
 def _audit_weight(
     tensor_name: str,
     descriptor: TensorDescriptor,
     weights: torch.Tensor,
-    activation_calibration: ActivationCalibration | None = None,
-    audit_method: str | None = None,
-    activation_probe_records: dict[str, ActivationProbeRecord] | None = None,
+    *,
+    device: str = "cpu",
+    include_plain_methods: bool = True,
 ) -> WeightAuditResult:
     original_float = weights.float()
     source_l2 = torch.linalg.vector_norm(original_float)
-    activation_stats = (
-        None
-        if activation_calibration is None
-        else activation_calibration.get(tensor_name)
-    )
-    activation_reference = (
-        None
-        if activation_calibration is None
-        else (
-            activation_calibration.baseline_label
-            if activation_calibration.baseline_label
-            in _SUPPORTED_ACTIVATION_REFERENCES
-            else None
-        )
-    )
-    compare = (
-        compare_w4a4_reconstruction
-        if audit_method == "convrot_w4a4"
-        else compare_all_reconstructions
-    )
-    comparison = compare(
+    comparison = compare_all_reconstructions(
         weights,
         original_float=original_float,
         source_l2=source_l2,
-        activation_sum_x2=(
-            None
-            if activation_stats is None or activation_reference is None
-            else activation_stats.sum_x2
-        ),
-        activation_reference_label=activation_reference,
-        activation_probe=activation_probe_records is not None,
+        device=device,
+        include_plain_methods=include_plain_methods,
     )
-    if activation_probe_records is not None:
-        q_per_input = comparison.activation_probe_q_per_input
-        reference_power_per_input = (
-            comparison.activation_probe_reference_power_per_input
-        )
-        activation_probe_records[tensor_name] = ActivationProbeRecord(
-            tensor_name=tensor_name,
-            input_features=weights.shape[1],
-            status=(
-                "ok"
-                if q_per_input is not None
-                and reference_power_per_input is not None
-                else "unsupported_candidate"
-            ),
-            q_per_input=(
-                None
-                if q_per_input is None
-                else q_per_input.detach().to(
-                    device="cpu",
-                    dtype=torch.float32,
-                )
-            ),
-            reference_power_per_input=(
-                None
-                if reference_power_per_input is None
-                else reference_power_per_input.detach().to(
-                    device="cpu",
-                    dtype=torch.float32,
-                )
-            ),
-        )
     bf16_bytes = source_bytes(descriptor)
 
     int8_plan = (
         None
-        if audit_method == "convrot_w4a4"
+        if not include_plain_methods
         else plan_int8_tensorwise(tensor_name, descriptor)
     )
     int6_plan = None
@@ -348,13 +192,14 @@ def _audit_weight(
     int6_convrot_plan = None
     w4a4_plan = None
 
-    if audit_method != "convrot_w4a4" and weights.shape[1] % 4 == 0:
+    if (
+        include_plain_methods and weights.shape[1] % 4 == 0
+    ):
         int6_plan = plan_int6_rowwise(tensor_name, descriptor)
 
     if weights.shape[1] % CONVROT_GROUP_SIZE == 0:
-        if audit_method != "convrot_w4a4":
-            int8_convrot_plan = plan_int8_convrot(tensor_name, descriptor)
-            int6_convrot_plan = plan_int6_convrot(tensor_name, descriptor)
+        int8_convrot_plan = plan_int8_convrot(tensor_name, descriptor)
+        int6_convrot_plan = plan_int6_convrot(tensor_name, descriptor)
         w4a4_plan = plan_convrot_w4a4(tensor_name, descriptor)
 
     methods = MethodAudits(
@@ -398,13 +243,19 @@ def _audit_weight(
         int8_vs_bf16=comparison.int8_relative_l2_error,
         int6_vs_int8=(
             None
-            if comparison.int6_relative_l2_error is None
+            if (
+                comparison.int6_relative_l2_error is None
+                or comparison.int8_relative_l2_error is None
+            )
             else comparison.int6_relative_l2_error
             - comparison.int8_relative_l2_error
         ),
         int8_convrot_vs_int8=(
             None
-            if comparison.int8_convrot_relative_l2_error is None
+            if (
+                comparison.int8_convrot_relative_l2_error is None
+                or comparison.int8_relative_l2_error is None
+            )
             else comparison.int8_convrot_relative_l2_error
             - comparison.int8_relative_l2_error
         ),
@@ -445,19 +296,12 @@ def _audit_weight(
             - comparison.int8_convrot_relative_l2_error
         ),
     )
-    activation = _build_activation_audit(
-        activation_calibration,
-        activation_stats,
-        comparison.activation_error,
-        activation_reference,
-    )
     return WeightAuditResult(
         tensor_name=tensor_name,
         shape=tuple(weights.shape),
         weight_l2_sq=float((source_l2 * source_l2).item()),
         methods=methods,
         error_deltas=error_deltas,
-        activation=activation,
     )
 
 
@@ -466,15 +310,10 @@ def audit_bf16_weight_entries(
     descriptors: Sequence[tuple[str, TensorDescriptor]],
     on_entry_started: AuditProgressReporter | None = None,
     *,
-    activation_calibration: ActivationCalibration | None = None,
-    audit_method: str | None = None,
-    activation_probe_records: dict[str, ActivationProbeRecord] | None = None,
+    device: str = "cpu",
+    include_plain_methods: bool = True,
 ) -> tuple[WeightAuditResult, ...]:
-    if audit_method is not None and audit_method not in _SUPPORTED_AUDIT_METHODS:
-        raise ValueError(
-            "Unsupported audit method: "
-            f"{audit_method!r}; only convrot_w4a4 is supported."
-        )
+    _validate_audit_device(device)
     descriptor_by_name = dict(descriptors)
     results: list[WeightAuditResult] = []
 
@@ -488,9 +327,8 @@ def audit_bf16_weight_entries(
                 tensor_name,
                 descriptor_by_name[tensor_name],
                 weights,
-                activation_calibration,
-                audit_method,
-                activation_probe_records,
+                device=device,
+                include_plain_methods=include_plain_methods,
             )
         )
 
@@ -499,12 +337,6 @@ def audit_bf16_weight_entries(
 
 def _method_to_record(method: MethodAudit) -> MethodAuditRecord:
     return cast(MethodAuditRecord, method._asdict())
-
-
-def _activation_to_record(
-    activation: ActivationAuditResult,
-) -> ActivationRecord:
-    return cast(ActivationRecord, activation._asdict())
 
 
 def audit_result_to_record(result: WeightAuditResult) -> WeightAuditRecord:
@@ -518,8 +350,6 @@ def audit_result_to_record(result: WeightAuditResult) -> WeightAuditRecord:
         },
         "error_deltas": cast(ErrorDeltasRecord, result.error_deltas._asdict()),
     }
-    if result.activation is not None:
-        record["activation"] = _activation_to_record(result.activation)
     return record
 
 
@@ -541,24 +371,10 @@ def audit_bf16_source(
     *,
     tensor_name: str | None = None,
     tensor_names: Sequence[str] | None = None,
-    activation_calibration: ActivationCalibration | None = None,
-    audit_method: str | None = None,
-    activation_probe_output: str | Path | None = None,
-    activation_probe_overwrite: bool = False,
+    device: str = "cpu",
+    include_plain_methods: bool = True,
 ) -> WeightAuditDocument:
-    if audit_method is not None and audit_method not in _SUPPORTED_AUDIT_METHODS:
-        raise ValueError(
-            "Unsupported audit method: "
-            f"{audit_method!r}; only convrot_w4a4 is supported."
-        )
-    if activation_probe_output is not None and (
-        activation_calibration is None
-        or activation_calibration.baseline_label != _ACTIVATION_PROBE_REFERENCE
-    ):
-        raise ValueError(
-            "activation_probe_output requires activation calibration with "
-            f"baseline_label={_ACTIVATION_PROBE_REFERENCE!r}."
-        )
+    _validate_audit_device(device)
     source_header = read_source_model_header(source_path)
     descriptors = select_auditable_bf16_weights(source_header.tensors)
     if tensor_name is not None and tensor_names is not None:
@@ -584,25 +400,13 @@ def audit_bf16_source(
                 )
             selected_descriptors.append((requested_name, descriptor))
         descriptors = tuple(selected_descriptors)
-    activation_probe_records = (
-        {} if activation_probe_output is not None else None
-    )
     results = audit_bf16_weight_entries(
         source_path,
         descriptors,
         on_entry_started,
-        activation_calibration=activation_calibration,
-        audit_method=audit_method,
-        activation_probe_records=activation_probe_records,
+        device=device,
+        include_plain_methods=include_plain_methods,
     )
-
-    if activation_probe_output is not None:
-        write_activation_probe_cache(
-            activation_probe_output,
-            source_path,
-            activation_probe_records or {},
-            overwrite=activation_probe_overwrite,
-        )
 
     source_dtypes = {
         descriptor["dtype"]

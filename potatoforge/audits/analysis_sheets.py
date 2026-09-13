@@ -112,22 +112,7 @@ def write_errors_sheet(
     sheet: Worksheet,
     audit: WeightAuditDocument,
 ) -> None:
-    activation_enabled = any(
-        "activation" in result for result in audit["results"]
-    )
     headers = ["Tensor", *(label for _, label in ANALYSIS_METHODS)]
-    if activation_enabled:
-        headers.extend(
-            (
-                "Activation Error — ConvRot W4A4",
-                "Activation Samples",
-                "Activation Invocations",
-                "Activation Status",
-                "Activation Baseline",
-                "Activation Reference",
-                "Activation Candidate",
-            )
-        )
     sheet.append(headers)
     for result in audit["results"]:
         row: list[object] = [
@@ -137,27 +122,6 @@ def write_errors_sheet(
                 for method, _ in ANALYSIS_METHODS
             ),
         ]
-        if activation_enabled:
-            activation = result.get("activation")
-            row.extend(
-                (
-                    None if activation is None else activation["error"],
-                    None if activation is None else activation["sample_count"],
-                    None
-                    if activation is None
-                    else activation["invocation_count"],
-                    None if activation is None else activation["status"],
-                    None
-                    if activation is None
-                    else activation.get("calibration_baseline"),
-                    None
-                    if activation is None
-                    else activation.get("activation_reference"),
-                    None
-                    if activation is None
-                    else activation.get("candidate_format"),
-                )
-            )
         sheet.append(row)
 
     last_row = 1 + len(audit["results"])
@@ -175,8 +139,4 @@ def write_errors_sheet(
             sheet.cell(row, column).number_format = "0.000000"
             if least_error is not None and value == least_error:
                 sheet.cell(row, column).font = Font(bold=True)
-        if activation_enabled:
-            sheet.cell(row, method_last_column + 1).number_format = "0.000000"
-            sheet.cell(row, method_last_column + 2).number_format = "0"
-            sheet.cell(row, method_last_column + 3).number_format = "0"
     _set_column_widths(sheet, last_column)

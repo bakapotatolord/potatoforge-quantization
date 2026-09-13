@@ -7,32 +7,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 
 from ..headers.source_header import SourceModelHeader, read_source_model_header
 
 
 _FORMAT = "potatoforge_activation_calibration"
-_V1_VERSION = 1
-_V2_VERSION = 2
+_ACTIVATION_VERSION = 1
 _ACTIVATION_BASIS = "logical_linear_input"
 _ACTIVATION_AXIS = "last_dimension"
 _ROOT_INPUT_SUM_X2_KEY = "__pf__.root_input_sum_x2"
 _ROOT_INPUT_VALID_KEY = "__pf__.root_input_valid"
 _ROOT_OUTPUT_SUM_Y2_KEY = "__pf__.root_output_sum_y2"
 _ROOT_OUTPUT_VALID_KEY = "__pf__.root_output_valid"
-
-
-class ActivationStats(NamedTuple):
-    tensor_name: str
-    input_features: int
-    sample_count: int
-    invocation_count: int
-    sum_x2: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -61,7 +52,7 @@ class _CalibrationTensorStore:
 
 
 class LayerCalibration:
-    """Validated V2 statistics for one logical Linear weight."""
+    """Validated activation statistics for one logical Linear weight."""
 
     def __init__(
         self,
@@ -97,11 +88,6 @@ class LayerCalibration:
     @property
     def aggregate_sum_x2(self) -> torch.Tensor:
         return self._tensor("aggregate_sum_x2")
-
-    @property
-    def sum_x2(self) -> torch.Tensor:
-        """V1-compatible alias for the aggregate input energy."""
-        return self.aggregate_sum_x2
 
     @property
     def eval_sum_x(self) -> torch.Tensor:
@@ -171,6 +157,12 @@ class LayerCalibration:
         assert self._sample_evaluation_indices is not None
         return self._sample_evaluation_indices
 
+    def clear_cached_tensors(self) -> None:
+        """Release materialized calibration tensors for this layer."""
+        self._cache.clear()
+        self._sample_x = None
+        self._sample_evaluation_indices = None
+
 
 class ActivationCalibration:
     def __init__(
@@ -181,9 +173,9 @@ class ActivationCalibration:
         session_name: str | None,
         activation_basis: str,
         activation_axis: str,
-        stats: Mapping[str, ActivationStats | LayerCalibration],
+        stats: Mapping[str, LayerCalibration],
         diffusion_model_class: str | None = None,
-        version: int = _V1_VERSION,
+        version: int = _ACTIVATION_VERSION,
         evaluations: tuple[EvaluationMetadata, ...] = (),
     ) -> None:
         self.baseline_label = baseline_label
@@ -218,35 +210,14 @@ class ActivationCalibration:
 
         if not isinstance(document, dict):
             raise ValueError("Activation calibration metadata must be an object.")
-        if type(document.get("version")) is int and document["version"] == _V2_VERSION:
-            return _load_v2_calibration(tensors_file, document)
-        _validate_metadata_header(document)
-
-        tensors = load_file(str(tensors_file), device="cpu")
-        layers = document["layers"]
-        stats = {
-            tensor_name: _load_stats(
-                tensor_name,
-                layer_document,
-                tensors,
+        version = document.get("version")
+        if type(version) is not int or version != _ACTIVATION_VERSION:
+            raise ValueError(
+                f"Unsupported activation calibration version: {version!r}"
             )
-            for tensor_name, layer_document in layers.items()
-        }
+        return _load_activation_calibration(tensors_file, document)
 
-        return cls(
-            baseline_label=_optional_string(document, "baseline_label"),
-            session_id=_optional_string(document, "session_id"),
-            session_name=_optional_string(document, "session_name"),
-            diffusion_model_class=_optional_string(
-                document,
-                "diffusion_model_class",
-            ),
-            activation_basis=document["activation_basis"],
-            activation_axis=document["activation_axis"],
-            stats=stats,
-        )
-
-    def get(self, tensor_name: str) -> ActivationStats | LayerCalibration | None:
+    def get(self, tensor_name: str) -> LayerCalibration | None:
         return self._stats.get(tensor_name)
 
     def has(self, tensor_name: str) -> bool:
@@ -256,7 +227,7 @@ class ActivationCalibration:
         return tuple(self._stats)
 
     @property
-    def layers(self) -> Mapping[str, ActivationStats | LayerCalibration]:
+    def layers(self) -> Mapping[str, LayerCalibration]:
         return self._stats
 
     def validate_against_source(
@@ -273,17 +244,17 @@ def load_activation_calibration(
     metadata_path: str | Path,
     stats_path: str | Path | None = None,
 ) -> ActivationCalibration:
-    """Load a V1 or V2 calibration pair with strict schema validation."""
+    """Load an activation calibration pair with strict schema validation."""
     return ActivationCalibration.load(metadata_path, stats_path)
 
 
-def merge_v2_activation_calibrations(
+def merge_activation_calibrations(
     calibrations: Sequence[ActivationCalibration | str | Path],
     output_path: str | Path,
     *,
     overwrite: bool = False,
 ) -> tuple[Path, Path]:
-    """Merge V2 calibration evaluations without reading a source checkpoint."""
+    """Merge activation calibration evaluations without reading a source checkpoint."""
     if not calibrations:
         raise ValueError("At least one activation calibration is required.")
     loaded = tuple(
@@ -292,8 +263,8 @@ def merge_v2_activation_calibrations(
         else ActivationCalibration.load(calibration)
         for calibration in calibrations
     )
-    if any(calibration.version != _V2_VERSION for calibration in loaded):
-        raise ValueError("V2 calibration merge requires only version 2 pairs.")
+    if any(calibration.version != _ACTIVATION_VERSION for calibration in loaded):
+        raise ValueError("Activation calibration merge requires current pairs.")
 
     first = loaded[0]
     for index, calibration in enumerate(loaded[1:], start=2):
@@ -323,7 +294,10 @@ def merge_v2_activation_calibrations(
     for tensor_name in sorted(first.tensor_names()):
         source_layers = [calibration.get(tensor_name) for calibration in loaded]
         if any(not isinstance(layer, LayerCalibration) for layer in source_layers):
-            raise ValueError(f"Calibration layer is not V2: {tensor_name}")
+            raise ValueError(
+                "Calibration layer is not a valid activation layer: "
+                f"{tensor_name}"
+            )
         typed_layers = tuple(
             layer for layer in source_layers if isinstance(layer, LayerCalibration)
         )
@@ -492,7 +466,7 @@ def merge_v2_activation_calibrations(
     ).hexdigest()[:16]
     metadata: dict[str, object] = {
         "format": _FORMAT,
-        "version": _V2_VERSION,
+        "version": _ACTIVATION_VERSION,
         "session_id": f"merged-{session_digest}",
         "session_name": "merged",
         "baseline_label": first.baseline_label,
@@ -560,15 +534,15 @@ def validate_activation_calibration_against_source(
     calibration: ActivationCalibration | str | Path,
     source_path: str | Path,
 ) -> SourceModelHeader:
-    """Validate every V2 calibration layer against source Linear shapes."""
+    """Validate every activation calibration layer against source Linear shapes."""
     loaded = (
         calibration
         if isinstance(calibration, ActivationCalibration)
         else load_activation_calibration(calibration)
     )
-    if loaded.version != _V2_VERSION:
+    if loaded.version != _ACTIVATION_VERSION:
         raise ValueError(
-            "Source shape validation requires a version 2 activation calibration."
+            "Source shape validation requires the current activation calibration."
         )
 
     source_header = read_source_model_header(source_path)
@@ -597,7 +571,7 @@ def validate_activation_calibration_against_source(
 
 
 @dataclass(frozen=True)
-class _V2LayerDefinition:
+class _LayerDefinition:
     tensor_name: str
     input_features: int
     output_features: int
@@ -606,20 +580,20 @@ class _V2LayerDefinition:
     tensor_keys: dict[str, str]
 
 
-def _load_v2_calibration(
+def _load_activation_calibration(
     tensors_file: Path,
     document: dict[str, Any],
 ) -> ActivationCalibration:
-    _validate_v2_metadata_header(document)
+    _validate_activation_metadata_header(document)
     evaluation_count = document["evaluation_count"]
     evaluations = _parse_evaluations(document["evaluations"])
     tensor_store = _CalibrationTensorStore(tensors_file)
 
-    layer_definitions: list[_V2LayerDefinition] = []
+    layer_definitions: list[_LayerDefinition] = []
     expected_keys: set[str] = set()
     claimed_keys: dict[str, str] = {}
     for tensor_name, layer_document in document["layers"].items():
-        definition = _parse_v2_layer_definition(
+        definition = _parse_activation_layer_definition(
             tensor_name,
             layer_document,
             evaluation_count,
@@ -675,7 +649,7 @@ def _load_v2_calibration(
 
     layers: dict[str, LayerCalibration] = {}
     for definition in layer_definitions:
-        _validate_v2_layer_tensors(
+        _validate_activation_layer_tensors(
             definition,
             tensor_store,
             evaluation_count,
@@ -702,18 +676,21 @@ def _load_v2_calibration(
         activation_basis=document["activation_basis"],
         activation_axis=document["activation_axis"],
         stats=layers,
-        version=_V2_VERSION,
+        version=_ACTIVATION_VERSION,
         evaluations=evaluations,
     )
 
 
-def _validate_v2_metadata_header(document: dict[str, Any]) -> None:
+def _validate_activation_metadata_header(document: dict[str, Any]) -> None:
     if document.get("format") != _FORMAT:
         raise ValueError(
             "Unsupported activation calibration format: "
             f"{document.get('format')!r}"
         )
-    if type(document.get("version")) is not int or document["version"] != _V2_VERSION:
+    if (
+        type(document.get("version")) is not int
+        or document["version"] != _ACTIVATION_VERSION
+    ):
         raise ValueError(
             f"Unsupported activation calibration version: {document.get('version')!r}"
         )
@@ -858,11 +835,11 @@ def _parse_time_value(value: Any, name: str) -> float | tuple[float, ...] | None
     )
 
 
-def _parse_v2_layer_definition(
+def _parse_activation_layer_definition(
     tensor_name: Any,
     layer_document: Any,
     evaluation_count: int,
-) -> _V2LayerDefinition:
+) -> _LayerDefinition:
     if not isinstance(tensor_name, str) or not tensor_name:
         raise ValueError(
             "Activation calibration tensor names must be non-empty strings."
@@ -923,7 +900,7 @@ def _parse_v2_layer_definition(
         tensor_keys["sample_x"] = sample_x_key
         tensor_keys["sample_x_valid"] = sample_x_valid_key
 
-    return _V2LayerDefinition(
+    return _LayerDefinition(
         tensor_name=tensor_name,
         input_features=input_features,
         output_features=output_features,
@@ -990,8 +967,8 @@ def _load_root_statistics(
     return inputs, outputs
 
 
-def _validate_v2_layer_tensors(
-    definition: _V2LayerDefinition,
+def _validate_activation_layer_tensors(
+    definition: _LayerDefinition,
     tensor_store: _CalibrationTensorStore,
     evaluation_count: int,
 ) -> None:
@@ -1150,111 +1127,6 @@ def _optional_float(value: Any, name: str) -> float | None:
     if value is None:
         return None
     return _require_finite_real(value, name)
-
-
-def _validate_metadata_header(document: dict[str, Any]) -> None:
-    if document.get("format") != _FORMAT:
-        raise ValueError(
-            "Unsupported activation calibration format: "
-            f"{document.get('format')!r}"
-        )
-    version = document.get("version")
-    if isinstance(version, bool) or not isinstance(version, int) or version != _V1_VERSION:
-        raise ValueError(
-            f"Unsupported activation calibration version: {version!r}"
-        )
-    if document.get("activation_basis") != _ACTIVATION_BASIS:
-        raise ValueError(
-            "Unsupported activation calibration basis: "
-            f"{document.get('activation_basis')!r}"
-        )
-    if document.get("activation_axis") != _ACTIVATION_AXIS:
-        raise ValueError(
-            "Unsupported activation calibration axis: "
-            f"{document.get('activation_axis')!r}"
-        )
-
-    layers = document.get("layers")
-    if not isinstance(layers, dict):
-        raise ValueError("Activation calibration layers must be an object.")
-    layer_count = document.get("layer_count")
-    if layer_count is not None:
-        _require_integer(layer_count, "layer_count", minimum=0)
-        if layer_count != len(layers):
-            raise ValueError(
-                "Activation calibration layer_count does not match layers."
-            )
-    for key in ("baseline_label", "session_id", "session_name"):
-        _optional_string(document, key)
-
-
-def _load_stats(
-    tensor_name: Any,
-    layer_document: Any,
-    tensors: Mapping[str, torch.Tensor],
-) -> ActivationStats:
-    if not isinstance(tensor_name, str) or not tensor_name:
-        raise ValueError(
-            "Activation calibration tensor names must be non-empty strings."
-        )
-    if not isinstance(layer_document, dict):
-        raise ValueError(f"Calibration entry for {tensor_name!r} must be an object.")
-
-    input_features = _require_integer(
-        layer_document.get("input_features"),
-        f"{tensor_name}.input_features",
-        minimum=1,
-    )
-    sample_count = _require_integer(
-        layer_document.get("sample_count"),
-        f"{tensor_name}.sample_count",
-        minimum=0,
-    )
-    invocation_count = _require_integer(
-        layer_document.get("invocation_count"),
-        f"{tensor_name}.invocation_count",
-        minimum=0,
-    )
-    stats_key = layer_document.get("stats_key")
-    if not isinstance(stats_key, str) or not stats_key:
-        raise ValueError(f"{tensor_name}.stats_key must be a non-empty string.")
-    if stats_key not in tensors:
-        raise ValueError(
-            f"Calibration statistics tensor is missing: {stats_key}"
-        )
-
-    sum_x2 = tensors[stats_key]
-    if sum_x2.ndim != 1:
-        raise ValueError(
-            f"Calibration statistics for {tensor_name} must be rank 1."
-        )
-    if sum_x2.shape[0] != input_features:
-        raise ValueError(
-            f"Calibration statistics length for {tensor_name} does not match "
-            "input_features."
-        )
-    if sum_x2.dtype == torch.bool or sum_x2.is_complex():
-        raise ValueError(
-            f"Calibration statistics for {tensor_name} must be real numeric data."
-        )
-
-    sum_x2 = sum_x2.detach().to(device="cpu", dtype=torch.float32)
-    if not bool(torch.isfinite(sum_x2).all().item()):
-        raise ValueError(
-            f"Calibration statistics for {tensor_name} must be finite."
-        )
-    if bool((sum_x2 < 0).any().item()):
-        raise ValueError(
-            f"Calibration statistics for {tensor_name} must be non-negative."
-        )
-
-    return ActivationStats(
-        tensor_name=tensor_name,
-        input_features=input_features,
-        sample_count=sample_count,
-        invocation_count=invocation_count,
-        sum_x2=sum_x2,
-    )
 
 
 def _optional_string(document: Mapping[str, Any], key: str) -> str | None:

@@ -1,4 +1,5 @@
 import json
+import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -58,7 +59,7 @@ class TestActivationMeasurements(unittest.TestCase):
             ).estimated_bytes,
         )
         torch.testing.assert_close(result.error_by_eval_output, expected)
-        self.assertEqual(calibration.version, 2)
+        self.assertEqual(calibration.version, 1)
 
     def test_keep_is_zero_and_ineligible_methods_are_explicit(self) -> None:
         with TemporaryDirectory() as directory:
@@ -91,7 +92,7 @@ class TestActivationMeasurements(unittest.TestCase):
         self.assertIsNone(convrot.error_by_eval_output)
         self.assertIn("divisible", convrot.unavailable_reason or "")
 
-    def test_measures_all_current_methods_when_width_is_eligible(self) -> None:
+    def test_measures_default_methods_when_width_is_eligible(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             _, layer = self._write_calibration(root, 256)
@@ -112,7 +113,16 @@ class TestActivationMeasurements(unittest.TestCase):
 
         self.assertEqual(
             tuple(result.method for result in results),
+            (
+                "convrot_w4a4",
+                "convrot_w4a4_mse",
+                "int6_convrot",
+                "int8_convrot",
+            ),
+        )
+        self.assertEqual(
             MEASUREMENT_METHODS,
+            tuple(result.method for result in results),
         )
         self.assertTrue(all(result.available for result in results))
         self.assertTrue(
@@ -122,6 +132,164 @@ class TestActivationMeasurements(unittest.TestCase):
                 for result in results
             )
         )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cuda_measurement_returns_compact_results_on_cpu(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, layer = self._write_calibration(root, 256)
+            weights = torch.linspace(
+                -1.0,
+                1.0,
+                steps=512,
+                dtype=torch.bfloat16,
+            ).reshape(2, 256)
+
+            result = measure_activation_candidate(
+                "blocks.0.attn.wq.weight",
+                self._descriptor(2, 256),
+                weights,
+                layer,
+                "int8_convrot",
+                device="cuda",
+            )
+
+        self.assertTrue(result.available)
+        assert result.error_by_eval_output is not None
+        self.assertEqual(result.error_by_eval_output.device.type, "cpu")
+        self.assertEqual(tuple(result.error_by_eval_output.shape), (2, 2))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cuda_method_timing_records_when_enabled(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, layer = self._write_calibration(root, 256)
+            weights = torch.linspace(
+                -1.0,
+                1.0,
+                steps=512,
+                dtype=torch.bfloat16,
+            ).reshape(2, 256)
+            timings: dict[str, float] = {}
+
+            results = measure_activation_candidates(
+                "blocks.0.attn.wq.weight",
+                self._descriptor(2, 256),
+                weights,
+                layer,
+                ("int8_convrot",),
+                device="cuda",
+                method_timings=timings,
+            )
+
+        self.assertTrue(results[0].available)
+        self.assertIn("int8_convrot", timings)
+        self.assertGreaterEqual(timings["int8_convrot"], 0.0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cpu_and_cuda_measurements_match_for_default_methods(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, layer = self._write_calibration(
+                root,
+                256,
+                include_samples=True,
+            )
+            descriptor = self._descriptor(2, 256)
+            torch.manual_seed(123)
+            weights = torch.randn((2, 256), dtype=torch.float32).to(
+                torch.bfloat16
+            )
+
+            cpu_results = measure_activation_candidates(
+                "blocks.0.attn.wq.weight",
+                descriptor,
+                weights,
+                layer,
+                MEASUREMENT_METHODS,
+                device="cpu",
+            )
+            cuda_results = measure_activation_candidates(
+                "blocks.0.attn.wq.weight",
+                descriptor,
+                weights,
+                layer,
+                MEASUREMENT_METHODS,
+                device="cuda",
+            )
+
+        self.assertEqual(
+            tuple(result.method for result in cpu_results),
+            tuple(result.method for result in cuda_results),
+        )
+        for cpu_result, cuda_result in zip(
+            cpu_results,
+            cuda_results,
+            strict=True,
+        ):
+            with self.subTest(method=cpu_result.method):
+                self.assertEqual(cpu_result.action, cuda_result.action)
+                self.assertEqual(cpu_result.available, cuda_result.available)
+                self.assertEqual(
+                    cpu_result.storage_bytes,
+                    cuda_result.storage_bytes,
+                )
+                self.assertEqual(
+                    cpu_result.unavailable_reason,
+                    cuda_result.unavailable_reason,
+                )
+                if not cpu_result.available:
+                    continue
+
+                assert cpu_result.error_by_eval_output is not None
+                assert cuda_result.error_by_eval_output is not None
+                torch.testing.assert_close(
+                    cpu_result.error_by_eval_output,
+                    cuda_result.error_by_eval_output,
+                    rtol=1e-3,
+                    atol=1e-4,
+                )
+                for field_name in (
+                    "sample_error_sse",
+                    "sample_reference_energy",
+                    "sample_direction_error",
+                ):
+                    cpu_value = getattr(cpu_result, field_name)
+                    cuda_value = getattr(cuda_result, field_name)
+                    self.assertIsNotNone(cpu_value)
+                    self.assertIsNotNone(cuda_value)
+                    assert cpu_value is not None
+                    assert cuda_value is not None
+                    torch.testing.assert_close(
+                        cpu_value,
+                        cuda_value,
+                        rtol=1e-3,
+                        atol=1e-4,
+                    )
+                self.assertEqual(
+                    cpu_result.sample_unavailable_reason,
+                    cuda_result.sample_unavailable_reason,
+                )
+                for field_name in (
+                    "sample_exact_sse",
+                    "sample_diag_sse",
+                    "sample_cross_term_ratio",
+                ):
+                    cpu_value = getattr(cpu_result, field_name)
+                    cuda_value = getattr(cuda_result, field_name)
+                    if cpu_value is None or cuda_value is None:
+                        self.assertIsNone(cpu_value)
+                        self.assertIsNone(cuda_value)
+                    else:
+                        self.assertTrue(
+                            math.isclose(
+                                cpu_value,
+                                cuda_value,
+                                rel_tol=1e-3,
+                                abs_tol=1e-4,
+                            ),
+                            f"{field_name}: CPU={cpu_value} CUDA={cuda_value}",
+                        )
 
     def test_measures_sampled_exact_and_diagonal_diagnostics(self) -> None:
         with TemporaryDirectory() as directory:
@@ -163,7 +331,7 @@ class TestActivationMeasurements(unittest.TestCase):
         ).repeat(2, 1)
         metadata = {
             "format": "potatoforge_activation_calibration",
-            "version": 2,
+            "version": 1,
             "session_id": "measurement-session",
             "baseline_label": "bf16",
             "activation_basis": "logical_linear_input",
@@ -205,6 +373,12 @@ class TestActivationMeasurements(unittest.TestCase):
         }
         metadata_path = root / "calibration.json"
         tensors_path = root / "calibration.safetensors"
+        sample_x = torch.zeros(
+            (2, 1, input_features),
+            dtype=torch.float32,
+        )
+        sample_x[0, 0, 0] = 1.0
+        sample_x[1, 0, 1] = 1.0
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         save_file(
             {
@@ -228,10 +402,7 @@ class TestActivationMeasurements(unittest.TestCase):
                 ),
                 **(
                     {
-                        f"{tensor_name}.sample_x": torch.tensor(
-                            [[[1.0, 0.0]], [[0.0, 1.0]]],
-                            dtype=torch.float32,
-                        ),
+                        f"{tensor_name}.sample_x": sample_x,
                         f"{tensor_name}.sample_x_valid": torch.ones(
                             2,
                             dtype=torch.int64,

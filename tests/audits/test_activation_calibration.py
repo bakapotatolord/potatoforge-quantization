@@ -15,97 +15,30 @@ from potatoforge.calibration import (
 
 
 class TestActivationCalibration(unittest.TestCase):
-    def test_loads_pair_and_supports_exact_lookup(self) -> None:
+    def test_rejects_unsupported_calibration_version(self) -> None:
+        with TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "calibration.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "format": "potatoforge_activation_calibration",
+                        "version": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "version"):
+                ActivationCalibration.load(metadata_path)
+
+    def test_loads_pair_and_flattens_padded_samples(self) -> None:
         with TemporaryDirectory() as directory:
             metadata_path, _ = self._write_pair(Path(directory))
 
-            calibration = ActivationCalibration.load(metadata_path)
-
-        stats = calibration.get("blocks.0.attn.wq.weight")
-        self.assertIsNotNone(stats)
-        assert stats is not None
-        self.assertEqual(stats.tensor_name, "blocks.0.attn.wq.weight")
-        self.assertEqual(stats.input_features, 3)
-        self.assertEqual(stats.sample_count, 10)
-        self.assertEqual(stats.invocation_count, 2)
-        self.assertEqual(stats.sum_x2.dtype, torch.float32)
-        self.assertEqual(stats.sum_x2.device.type, "cpu")
-        torch.testing.assert_close(stats.sum_x2, torch.tensor([1.0, 2.0, 3.0]))
-        self.assertEqual(calibration.baseline_label, "int8_convrot")
-        self.assertEqual(calibration.tensor_names(), ("blocks.0.attn.wq.weight",))
-        self.assertTrue(calibration.has("blocks.0.attn.wq.weight"))
-        self.assertFalse(calibration.has("missing.weight"))
-        self.assertIsNone(calibration.get("missing.weight"))
-
-    def test_rejects_unsupported_metadata_headers(self) -> None:
-        for field, value in (
-            ("format", "other"),
-            ("version", 2),
-            ("activation_basis", "packed"),
-            ("activation_axis", "first_dimension"),
-        ):
-            with self.subTest(field=field), TemporaryDirectory() as directory:
-                metadata_path, _ = self._write_pair(
-                    Path(directory),
-                    metadata_updates={field: value},
-                )
-
-                with self.assertRaises(ValueError):
-                    ActivationCalibration.load(metadata_path)
-
-    def test_rejects_missing_statistics_key(self) -> None:
-        with TemporaryDirectory() as directory:
-            metadata_path, _ = self._write_pair(
-                Path(directory),
-                layer_updates={"stats_key": "missing.sum_x2"},
-            )
-
-            with self.assertRaisesRegex(ValueError, "missing"):
-                ActivationCalibration.load(metadata_path)
-
-    def test_rejects_malformed_statistics(self) -> None:
-        cases = (
-            (torch.ones((1, 3)), "rank 1"),
-            (torch.ones(2), "length"),
-            (torch.tensor([1.0, -1.0, 2.0]), "non-negative"),
-            (torch.tensor([1.0, float("nan"), 2.0]), "finite"),
-        )
-        for tensor, message in cases:
-            with self.subTest(message=message), TemporaryDirectory() as directory:
-                metadata_path, tensors_path = self._write_pair(Path(directory))
-                save_file(
-                    {"blocks.0.attn.wq.weight.sum_x2": tensor},
-                    str(tensors_path),
-                )
-
-                with self.assertRaisesRegex(ValueError, message):
-                    ActivationCalibration.load(metadata_path)
-
-    def test_rejects_invalid_layer_metadata(self) -> None:
-        cases = (
-            ("input_features", 0),
-            ("sample_count", -1),
-            ("invocation_count", -1),
-            ("stats_key", ""),
-        )
-        for field, value in cases:
-            with self.subTest(field=field), TemporaryDirectory() as directory:
-                metadata_path, _ = self._write_pair(
-                    Path(directory),
-                    layer_updates={field: value},
-                )
-
-                with self.assertRaises(ValueError):
-                    ActivationCalibration.load(metadata_path)
-
-    def test_loads_v2_pair_and_flattens_padded_samples(self) -> None:
-        with TemporaryDirectory() as directory:
-            metadata_path, _ = self._write_v2_pair(Path(directory))
-
             calibration = load_activation_calibration(metadata_path)
 
-        self.assertEqual(calibration.version, 2)
-        self.assertEqual(calibration.session_id, "session-v2")
+        self.assertEqual(calibration.version, 1)
+        self.assertEqual(calibration.session_id, "session-1")
         self.assertEqual(len(calibration.evaluations), 2)
         self.assertEqual(calibration.evaluations[0].timestep, 0.9)
         self.assertEqual(calibration.evaluations[1].sigma, 0.1)
@@ -139,7 +72,7 @@ class TestActivationCalibration(unittest.TestCase):
             torch.tensor([0, 0, 1]),
         )
 
-    def test_v2_validation_rejects_bad_tensor_contracts(self) -> None:
+    def test_validation_rejects_bad_tensor_contracts(self) -> None:
         cases = (
             ("missing", {"eval_sum_y2_key": "missing"}, None, "missing"),
             (
@@ -169,7 +102,7 @@ class TestActivationCalibration(unittest.TestCase):
         )
         for case, layer_updates, tensor_updates, message in cases:
             with self.subTest(case=case), TemporaryDirectory() as directory:
-                metadata_path, tensors_path = self._write_v2_pair(
+                metadata_path, tensors_path = self._write_pair(
                     Path(directory),
                     layer_updates=layer_updates,
                     tensor_updates=tensor_updates,
@@ -178,10 +111,10 @@ class TestActivationCalibration(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     load_activation_calibration(metadata_path, tensors_path)
 
-    def test_v2_source_validation_requires_exact_linear_shape(self) -> None:
+    def test_source_validation_requires_exact_linear_shape(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            metadata_path, _ = self._write_v2_pair(root)
+            metadata_path, _ = self._write_pair(root)
             source_path = root / "source.safetensors"
             save_file(
                 {"blocks.0.attn.wq.weight": torch.ones((2, 3))},
@@ -201,7 +134,7 @@ class TestActivationCalibration(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            metadata_path, _ = self._write_v2_pair(root)
+            metadata_path, _ = self._write_pair(root)
             source_path = root / "source.safetensors"
             save_file(
                 {"blocks.0.attn.wq.weight": torch.ones((3, 2))},
@@ -215,41 +148,6 @@ class TestActivationCalibration(unittest.TestCase):
                 )
 
     def _write_pair(
-        self,
-        directory: Path,
-        *,
-        metadata_updates: dict[str, object] | None = None,
-        layer_updates: dict[str, object] | None = None,
-    ) -> tuple[Path, Path]:
-        layer = {
-            "input_features": 3,
-            "sample_count": 10,
-            "invocation_count": 2,
-            "stats_key": "blocks.0.attn.wq.weight.sum_x2",
-        }
-        layer.update(layer_updates or {})
-        metadata: dict[str, object] = {
-            "format": "potatoforge_activation_calibration",
-            "version": 1,
-            "session_id": "session-1",
-            "session_name": "test",
-            "baseline_label": "int8_convrot",
-            "activation_basis": "logical_linear_input",
-            "activation_axis": "last_dimension",
-            "layer_count": 1,
-            "layers": {"blocks.0.attn.wq.weight": layer},
-        }
-        metadata.update(metadata_updates or {})
-        metadata_path = directory / "calibration.json"
-        tensors_path = directory / "calibration.safetensors"
-        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-        save_file(
-            {"blocks.0.attn.wq.weight.sum_x2": torch.tensor([1.0, 2.0, 3.0])},
-            str(tensors_path),
-        )
-        return metadata_path, tensors_path
-
-    def _write_v2_pair(
         self,
         directory: Path,
         *,
@@ -276,9 +174,9 @@ class TestActivationCalibration(unittest.TestCase):
         layer.update(layer_updates or {})
         metadata: dict[str, object] = {
             "format": "potatoforge_activation_calibration",
-            "version": 2,
-            "session_id": "session-v2",
-            "session_name": "test-v2",
+            "version": 1,
+            "session_id": "session-1",
+            "session_name": "test-1",
             "baseline_label": "bf16",
             "activation_basis": "logical_linear_input",
             "activation_axis": "last_dimension",

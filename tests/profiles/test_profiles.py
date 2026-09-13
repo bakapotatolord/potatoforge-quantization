@@ -3,7 +3,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from potatoforge.profiles import find_profile_rule, load_profile, resolve_profile
+from potatoforge.profiles import (
+    find_profile_rule,
+    load_profile,
+    resolve_profile,
+)
 
 from tests.profile_paths import (
     ILLUSTRIOUS_COMBINED_PROFILE_PATH,
@@ -124,6 +128,60 @@ class TestProfiles(unittest.TestCase):
             "keep",
         )
 
+    def test_first_matching_rule_wins(self) -> None:
+        profile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "keep",
+                    "prefix": "blocks.1.",
+                    "suffixes": ("attn.wq.weight",),
+                },
+                {
+                    "action": "int8_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        self.assertEqual(
+            find_profile_rule(profile, "blocks.1.attn.wq.weight"),
+            profile["rules"][0],
+        )
+        self.assertEqual(
+            resolve_profile(profile, "blocks.1.attn.wq.weight"),
+            "keep",
+        )
+
+    def test_matches_fused_qkv_suffix_without_broadening_weight_matching(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "int8",
+                "prefix": "conditioner.embedders.1.model.transformer.resblocks.",
+                "suffixes": [".attn.in_proj_weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        fused_name = (
+            "conditioner.embedders.1.model.transformer.resblocks.0."
+            "attn.in_proj_weight"
+        )
+        self.assertEqual(resolve_profile(profile, fused_name), "int8_convrot")
+        self.assertEqual(
+            resolve_profile(
+                profile,
+                "conditioner.embedders.1.model.transformer.resblocks.0."
+                "attn.in_proj.bias",
+            ),
+            "keep",
+        )
+
     def test_loads_int6_rowwise_action(self) -> None:
         document = self._base_document()
         document["rules"] = [
@@ -143,6 +201,131 @@ class TestProfiles(unittest.TestCase):
             "int6_rowwise",
         )
 
+    def test_loads_optional_fallback_action(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "int8",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertEqual(profile["rules"][0]["fallback"], "int8")
+        self.assertEqual(
+            find_profile_rule(profile, "blocks.0.attn.wq.weight"),
+            profile["rules"][0],
+        )
+
+    def test_missing_fallback_remains_valid(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertNotIn("fallback", profile["rules"][0])
+        self.assertEqual(
+            resolve_profile(profile, "blocks.0.attn.wq.weight"),
+            "int8_convrot",
+        )
+
+    def test_rejects_invalid_fallback(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "not_a_real_format",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        self._assert_invalid_document(
+            document,
+            r"Profile rule 0 fallback must be one of.*not_a_real_format",
+        )
+
+    def test_rejects_keep_fallback(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "keep",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        self._assert_invalid_document(
+            document,
+            r"Profile rule 0 fallback must be one of.*int8",
+        )
+
+    def test_rejects_same_action_fallback(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8",
+                "fallback": "int8",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        self._assert_invalid_document(
+            document,
+            "Profile rule 0 fallback must differ from action",
+        )
+
+    def test_rejects_fallback_on_keep_action(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "keep",
+                "fallback": "int8",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        self._assert_invalid_document(
+            document,
+            "Profile rule 0 fallback requires a quantizing action",
+        )
+
+    def test_nonmatching_rule_is_not_returned_or_resolved(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int8_convrot",
+                "fallback": "int8",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertIsNone(
+            find_profile_rule(profile, "conditioner.0.attn.wq.weight")
+        )
+        self.assertEqual(
+            resolve_profile(profile, "conditioner.0.attn.wq.weight"),
+            "keep",
+        )
+
     def test_loads_int6_convrot_action(self) -> None:
         document = self._base_document()
         document["rules"] = [
@@ -159,6 +342,24 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(
             resolve_profile(profile, "blocks.0.attn.wq.weight"),
             "int6_convrot",
+        )
+
+    def test_loads_w4a4_mse_action(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "convrot_w4a4_mse",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertEqual(
+            resolve_profile(profile, "blocks.0.attn.wq.weight"),
+            "convrot_w4a4_mse",
         )
 
     def test_rejects_invalid_json(self) -> None:
@@ -300,37 +501,3 @@ class TestProfiles(unittest.TestCase):
             document,
             "contains unknown fields",
         )
-    def test_loads_and_matches_optional_fallback(self) -> None:
-        document = self._base_document()
-        document["rules"] = [
-            {
-                "action": "int8_convrot",
-                "fallback": "int8",
-                "prefix": "blocks.",
-                "suffixes": [".weight"],
-            }
-        ]
-
-        with TemporaryDirectory() as directory:
-            profile = load_profile(self._write_document(directory, document))
-
-        rule = find_profile_rule(profile, "blocks.0.attn.wq.weight")
-        self.assertIsNotNone(rule)
-        self.assertEqual(rule["fallback"], "int8")
-        self.assertEqual(
-            resolve_profile(profile, "blocks.0.attn.wq.weight"),
-            "int8_convrot",
-        )
-
-    def test_rejects_keep_as_fallback(self) -> None:
-        document = self._base_document()
-        document["rules"] = [
-            {
-                "action": "int8_convrot",
-                "fallback": "keep",
-                "prefix": "blocks.",
-                "suffixes": [".weight"],
-            }
-        ]
-
-        self._assert_invalid_document(document, "fallback must be one of")

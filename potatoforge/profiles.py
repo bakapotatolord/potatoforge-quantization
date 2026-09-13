@@ -171,7 +171,10 @@ def load_profile(profile_path: str | Path) -> QuantizationProfile:
         "default",
         "rules",
     }
-    allowed_fields = required_fields | {"description", "keep_dtype"}
+    allowed_fields = required_fields | {
+        "description",
+        "keep_dtype",
+    }
     document = load_json_object(profile_path, "profile")
     validate_document_fields(
         document,
