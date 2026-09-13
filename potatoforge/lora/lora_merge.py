@@ -119,7 +119,7 @@ def _resolve_source_tensor_key(
     source_suffix: str,
 ) -> str:
     if not adapter_target:
-        raise ValueError("Adapter target must not be empty.")
+        raise ValueError("LoRA target must not be empty.")
 
     candidate_name = adapter_target + source_suffix
 
@@ -134,14 +134,14 @@ def _resolve_source_tensor_key(
 
     if not matches:
         raise ValueError(
-            "No source tensor matched adapter target "
+            "No source tensor matched LoRA target "
             f"{adapter_target!r}. Tried exact target {candidate_name!r} "
             "and unique dot-boundary suffix matching."
         )
 
     if len(matches) > 1:
         raise ValueError(
-            "Ambiguous source tensor match for adapter target "
+            "Ambiguous source tensor match for LoRA target "
             f"{adapter_target!r}. Matches: {matches}"
         )
 
@@ -189,7 +189,7 @@ def _validate_adapter_dtype(
 
     if dtype not in _FLOAT_DTYPES:
         raise ValueError(
-            f"Adapter tensor {key} must use a floating-point dtype; "
+            f"LoRA tensor {key} must use a floating-point dtype; "
             f"got {dtype}."
         )
 
@@ -227,7 +227,7 @@ def _validate_linear_source_tensor(
 
     if descriptor["shape"] != expected_shape:
         raise ValueError(
-            f"Source Linear tensor shape does not match adapter factors "
+            f"Source Linear tensor shape does not match LoRA factors "
             f"for {source_key}: expected {expected_shape}, "
             f"got {descriptor['shape']}."
         )
@@ -382,7 +382,7 @@ def build_merge_plan(
             if record["contract"] not in {"linear_lora", "unsupported"}
         })
         message = (
-            f"Adapter contains unsupported or unpaired tensors: {invalid_keys}."
+            f"LoRA contains unsupported or unpaired tensors: {invalid_keys}."
         )
 
         if unsupported_contracts:
@@ -777,17 +777,17 @@ def _prepare_adapter(
         strength = float(adapter_input.strength)
     except (TypeError, ValueError) as error:
         raise ValueError(
-            f"Adapter strength must be numeric: {adapter_input.strength!r}."
+            f"LoRA strength must be numeric: {adapter_input.strength!r}."
         ) from error
 
     if not math.isfinite(strength):
         raise ValueError(
-            f"Adapter strength must be finite: {strength!r}."
+            f"LoRA strength must be finite: {strength!r}."
         )
 
     if not adapter_path.is_file():
         raise FileNotFoundError(
-            f"Adapter file does not exist: {adapter_path}"
+            f"LoRA file does not exist: {adapter_path}"
         )
 
     adapter_header = read_source_model_header(adapter_path)
@@ -802,7 +802,7 @@ def _prepare_adapter(
         or plan["additive_deltas"]
     ):
         raise ValueError(
-            f"Adapter {adapter_path} contains no supported patches."
+            f"LoRA file {adapter_path} contains no supported patches."
         )
 
     return _PreparedAdapter(
@@ -823,7 +823,7 @@ def merge_bf16_adapters(
     adapter_inputs = tuple(adapters)
 
     if not adapter_inputs:
-        raise ValueError("At least one adapter is required.")
+        raise ValueError("At least one LoRA file is required.")
 
     if source.resolve() == output.resolve():
         raise ValueError("Source and output paths must be different.")
@@ -854,7 +854,7 @@ def merge_bf16_adapters(
 
         if adapter_resolved == source_resolved:
             raise ValueError(
-                "Source and adapter paths must be different."
+                "Source and LoRA paths must be different."
             )
 
         if adapter_resolved in {
@@ -862,7 +862,7 @@ def merge_bf16_adapters(
             partial_resolved,
         }:
             raise ValueError(
-                "Adapter path must be different from output paths."
+                "LoRA path must be different from output paths."
             )
 
     source_header = read_source_model_header(source)

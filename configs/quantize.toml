@@ -5,7 +5,7 @@ source = "models/source.safetensors"
 profile = "profiles/generic/f32-to-bf16.json"
 quantized_output = "models/quantized.safetensors"
 
-# Optional fused LoRA adapters. Repeat this table for each adapter.
+# Optional fused LoRA files. Repeat this table for each LoRA file.
 # [[quantize.adapters]]
 # path = "models/style-a.safetensors"
 # strength = 0.65

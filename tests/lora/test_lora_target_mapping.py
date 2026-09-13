@@ -79,7 +79,7 @@ class TestResolveSourceTensorKey(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "No source tensor matched adapter target",
+            "No source tensor matched LoRA target",
         ):
             resolve_linear_pair_source_key(
                 make_header("other.weight"),
