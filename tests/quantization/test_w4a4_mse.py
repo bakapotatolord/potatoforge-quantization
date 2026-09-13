@@ -6,11 +6,13 @@ import torch
 from potatoforge.quantization.convrot_w4a4 import (
     _calculate_w4a4_candidate_mse,
     _quantize_w4_rowwise_with_scale,
+    _run_w4a4_mse_coarse_search,
     dequantize_convrot_w4a4,
     dequantize_w4_rowwise,
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
     quantize_w4_rowwise,
+    _quantize_w4_codes,
     select_w4a4_mse_scale,
 )
 
@@ -40,6 +42,24 @@ class TestW4A4MseScale(unittest.TestCase):
                 self.assertTrue(
                     torch.allclose(fast_mse, expected_mse, rtol=0, atol=1e-8)
                 )
+
+    def test_candidate_mse_matches_the_direct_reference_expression(self) -> None:
+        torch.manual_seed(109)
+        weights = torch.randn((3, 256), dtype=torch.bfloat16)
+        weights_float = weights.float()
+        scales = quantize_w4_rowwise(weights).scales * 0.73
+        codes, stored_scales = _quantize_w4_codes(weights, scales)
+        reference = (
+            weights_float - codes.float() * stored_scales
+        ).square().mean(dim=1, keepdim=True)
+
+        optimized = _calculate_w4a4_candidate_mse(
+            weights,
+            weights_float,
+            scales,
+        )
+
+        self.assertTrue(torch.equal(optimized, reference))
 
     def test_mse_search_uses_the_lightweight_candidate_budget(self) -> None:
         torch.manual_seed(53)
@@ -97,6 +117,27 @@ class TestW4A4MseScale(unittest.TestCase):
                 atol=1e-7,
             )
         )
+
+    def test_mse_search_accepts_an_explicit_candidate_evaluator(self) -> None:
+        torch.manual_seed(59)
+        weights = torch.randn((2, 256), dtype=torch.float32)
+        weights_float = weights.float()
+        base_scale = quantize_w4_rowwise(weights).scales
+
+        expected = _run_w4a4_mse_coarse_search(
+            weights,
+            weights_float,
+            base_scale,
+        )
+        observed = _run_w4a4_mse_coarse_search(
+            weights,
+            weights_float,
+            base_scale,
+            _calculate_w4a4_candidate_mse,
+        )
+
+        self.assertTrue(torch.equal(expected[0], observed[0]))
+        self.assertTrue(torch.equal(expected[1], observed[1]))
 
     def test_convrot_mse_is_no_worse_with_the_same_w4a4_storage(self) -> None:
         for seed, rows in ((41, 3), (43, 2), (47, 1)):

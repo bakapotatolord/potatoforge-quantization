@@ -6,10 +6,13 @@ from .int8_tensorwise import (
     quantize_int8_convrot,
 )
 from .int6_rowwise import (
+    Int6ConvRotPackedResult,
     Int6RowwiseResult,
     dequantize_int6_convrot,
+    dequantize_int6_convrot_packed,
     dequantize_int6_rowwise,
     quantize_int6_convrot,
+    quantize_int6_convrot_packed,
     quantize_int6_rowwise,
 )
 from .int6_packing import (

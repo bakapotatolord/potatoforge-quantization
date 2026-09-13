@@ -1,6 +1,8 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+import torch
+
 from .planning import (
     PlanEntry,
     build_output_layout,
@@ -18,6 +20,16 @@ from .source_payloads import (
     ProgressReporter,
     stream_output_payloads,
 )
+from .timing import TimingCollector
+
+
+def _validate_device(device: str) -> None:
+    if device not in ("cpu", "cuda"):
+        raise ValueError("Quantization device must be cpu or cuda.")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise ValueError(
+            "CUDA device requested but CUDA is unavailable."
+        )
 
 
 def print_conversion_progress(entry_index: int, entry_count: int, entry: PlanEntry) -> None:
@@ -54,6 +66,8 @@ def convert_model(
     on_entry_started: ProgressReporter | None = print_conversion_progress,
     *,
     adapters: Sequence[AdapterMergeInput] = (),
+    timing: TimingCollector | None = None,
+    device: str = "cpu",
 ) -> None:
     source = Path(source_path)
     output = Path(output_path)
@@ -72,6 +86,8 @@ def convert_model(
             f"Partial output already exists: {partial}"
         )
 
+    _validate_device(device)
+
     model = read_source_model_header(source)
 
     plan_entries = build_plan(model.tensors, profile)
@@ -83,6 +99,8 @@ def convert_model(
         plan_entries,
         on_entry_started,
         source_payload_transform=source_payload_transform,
+        timing=timing,
+        device=device,
     )
 
     write_safetensors_file(
@@ -93,9 +111,12 @@ def convert_model(
             **model.metadata,
             **build_quantization_metadata(plan_entries),
         },
+        timing=timing,
     )
 
     partial.rename(output)
+    if timing is not None:
+        timing.finish()
 
 
 def convert_model_from_profile(
@@ -105,6 +126,8 @@ def convert_model_from_profile(
     on_entry_started: ProgressReporter | None = print_conversion_progress,
     *,
     adapters: Sequence[AdapterMergeInput] = (),
+    timing: TimingCollector | None = None,
+    device: str = "cpu",
 ) -> None:
     profile = load_profile(profile_path)
     return convert_model(
@@ -113,4 +136,6 @@ def convert_model_from_profile(
         profile,
         on_entry_started,
         adapters=adapters,
+        timing=timing,
+        device=device,
     )

@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+from unittest.mock import ANY, patch
 
 import torch
 from tempfile import TemporaryDirectory
@@ -214,6 +215,39 @@ class TestSourcePayloads(unittest.TestCase):
         )
         self.assertEqual(payloads[1][1], tensor_to_raw_bytes(expected.scales))
         self.assertEqual(payloads[2][1], CONVROT_W4A4_MARKER_PAYLOAD)
+
+    def test_stream_source_payload_dispatches_w4a4_mse_device(self) -> None:
+        tensor = torch.zeros((1, 256), dtype=torch.bfloat16)
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "convrot_w4a4_mse",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            entries = build_plan(header.tensors, profile)
+            expected = quantize_convrot_w4a4_mse(tensor)
+            with patch(
+                "potatoforge.source_payloads.quantize_convrot_w4a4_mse",
+                return_value=expected,
+            ) as quantizer:
+                list(
+                    stream_output_payloads(
+                        source_path,
+                        entries,
+                        device="cuda",
+                    )
+                )
+
+        quantizer.assert_called_once_with(ANY, device="cuda")
 
     def test_stream_source_payload_int8_convrot(self) -> None:
         tensor = torch.zeros(

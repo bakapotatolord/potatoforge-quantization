@@ -90,6 +90,41 @@ class TestCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "0.1.0")
 
+    def test_audit_forwards_device(self) -> None:
+        audit_document = {
+            "selection": {"dtype": "BF16"},
+            "summary": {
+                "audited_layer_count": 0,
+                "skipped_tensor_count": 0,
+            },
+            "results": [],
+        }
+
+        with (
+            patch(
+                "potatoforge.cli.audit_bf16_source",
+                return_value=audit_document,
+            ) as audit_mock,
+            patch("potatoforge.cli._preflight_audit_outputs"),
+            patch("potatoforge.cli._write_json"),
+            patch("potatoforge.cli.print_weight_audit_table"),
+        ):
+            result = self.runner.invoke(
+                app,
+                [
+                    "audit",
+                    "model.safetensors",
+                    "--output",
+                    "audit.json",
+                    "--device",
+                    "cuda",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(audit_mock.call_args.kwargs["device"], "cuda")
+        self.assertFalse(audit_mock.call_args.kwargs["include_plain_methods"])
+
     def test_int6_runtime_toggle_is_not_a_cli_option(self) -> None:
         for command in ("analyze", "optimize"):
             with self.subTest(command=command):
@@ -596,6 +631,57 @@ class TestCli(unittest.TestCase):
                 AdapterMergeInput(root / "second.safetensors", 1.25),
             ),
         )
+        self.assertIsNone(convert_mock.call_args.kwargs["timing"])
+        self.assertEqual(convert_mock.call_args.kwargs["device"], "cpu")
+        self.assertNotIn("Quantization timing", result.output)
+
+    def test_quantize_passes_explicit_device(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_path = root / "output.safetensors"
+            output_path.write_bytes(b"")
+
+            with patch(
+                "potatoforge.cli.convert_model_from_profile"
+            ) as convert_mock:
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "quantize",
+                        str(root / "source.safetensors"),
+                        str(output_path),
+                        "--profile",
+                        str(root / "profile.json"),
+                        "--device",
+                        "cuda",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(convert_mock.call_args.kwargs["device"], "cuda")
+
+    def test_quantize_timing_option_reports_and_passes_collector(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_path = root / "output.safetensors"
+            output_path.write_bytes(b"")
+
+            with patch("potatoforge.cli.convert_model_from_profile") as convert_mock:
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "quantize",
+                        str(root / "source.safetensors"),
+                        str(output_path),
+                        "--profile",
+                        str(root / "profile.json"),
+                        "--timing",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNotNone(convert_mock.call_args.kwargs["timing"])
+        self.assertIn("Quantization timing", result.output)
 
     def test_quantize_loads_config_and_allows_cli_adapter_override(self) -> None:
         with TemporaryDirectory() as directory:

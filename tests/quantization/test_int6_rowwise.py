@@ -5,8 +5,10 @@ import torch
 from potatoforge.quantization.int6_rowwise import (
     Int6RowwiseResult,
     dequantize_int6_convrot,
+    dequantize_int6_convrot_packed,
     dequantize_int6_rowwise,
     quantize_int6_convrot,
+    quantize_int6_convrot_packed,
     quantize_int6_rowwise,
 )
 
@@ -65,13 +67,28 @@ class TestInt6Rowwise(unittest.TestCase):
         self.assertEqual(result.scales.shape, (1, 1))
         self.assertTrue(torch.allclose(reconstructed, weights.float(), atol=0.01))
 
+    def test_packed_convrot_reconstruction_matches_logical_result(self) -> None:
+        weights = torch.randn((2, 256), dtype=torch.float32)
+
+        logical = dequantize_int6_convrot(quantize_int6_convrot(weights))
+        packed = dequantize_int6_convrot_packed(
+            quantize_int6_convrot_packed(weights),
+        )
+
+        self.assertTrue(torch.equal(packed, logical))
+
     def test_invalid_inputs_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             quantize_int6_rowwise(torch.ones(3))
         with self.assertRaises(ValueError):
             quantize_int6_rowwise(torch.ones((2, 2), dtype=torch.int8))
-        with self.assertRaises(ValueError):
-            quantize_int6_rowwise(torch.tensor([[float("nan")]]))
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "INT6 weights must contain only finite values",
+                ):
+                    quantize_int6_rowwise(torch.tensor([[value]]))
 
         invalid_codes = Int6RowwiseResult(
             torch.tensor([[32]], dtype=torch.int8),

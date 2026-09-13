@@ -31,6 +31,8 @@ class TestActivationCli(unittest.TestCase):
                 [
                     "activation-audit",
                     "model.safetensors",
+                    "--device",
+                    "cuda",
                     "--activation-calibration",
                     "calibration.json",
                     "--output",
@@ -60,6 +62,43 @@ class TestActivationCli(unittest.TestCase):
             audit_mock.call_args.kwargs["tensor_names"],
             ("blocks.0.attn.wq.weight",),
         )
+        self.assertEqual(audit_mock.call_args.kwargs["device"], "cuda")
+        self.assertIsNone(audit_mock.call_args.kwargs["method_timings"])
+        self.assertNotIn("Activation audit timing", result.output)
+
+    def test_activation_audit_timing_option_reports(self) -> None:
+        calibration = Mock(
+            session_id="test-session",
+            tensor_names=Mock(return_value=("blocks.0.attn.wq.weight",)),
+        )
+        with (
+            patch(
+                "potatoforge.cli.ActivationCalibration.load",
+                return_value=calibration,
+            ),
+            patch(
+                "potatoforge.cli.run_activation_audit",
+                return_value=(Path("cache.json"), Path("cache.safetensors")),
+            ) as audit_mock,
+            patch("potatoforge.cli.perf_counter", side_effect=(10.0, 12.5)),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "activation-audit",
+                    "model.safetensors",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "cache",
+                    "--timing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Activation audit timing", result.output)
+        self.assertIn("total", result.output)
+        self.assertEqual(audit_mock.call_args.kwargs["method_timings"], {})
 
     def test_audit_loads_activation_calibration(self) -> None:
         document = {

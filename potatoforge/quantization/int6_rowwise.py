@@ -6,7 +6,17 @@ from typing import Final, NamedTuple
 
 import torch
 
-from .hadamard import CONVROT_GROUP_SIZE, apply_hadamard_rotation
+from .hadamard import (
+    CONVROT_GROUP_SIZE,
+    apply_hadamard_rotation,
+    cached_cuda_hadamard_matrix,
+)
+from .int6_packing import (
+    Int6PackedResult,
+    pack_int6_row_major,
+    unpack_int6_row_major,
+)
+from ..timing import timed_internal_stage
 from .int8_tensorwise import quantize_int8_rows
 
 
@@ -21,13 +31,57 @@ class Int6RowwiseResult(NamedTuple):
     scales: torch.Tensor
 
 
-def _validate_weights(weights: torch.Tensor) -> None:
-    if weights.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise ValueError("INT6 weights must use float16, bfloat16, or float32.")
-    if weights.ndim != 2:
-        raise ValueError("INT6 weights must be a rank-2 matrix.")
-    if not bool(torch.isfinite(weights).all()):
-        raise ValueError("INT6 weights must contain only finite values.")
+class Int6ConvRotPackedResult(NamedTuple):
+    """Packed ConvRot INT6 values and row scales for serialization."""
+
+    packed_codes: torch.Tensor
+    scales: torch.Tensor
+    original_shape: tuple[int, int]
+
+
+def _validate_weight_metadata(
+    weights: torch.Tensor,
+    *,
+    internal_timings: dict[str, float] | None = None,
+) -> None:
+    with timed_internal_stage(
+        internal_timings,
+        "validate_metadata",
+        None,
+    ):
+        if weights.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError(
+                "INT6 weights must use float16, bfloat16, or float32."
+            )
+        if weights.ndim != 2:
+            raise ValueError("INT6 weights must be a rank-2 matrix.")
+
+
+def _validate_finite(
+    weights: torch.Tensor,
+    *,
+    internal_timings: dict[str, float] | None = None,
+) -> None:
+    with timed_internal_stage(
+        internal_timings,
+        "validate_finite",
+        None,
+    ):
+        finite = torch.isfinite(weights).all()
+        if not bool(finite):
+            raise ValueError("INT6 weights must contain only finite values.")
+
+
+def _validate_weights(
+    weights: torch.Tensor,
+    *,
+    internal_timings: dict[str, float] | None = None,
+) -> None:
+    _validate_weight_metadata(
+        weights,
+        internal_timings=internal_timings,
+    )
+    _validate_finite(weights, internal_timings=internal_timings)
 
 
 def quantize_int6_rowwise(weights: torch.Tensor) -> Int6RowwiseResult:
@@ -75,6 +129,121 @@ def quantize_int6_convrot(weights: torch.Tensor) -> Int6RowwiseResult:
     return quantize_int6_rowwise(rotated_weights)
 
 
+def _resolve_device(device: str | torch.device) -> torch.device:
+    try:
+        target_device = torch.device(device)
+    except (RuntimeError, TypeError) as error:
+        raise ValueError("INT6 ConvRot device must be cpu or cuda.") from error
+
+    if target_device.type not in ("cpu", "cuda"):
+        raise ValueError("INT6 ConvRot device must be cpu or cuda.")
+    if target_device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA device requested but CUDA is unavailable.")
+        if target_device.index is None:
+            target_device = torch.device(
+                "cuda",
+                torch.cuda.current_device(),
+            )
+    return target_device
+
+
+def _quantize_int6_convrot_cuda(
+    weights: torch.Tensor,
+    device: torch.device,
+    internal_timings: dict[str, float] | None,
+) -> Int6ConvRotPackedResult:
+    _validate_weight_metadata(
+        weights,
+        internal_timings=internal_timings,
+    )
+    with timed_internal_stage(
+        internal_timings,
+        "prepare",
+        device,
+    ):
+        device_weights = weights.to(device=device)
+
+    with timed_internal_stage(
+        internal_timings,
+        "validate_finite",
+        device,
+    ):
+        _validate_finite(device_weights)
+
+    with timed_internal_stage(
+        internal_timings,
+        "rotation",
+        device,
+    ):
+        rotated_weights = apply_hadamard_rotation(
+            device_weights,
+            group_size=CONVROT_GROUP_SIZE,
+            output_dtype=torch.float32,
+            hadamard=cached_cuda_hadamard_matrix(
+                CONVROT_GROUP_SIZE,
+                device,
+                torch.float32,
+            ),
+        )
+    rowwise_result = quantize_int8_rows(
+        rotated_weights,
+        qmin=INT6_QMIN,
+        qmax=INT6_QMAX,
+        use_float32_math=True,
+        zero_scale=1.0,
+        internal_timings=internal_timings,
+        _timing_device=device if internal_timings is not None else None,
+    )
+    with timed_internal_stage(
+        internal_timings,
+        "pack",
+        device,
+    ):
+        packed_result = pack_int6_row_major(rowwise_result.codes)
+
+    with timed_internal_stage(
+        internal_timings,
+        "finalize",
+        device,
+    ):
+        return Int6ConvRotPackedResult(
+            packed_codes=packed_result.packed_codes.cpu(),
+            scales=rowwise_result.scales.cpu(),
+            original_shape=packed_result.original_shape,
+        )
+
+
+def quantize_int6_convrot_packed(
+    weights: torch.Tensor,
+    *,
+    device: str | torch.device = "cpu",
+    internal_timings: dict[str, float] | None = None,
+) -> Int6ConvRotPackedResult:
+    """Quantize ConvRot INT6 and return only its serialization payload."""
+
+    with timed_internal_stage(
+        internal_timings,
+        "resolve_device",
+        None,
+    ):
+        target_device = _resolve_device(device)
+    if target_device.type == "cuda":
+        return _quantize_int6_convrot_cuda(
+            weights,
+            target_device,
+            internal_timings,
+        )
+
+    rowwise_result = quantize_int6_convrot(weights)
+    packed_result = pack_int6_row_major(rowwise_result.codes)
+    return Int6ConvRotPackedResult(
+        packed_codes=packed_result.packed_codes,
+        scales=rowwise_result.scales,
+        original_shape=packed_result.original_shape,
+    )
+
+
 def dequantize_int6_convrot(result: Int6RowwiseResult) -> torch.Tensor:
     """Reconstruct ConvRot W6 weights in their original Linear space."""
 
@@ -83,3 +252,21 @@ def dequantize_int6_convrot(result: Int6RowwiseResult) -> torch.Tensor:
         group_size=CONVROT_GROUP_SIZE,
         output_dtype=torch.float32,
     )
+
+
+def dequantize_int6_convrot_packed(
+    result: Int6ConvRotPackedResult,
+    *,
+    device: str | torch.device | None = None,
+) -> torch.Tensor:
+    """Reconstruct ConvRot W6 weights from a packed serialization result."""
+
+    packed_codes = result.packed_codes
+    scales = result.scales
+    if device is not None:
+        packed_codes = packed_codes.to(device=device)
+        scales = scales.to(device=device)
+    codes = unpack_int6_row_major(
+        Int6PackedResult(packed_codes, result.original_shape),
+    )
+    return dequantize_int6_convrot(Int6RowwiseResult(codes, scales))

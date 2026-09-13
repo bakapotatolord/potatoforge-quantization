@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from .planning import METADATA_KEY, SafetensorsLayout, layout_to_header
+from .timing import TimingCollector
 
 
 TensorPayload: TypeAlias = tuple[str, bytes | Iterable[bytes]]
@@ -32,6 +33,8 @@ def write_safetensors_file(
     layout: SafetensorsLayout,
     payloads: TensorPayloadStream,
     metadata: Mapping[str, str] | None = None,
+    *,
+    timing: TimingCollector | None = None,
 ) -> None:
     header_bytes = encode_safetensors_header(layout, metadata)
     payload_iterator: Iterator[TensorPayload] = iter(payloads)
@@ -69,22 +72,41 @@ def write_safetensors_file(
                         f"{len(payload)}."
                     )
 
-                file.write(payload)
+                if timing is None:
+                    file.write(payload)
+                else:
+                    with timing.write_payload(payload_name):
+                        file.write(payload)
                 continue
 
             written_bytes = 0
-            for chunk in payload:
-                if not isinstance(chunk, bytes):
-                    raise ValueError(
-                        f"{payload_name} payload chunks must be bytes."
-                    )
-                written_bytes += len(chunk)
-                if written_bytes > tensor.spec.byte_count:
-                    raise ValueError(
-                        f"{payload_name} needs "
-                        f"{tensor.spec.byte_count} bytes, got more."
-                    )
-                file.write(chunk)
+            if timing is None:
+                for chunk in payload:
+                    if not isinstance(chunk, bytes):
+                        raise ValueError(
+                            f"{payload_name} payload chunks must be bytes."
+                        )
+                    written_bytes += len(chunk)
+                    if written_bytes > tensor.spec.byte_count:
+                        raise ValueError(
+                            f"{payload_name} needs "
+                            f"{tensor.spec.byte_count} bytes, got more."
+                        )
+                    file.write(chunk)
+            else:
+                with timing.write_payload(payload_name):
+                    for chunk in payload:
+                        if not isinstance(chunk, bytes):
+                            raise ValueError(
+                                f"{payload_name} payload chunks must be bytes."
+                            )
+                        written_bytes += len(chunk)
+                        if written_bytes > tensor.spec.byte_count:
+                            raise ValueError(
+                                f"{payload_name} needs "
+                                f"{tensor.spec.byte_count} bytes, got more."
+                            )
+                        file.write(chunk)
 
             if written_bytes != tensor.spec.byte_count:
                 raise ValueError(

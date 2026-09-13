@@ -7,7 +7,8 @@ import math
 import unittest
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable
+from time import perf_counter
+from typing import Any, Callable, Literal
 
 import typer
 
@@ -19,6 +20,7 @@ from .audits.analysis import (
 from .audits.activation_audit import (
     activation_audit_pair_paths,
     inspect_activation_audit,
+    render_activation_audit_timing,
     run_activation_audit,
     score_activation_audit,
 )
@@ -69,6 +71,7 @@ from .calibration import (
     score_activation_probe,
 )
 from .calibration.activation_probe import activation_pair_paths
+from .timing import TimingCollector
 
 
 app = typer.Typer(
@@ -403,6 +406,14 @@ def merge_lora(
 def audit(
     source_path: Path = typer.Argument(...),
     output: Path = typer.Option(..., help="JSON audit report path."),
+    device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        "--device",
+        help=(
+            "Audit reconstruction device; CUDA is used for ConvRot INT8, "
+            "W4A4, and packed ConvRot INT6; plain INT8/INT6 stay on CPU."
+        ),
+    ),
     activation_calibration: Path | None = typer.Option(
         None,
         "--activation-calibration",
@@ -433,6 +444,8 @@ def audit(
         )
         audit_kwargs: dict[str, Any] = {
             "on_entry_started": _print_progress,
+            "device": device,
+            "include_plain_methods": False,
         }
         if calibration is not None:
             audit_kwargs["activation_calibration"] = calibration
@@ -464,6 +477,14 @@ def audit(
 @app.command("activation-audit")
 def activation_audit(
     source_path: Path = typer.Argument(...),
+    device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        "--device",
+        help=(
+            "Candidate quantization device; CUDA accelerates ConvRot INT8, "
+            "W4A4, and packed ConvRot INT6; plain INT8/INT6 stay on CPU."
+        ),
+    ),
     activation_calibration: Path = typer.Option(
         ...,
         "--activation-calibration",
@@ -488,10 +509,17 @@ def activation_audit(
         "--tensor",
         help="Optional comma-separated calibration tensor names.",
     ),
+    timing: bool = typer.Option(
+        False,
+        "--timing",
+        help="Report full activation-audit timing by candidate method.",
+    ),
     overwrite: bool = typer.Option(False, help="Replace an existing cache pair."),
 ) -> None:
     """Build a reusable activation-aware candidate measurement cache."""
     def action() -> None:
+        timing_started = perf_counter() if timing else None
+        method_timings = {} if timing else None
         requested_methods = _split_comma_separated(method) or None
         tensor_names = _split_comma_separated(tensor) or None
         calibration = ActivationCalibration.load(
@@ -512,11 +540,14 @@ def activation_audit(
             requested_methods=requested_methods,
             tensor_names=tensor_names,
             on_tensor_started=_print_progress,
+            device=device,
+            method_timings=method_timings,
             overwrite=overwrite,
         )
         _finish(
             {
                 "source_path": str(source_path),
+                "device": device,
                 "calibration_session_id": calibration.session_id,
                 "metadata_path": str(metadata_path),
                 "tensors_path": str(tensors_path),
@@ -528,6 +559,17 @@ def activation_audit(
                 "layer_count": len(calibration.tensor_names()),
             }
         )
+        if timing:
+            assert timing_started is not None
+            assert method_timings is not None
+            typer.echo(
+                render_activation_audit_timing(
+                    perf_counter() - timing_started,
+                    method_timings,
+                    device=device,
+                    tensor_count=len(calibration.tensor_names()),
+                )
+            )
 
     _run("activation-audit", action)
 
@@ -1323,6 +1365,13 @@ def quantize(
         None,
         help="JSON quantization profile; required without --config.",
     ),
+    device: Literal["cpu", "cuda"] = typer.Option(
+        "cpu",
+        "--device",
+        help=(
+            "Quantization device; CUDA is used for ConvRot INT8, W4A4, "
+            "and INT6."
+        ),
     ),
     adapter_path: list[Path] = typer.Option(
         [],
@@ -1344,9 +1393,17 @@ def quantize(
         "--dry-run",
         help="Estimate output storage without writing a checkpoint.",
     ),
+    timing: bool = typer.Option(
+        False,
+        "--timing",
+        help="Report conversion timing by stage, action, and tensor size.",
+    ),
 ) -> None:
     """Convert or estimate a checkpoint with an explicit JSON profile."""
     def action() -> None:
+        timing_collector = (
+            None if dry_run or not timing else TimingCollector()
+        )
         cli_adapters = _build_adapter_inputs(adapter_path, adapter_strength)
 
         if config is not None:
@@ -1417,6 +1474,8 @@ def quantize(
             effective_profile,
             on_entry_started=print_conversion_progress,
             adapters=effective_adapters,
+            timing=timing_collector,
+            device=device,
         )
         _finish(
             {
@@ -1427,6 +1486,8 @@ def quantize(
                 "adapter_count": len(effective_adapters),
             },
         )
+        if timing_collector is not None:
+            typer.echo(timing_collector.render())
 
     _run("quantize", action)
 
