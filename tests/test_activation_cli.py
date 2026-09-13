@@ -5,11 +5,127 @@ from unittest.mock import Mock, patch
 
 from typer.testing import CliRunner
 
+from potatoforge import cli
 from potatoforge.audits.activation_comparison import ACTIVATION_METRICS
 from potatoforge.cli import app
 
 
 class TestActivationCli(unittest.TestCase):
+    def test_activation_aliases_match_canonical_callbacks(self) -> None:
+        aliases = {
+            "activation-audit": (
+                "audit",
+                "activation_audit",
+                [
+                    "model.safetensors",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "cache",
+                ],
+            ),
+            "activation-inspect": (
+                "inspect",
+                "activation_inspect",
+                [
+                    "--audit-cache",
+                    "cache",
+                    "--activation-calibration",
+                    "calibration.json",
+                ],
+            ),
+            "activation-score": (
+                "score",
+                "activation_score",
+                [
+                    "--audit-cache",
+                    "cache",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--output",
+                    "score.json",
+                ],
+            ),
+            "activation-optimize": (
+                "optimize",
+                "activation_optimize",
+                [
+                    "--audit-cache",
+                    "cache",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--target-size-gib",
+                    "1",
+                    "--output",
+                    "profile.json",
+                ],
+            ),
+            "activation-compare": (
+                "compare",
+                "activation_compare",
+                [
+                    "--audit-cache",
+                    "cache",
+                    "--activation-calibration",
+                    "calibration.json",
+                    "--target-size-gib",
+                    "1",
+                    "--output",
+                    "comparison.xlsx",
+                ],
+            ),
+            "calibration-merge": (
+                "merge",
+                "calibration_merge",
+                ["first.json", "second.json", "--output", "merged"],
+            ),
+        }
+        root_commands = {
+            command.name: command for command in cli.app.registered_commands
+        }
+        activation_commands = {
+            command.name: command
+            for command in cli.activation_app.registered_commands
+        }
+        for alias, (canonical, function_name, arguments) in aliases.items():
+            with self.subTest(alias=alias):
+                self.assertTrue(root_commands[alias].hidden)
+                self.assertIs(
+                    root_commands[alias].callback,
+                    getattr(cli, function_name),
+                )
+                self.assertIs(
+                    activation_commands[canonical].callback,
+                    root_commands[alias].callback,
+                )
+                with patch(
+                    "potatoforge.cli._run",
+                    side_effect=lambda name, _action: print(name),
+                ) as legacy_run:
+                    legacy_result = CliRunner().invoke(
+                        app,
+                        [alias, *arguments],
+                    )
+                with patch(
+                    "potatoforge.cli._run",
+                    side_effect=lambda name, _action: print(name),
+                ) as canonical_run:
+                    canonical_result = CliRunner().invoke(
+                        app,
+                        ["activation", canonical, *arguments],
+                    )
+                self.assertEqual(legacy_result.exit_code, 0, legacy_result.output)
+                self.assertEqual(
+                    canonical_result.exit_code,
+                    0,
+                    canonical_result.output,
+                )
+                self.assertEqual(legacy_result.output, canonical_result.output)
+                self.assertEqual(
+                    legacy_run.call_args.args[0],
+                    canonical_run.call_args.args[0],
+                )
+
     def test_activation_audit_passes_cache_arguments(self) -> None:
         calibration = Mock(
             session_id="test-session",
@@ -28,7 +144,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-audit",
+                    "activation",
+                    "audit",
                     "model.safetensors",
                     "--device",
                     "cuda",
@@ -84,7 +201,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-audit",
+                    "activation",
+                    "audit",
                     "model.safetensors",
                     "--activation-calibration",
                     "calibration.json",
@@ -111,7 +229,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-score",
+                    "activation",
+                    "score",
                     "--audit-cache",
                     "cache.json",
                     "--activation-calibration",
@@ -142,7 +261,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-inspect",
+                    "activation",
+                    "inspect",
                     "--audit-cache",
                     "cache.json",
                     "--activation-calibration",
@@ -190,7 +310,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-optimize",
+                    "activation",
+                    "optimize",
                     "--audit-cache",
                     "cache.json",
                     "--activation-calibration",
@@ -227,7 +348,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "calibration-merge",
+                    "activation",
+                    "merge",
                     "first.json",
                     "second.json",
                     "--output",
@@ -251,7 +373,8 @@ class TestActivationCli(unittest.TestCase):
             result = CliRunner().invoke(
                 app,
                 [
-                    "activation-compare",
+                    "activation",
+                    "compare",
                     "--audit-cache",
                     "cache.json",
                     "--activation-calibration",

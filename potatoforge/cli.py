@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import unittest
 from collections import Counter
 from pathlib import Path
 from time import perf_counter
@@ -74,9 +73,53 @@ app = typer.Typer(
     no_args_is_help=True,
     invoke_without_command=True,
     help=(
-        "Streaming safetensors inspection, LoRA, audit, profile, "
-        "and quantization commands."
+        "Profile-driven safetensors tools for inspection, profiling, "
+        "quantization, patching, and extraction."
     ),
+)
+inspect_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Consume safetensors or LoRA headers and optionally produce JSON "
+        "inspection reports."
+    ),
+)
+lora_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Consume a source checkpoint and LoRA files and produce an "
+        "unquantized merged checkpoint."
+    ),
+)
+profile_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Consume source checkpoints or weight-audit reports and produce "
+        "audit reports, analysis workbooks, or profiles."
+    ),
+)
+activation_app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "Consume source/calibration files or activation caches and produce "
+        "caches, reports, workbooks, or profiles."
+    ),
+)
+app.add_typer(
+    inspect_app,
+    name="inspect",
+    short_help="Inspect checkpoints and LoRA files.",
+)
+app.add_typer(lora_app, name="lora", short_help="Merge LoRA files.")
+app.add_typer(
+    profile_app,
+    name="profile",
+    short_help="Create or inspect profiles.",
+)
+app.add_typer(
+    activation_app,
+    name="activation",
+    short_help="Analyze activation calibration.",
 )
 VERSION = "0.1.0"
 
@@ -260,7 +303,8 @@ def main(version: bool = typer.Option(False, "--version")) -> None:
         raise typer.Exit()
 
 
-@app.command("inspect-header")
+@app.command("inspect-header", hidden=True)
+@inspect_app.command("model")
 def inspect_header(
     model_path: Path = typer.Argument(..., help="Source safetensors checkpoint."),
     output: Path | None = typer.Option(None, help="Optional JSON report path."),
@@ -316,13 +360,14 @@ def inspect_header(
     _run("inspect-header", action)
 
 
-@app.command("inspect-lora")
+@app.command("inspect-lora", hidden=True)
+@inspect_app.command("lora")
 def inspect_lora(
-    adapter_path: Path = typer.Argument(..., help="LoRA adapter checkpoint."),
+    adapter_path: Path = typer.Argument(..., help="LoRA checkpoint."),
     output: Path | None = typer.Option(None, help="Optional JSON report path."),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
-    """Inspect a LoRA adapter header without reading tensor payloads."""
+    """Inspect a LoRA header without reading tensor payloads."""
     def action() -> None:
         header = read_source_model_header(adapter_path)
         inspection = inspect_adapter_header(header)
@@ -354,18 +399,19 @@ def inspect_lora(
     _run("inspect-lora", action)
 
 
-@app.command("merge-lora")
+@app.command("merge-lora", hidden=True)
+@lora_app.command("merge")
 def merge_lora(
     source_path: Path = typer.Argument(...),
     output_path: Path = typer.Argument(...),
     adapter_path: list[Path] = typer.Option(
-        ..., "--adapter-path", help="Adapter path; repeat for multiple adapters."
+        ..., "--adapter-path", help="LoRA path; repeat for multiple LoRA files."
     ),
     adapter_strength: list[float] = typer.Option(
-        ..., "--adapter-strength", help="Adapter strength; pair by option order."
+        ..., "--adapter-strength", help="LoRA strength; pair by option order."
     ),
 ) -> None:
-    """Merge one or more LoRA adapters into a new checkpoint."""
+    """Merge one or more LoRA files into a new checkpoint."""
     def action() -> None:
         adapters = _build_adapter_inputs(adapter_path, adapter_strength)
         merge_bf16_adapters(
@@ -386,7 +432,8 @@ def merge_lora(
     _run("merge-lora", action)
 
 
-@app.command("audit")
+@app.command("audit", hidden=True)
+@profile_app.command("audit")
 def audit(
     source_path: Path = typer.Argument(...),
     output: Path = typer.Option(..., help="JSON audit report path."),
@@ -428,7 +475,8 @@ def audit(
     _run("audit", action)
 
 
-@app.command("activation-audit")
+@app.command("activation-audit", hidden=True)
+@activation_app.command("audit")
 def activation_audit(
     source_path: Path = typer.Argument(...),
     device: Literal["cpu", "cuda"] = typer.Option(
@@ -528,7 +576,8 @@ def activation_audit(
     _run("activation-audit", action)
 
 
-@app.command("activation-score")
+@app.command("activation-score", hidden=True)
+@activation_app.command("score")
 def activation_score(
     audit_cache: Path = typer.Option(
         ...,
@@ -569,7 +618,8 @@ def activation_score(
     _run("activation-score", action)
 
 
-@app.command("activation-inspect")
+@app.command("activation-inspect", hidden=True)
+@activation_app.command("inspect")
 def activation_inspect(
     audit_cache: Path = typer.Option(
         ...,
@@ -617,7 +667,8 @@ def activation_inspect(
     _run("activation-inspect", action)
 
 
-@app.command("activation-optimize")
+@app.command("activation-optimize", hidden=True)
+@activation_app.command("optimize")
 def activation_optimize(
     audit_cache: Path = typer.Option(
         ...,
@@ -720,7 +771,8 @@ def activation_optimize(
     _run("activation-optimize", action)
 
 
-@app.command("activation-compare")
+@app.command("activation-compare", hidden=True)
+@activation_app.command("compare")
 def activation_compare(
     audit_cache: Path = typer.Option(
         ...,
@@ -805,7 +857,8 @@ def activation_compare(
     _run("activation-compare", action)
 
 
-@app.command("calibration-merge")
+@app.command("calibration-merge", hidden=True)
+@activation_app.command("merge")
 def calibration_merge(
     calibration_paths: list[Path] = typer.Argument(
         ...,
@@ -836,7 +889,8 @@ def calibration_merge(
     _run("calibration-merge", action)
 
 
-@app.command("analyze")
+@app.command("analyze", hidden=True)
+@profile_app.command("analyze")
 def analyze(
     audit_path: Path | None = typer.Argument(
         None,
@@ -1022,7 +1076,8 @@ def analyze(
     _run("analyze", action)
 
 
-@app.command("optimize")
+@app.command("optimize", hidden=True)
+@profile_app.command("optimize")
 def optimize(
     audit_path: Path | None = typer.Argument(None),
     output_path: Path | None = typer.Argument(None),
@@ -1179,7 +1234,7 @@ def quantize(
     adapter_path: list[Path] = typer.Option(
         [],
         "--adapter-path",
-        help="LoRA adapter path; repeat for multiple adapters.",
+        help="LoRA path; repeat for multiple LoRA files.",
     ),
     adapter_strength: list[float] = typer.Option(
         [],
@@ -1370,19 +1425,6 @@ def extract(
         )
 
     _run("extract", action)
-
-
-@app.command("test")
-def test(
-    verbosity: int = typer.Option(1, min=0, max=2),
-) -> None:
-    """Run the standard-library test suite."""
-    result = unittest.TextTestRunner(verbosity=verbosity).run(
-        unittest.defaultTestLoader.discover("tests")
-    )
-    if not result.wasSuccessful():
-        raise typer.Exit(5)
-    typer.echo("status: success")
 
 
 if __name__ == "__main__":

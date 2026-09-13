@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +8,7 @@ from unittest.mock import call, patch
 
 from typer.testing import CliRunner
 
+from potatoforge import cli
 from potatoforge.audits.profile_optimizer import OptimizedProfile
 from potatoforge.cli import app
 from potatoforge.lora.lora_merge import AdapterMergeInput
@@ -17,23 +19,163 @@ class TestCli(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
 
-    def test_help_lists_direct_commands(self) -> None:
+    @staticmethod
+    def _help_command_names(output: str) -> set[str]:
+        names = set()
+        in_commands = False
+        for raw_line in output.splitlines():
+            line = raw_line.replace("│", "|")
+            if "Commands" in line:
+                in_commands = True
+                continue
+            if not in_commands:
+                continue
+            match = re.match(r"\s*\|\s+([a-z][a-z-]*)\s+", line)
+            if match:
+                names.add(match.group(1))
+        return names
+
+    def test_help_lists_canonical_commands(self) -> None:
         result = self.runner.invoke(app, ["--help"])
 
         self.assertEqual(result.exit_code, 0, result.stdout)
-        for command in (
-            "inspect-header",
-            "inspect-lora",
-            "merge-lora",
-            "audit",
-            "analyze",
-            "optimize",
-            "quantize",
-            "patch",
-            "extract",
-            "test",
-        ):
-            self.assertIn(command, result.stdout)
+        self.assertEqual(
+            self._help_command_names(result.stdout),
+            {
+                "inspect",
+                "lora",
+                "profile",
+                "activation",
+                "quantize",
+                "patch",
+                "extract",
+            },
+        )
+
+        test_result = self.runner.invoke(app, ["test", "--help"])
+        self.assertNotEqual(test_result.exit_code, 0)
+
+    def test_group_help_lists_canonical_subcommands(self) -> None:
+        expected = {
+            ("inspect",): (
+                {"model", "lora"},
+                "Consume safetensors or LoRA headers",
+            ),
+            ("lora",): (
+                {"merge"},
+                "Consume a source checkpoint and LoRA files",
+            ),
+            ("profile",): (
+                {"audit", "analyze", "optimize"},
+                "Consume source checkpoints or weight-audit reports",
+            ),
+            ("activation",): (
+                {
+                    "audit",
+                    "inspect",
+                    "score",
+                    "optimize",
+                    "compare",
+                    "merge",
+                },
+                "Consume source/calibration files or activation caches",
+            ),
+        }
+        for command, (expected_commands, purpose) in expected.items():
+            with self.subTest(command=command):
+                result = self.runner.invoke(app, [*command, "--help"])
+
+                self.assertEqual(result.exit_code, 0, result.stdout)
+                self.assertEqual(
+                    self._help_command_names(result.stdout),
+                    expected_commands,
+                )
+                self.assertIn(purpose, " ".join(result.stdout.split()))
+
+    def test_legacy_aliases_are_hidden_and_share_callbacks(self) -> None:
+        aliases = {
+            "inspect-header": (
+                "inspect_header",
+                ("inspect", "model"),
+                ["model.safetensors"],
+            ),
+            "inspect-lora": (
+                "inspect_lora",
+                ("inspect", "lora"),
+                ["adapter.safetensors"],
+            ),
+            "merge-lora": (
+                "merge_lora",
+                ("lora", "merge"),
+                [
+                    "source.safetensors",
+                    "merged.safetensors",
+                    "--adapter-path",
+                    "adapter.safetensors",
+                    "--adapter-strength",
+                    "1",
+                ],
+            ),
+            "audit": (
+                "audit",
+                ("profile", "audit"),
+                ["source.safetensors", "--output", "audit.json"],
+            ),
+            "analyze": (
+                "analyze",
+                ("profile", "analyze"),
+                ["--source", "source.safetensors", "--tensor", "layer.weight"],
+            ),
+            "optimize": (
+                "optimize",
+                ("profile", "optimize"),
+                [
+                    "audit.json",
+                    "profile.json",
+                    "--profile-id",
+                    "profile",
+                    "--target-size-gib",
+                    "1",
+                ],
+            ),
+        }
+        registered = {
+            command.name: command for command in cli.app.registered_commands
+        }
+        for alias, (function_name, canonical, arguments) in aliases.items():
+            with self.subTest(alias=alias):
+                command = registered[alias]
+                self.assertTrue(command.hidden)
+                self.assertIs(command.callback, getattr(cli, function_name))
+
+                with patch(
+                    "potatoforge.cli._run",
+                    side_effect=lambda name, _action: print(name),
+                ) as legacy_run:
+                    legacy_result = self.runner.invoke(
+                        app,
+                        [alias, *arguments],
+                    )
+                with patch(
+                    "potatoforge.cli._run",
+                    side_effect=lambda name, _action: print(name),
+                ) as canonical_run:
+                    canonical_result = self.runner.invoke(
+                        app,
+                        [*canonical, *arguments],
+                    )
+
+                self.assertEqual(legacy_result.exit_code, 0, legacy_result.output)
+                self.assertEqual(
+                    canonical_result.exit_code,
+                    0,
+                    canonical_result.output,
+                )
+                self.assertEqual(legacy_result.output, canonical_result.output)
+                self.assertEqual(
+                    legacy_run.call_args.args[0],
+                    canonical_run.call_args.args[0],
+                )
 
     def test_patch_accepts_a_tensor_prefix(self) -> None:
         plan = SimpleNamespace(selected_tensor_count=2)
@@ -84,6 +226,42 @@ class TestCli(unittest.TestCase):
             "blocks",
         )
 
+    def test_lora_merge_canonical_dispatches_to_existing_merger(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "merged.safetensors"
+
+            def write_output(*_args: object, **_kwargs: object) -> None:
+                output.write_bytes(b"merged")
+
+            with patch(
+                "potatoforge.cli.merge_bf16_adapters",
+                side_effect=write_output,
+            ) as merge_mock:
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "lora",
+                        "merge",
+                        str(root / "source.safetensors"),
+                        str(output),
+                        "--adapter-path",
+                        str(root / "adapter.safetensors"),
+                        "--adapter-strength",
+                        "0.5",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            merge_mock.call_args.args[:3],
+            (
+                root / "source.safetensors",
+                output,
+                (AdapterMergeInput(root / "adapter.safetensors", 0.5),),
+            ),
+        )
+
     def test_version_is_available(self) -> None:
         result = self.runner.invoke(app, ["--version"])
 
@@ -112,6 +290,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "audit",
                     "model.safetensors",
                     "--output",
@@ -126,9 +305,9 @@ class TestCli(unittest.TestCase):
         self.assertFalse(audit_mock.call_args.kwargs["include_plain_methods"])
 
     def test_int6_runtime_toggle_is_not_a_cli_option(self) -> None:
-        for command in ("analyze", "optimize"):
+        for command in (("profile", "analyze"), ("profile", "optimize")):
             with self.subTest(command=command):
-                result = self.runner.invoke(app, [command, "--help"])
+                result = self.runner.invoke(app, [*command, "--help"])
 
                 self.assertEqual(result.exit_code, 0, result.stdout)
                 self.assertNotIn("enable-potatoforge-int6-runtime", result.stdout)
@@ -158,7 +337,8 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
-                    "inspect-header",
+                    "inspect",
+                    "model",
                     "model.safetensors",
                     "--quantization",
                 ],
@@ -208,7 +388,7 @@ class TestCli(unittest.TestCase):
         ):
             result = self.runner.invoke(
                 app,
-                ["inspect-header", "model.safetensors", "--quantization"],
+                ["inspect", "model", "model.safetensors", "--quantization"],
             )
 
         self.assertEqual(result.exit_code, 0, result.stdout)
@@ -248,6 +428,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "optimize",
                     "--config",
                     "config.toml",
@@ -273,6 +454,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "--audit",
                     "audit.json",
@@ -298,6 +480,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "--audit",
                     "audit.json",
@@ -334,6 +517,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "--source",
                     "model.safetensors",
@@ -380,6 +564,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "--source",
                     "model.safetensors",
@@ -401,7 +586,7 @@ class TestCli(unittest.TestCase):
     def test_analyze_source_requires_a_tensor(self) -> None:
         result = self.runner.invoke(
             app,
-            ["analyze", "--source", "model.safetensors"],
+            ["profile", "analyze", "--source", "model.safetensors"],
         )
 
         self.assertEqual(result.exit_code, 3, result.output)
@@ -411,6 +596,7 @@ class TestCli(unittest.TestCase):
         result = self.runner.invoke(
             app,
             [
+                "profile",
                 "analyze",
                 "--audit",
                 "audit.json",
@@ -447,6 +633,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "audit.json",
                     "--target-size-gib",
@@ -509,6 +696,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "optimize",
                     "--config",
                     "config.toml",
@@ -552,6 +740,7 @@ class TestCli(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
+                    "profile",
                     "analyze",
                     "audit.json",
                     "--output",
