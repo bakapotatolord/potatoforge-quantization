@@ -22,6 +22,7 @@ CONVROT_ACTIONS = (
     "int8_convrot",
     "convrot_w4a4",
     "convrot_w4a4_mse",
+    "int5_convrot",
     "int6_convrot",
 )
 CONVROT_INTERNAL_STAGES = (
@@ -392,6 +393,7 @@ class TimingCollector:
             "int8_convrot": "INT8 ConvRot",
             "convrot_w4a4": "W4A4 ConvRot",
             "convrot_w4a4_mse": "W4A4 ConvRot MSE",
+            "int5_convrot": "INT5 ConvRot",
             "int6_convrot": "INT6 ConvRot",
         }
         for action in CONVROT_ACTIONS:

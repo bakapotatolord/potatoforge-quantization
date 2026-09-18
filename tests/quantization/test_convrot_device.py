@@ -22,6 +22,14 @@ from potatoforge.quantization.int6_rowwise import (
     quantize_int6_convrot,
     quantize_int6_convrot_packed,
 )
+from potatoforge.quantization.int5_packing import (
+    Int5PackedResult,
+    unpack_int5_row_major,
+)
+from potatoforge.quantization.int5_rowwise import (
+    quantize_int5_convrot,
+    quantize_int5_convrot_packed,
+)
 from potatoforge.timing import TimingCollector
 
 
@@ -183,6 +191,35 @@ class TestConvRotDevice(unittest.TestCase):
         self.assertTrue(torch.allclose(cuda.scales, cpu.scales, atol=1e-6))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_int5_convrot_cuda_matches_cpu_and_returns_packed_cpu_result(
+        self,
+    ) -> None:
+        weights = torch.arange(512, dtype=torch.float32).reshape(2, 256)
+
+        cpu = quantize_int5_convrot(weights)
+        timings: dict[str, float] = {}
+        cuda = quantize_int5_convrot_packed(
+            weights,
+            device="cuda",
+            internal_timings=timings,
+        )
+        cuda_codes = unpack_int5_row_major(
+            Int5PackedResult(cuda.packed_codes, cuda.original_shape),
+        )
+
+        self.assertEqual(cuda.packed_codes.device.type, "cpu")
+        self.assertEqual(cuda.scales.device.type, "cpu")
+        self.assertEqual(cuda.packed_codes.shape[1], 256 // 8 * 5)
+        self.assertEqual(cuda.scales.shape, cpu.scales.shape)
+        self.assertLessEqual(
+            int((cuda_codes.to(torch.int16) - cpu.codes.to(torch.int16)).abs().max()),
+            1,
+        )
+        self.assertTrue(torch.allclose(cuda.scales, cpu.scales, atol=1e-6))
+        for stage in (*INT6_VALIDATION_STAGES, *CUDA_STAGES):
+            self.assertIn(stage, timings)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_new_cuda_paths_record_their_internal_stages(self) -> None:
         weights = torch.arange(512, dtype=torch.float32).reshape(2, 256)
 
@@ -261,6 +298,7 @@ class TestConvRotDevice(unittest.TestCase):
         ) as synchronize:
             quantize_convrot_w4a4(weights, device="cuda")
             quantize_convrot_w4a4_mse(weights, device="cuda")
+            quantize_int5_convrot_packed(weights, device="cuda")
             quantize_int6_convrot_packed(weights, device="cuda")
 
         synchronize.assert_not_called()
@@ -280,6 +318,11 @@ class TestConvRotDevice(unittest.TestCase):
                     "prefix": "int6.",
                     "suffixes": (".weight",),
                 },
+                {
+                    "action": "int5_convrot",
+                    "prefix": "int5.",
+                    "suffixes": (".weight",),
+                },
             ),
         }
         weights = torch.arange(512, dtype=torch.float32).reshape(2, 256)
@@ -293,6 +336,7 @@ class TestConvRotDevice(unittest.TestCase):
                 {
                     "w4.weight": weights,
                     "int6.weight": weights.clone(),
+                    "int5.weight": weights.clone(),
                     "kept": torch.tensor([1.0], dtype=torch.float32),
                 },
                 str(source_path),
@@ -335,6 +379,14 @@ class TestConvRotDevice(unittest.TestCase):
                 record.internal_stages
                 for record in timing.records
                 if record.action == "int6_convrot"
+            ),
+        )
+        self.assertIn(
+            "pack",
+            next(
+                record.internal_stages
+                for record in timing.records
+                if record.action == "int5_convrot"
             ),
         )
 

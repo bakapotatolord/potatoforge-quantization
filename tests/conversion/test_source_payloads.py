@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 from unittest.mock import ANY, patch
 
@@ -8,6 +9,7 @@ from safetensors.torch import save_file
 
 from potatoforge.planning import (
     CONVROT_W4A4_MARKER_PAYLOAD,
+    INT5_CONVROT_MARKER_PAYLOAD,
     INT6_CONVROT_MARKER_PAYLOAD,
     INT6_ROWWISE_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_PAYLOAD,
@@ -26,6 +28,16 @@ from potatoforge.quantization.int6_rowwise import (
     quantize_int6_rowwise,
 )
 from potatoforge.quantization.int6_packing import pack_int6_row_major
+from potatoforge.quantization.int5_packing import (
+    Int5PackedResult,
+    pack_int5_row_major,
+    unpack_int5_row_major,
+)
+from potatoforge.quantization.int5_rowwise import (
+    Int5RowwiseResult,
+    dequantize_int5_convrot,
+    quantize_int5_convrot,
+)
 from potatoforge.quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
@@ -381,6 +393,75 @@ class TestSourcePayloads(unittest.TestCase):
         self.assertEqual(payloads[0][1], tensor_to_raw_bytes(packed.packed_codes))
         self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
         self.assertEqual(payloads[2][1], INT6_CONVROT_MARKER_PAYLOAD)
+
+    def test_stream_source_payload_int5_convrot_matches_runtime_contract(self) -> None:
+        tensor = torch.zeros((2, 256), dtype=torch.bfloat16)
+        tensor[0, 0] = 70.0
+        tensor[1, 1] = -12.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int5_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            entries = build_plan(header.tensors, profile)
+            payloads = list(stream_output_payloads(source_path, entries))
+
+        self.assertEqual(
+            [name for name, _ in payloads],
+            [
+                "blocks.0.attn.wq.weight",
+                "blocks.0.attn.wq.weight_scale",
+                "blocks.0.attn.wq.comfy_quant",
+            ],
+        )
+        weight_spec, scale_spec, marker_spec = entries[0]["output_tensors"]
+        self.assertEqual(weight_spec.dtype, "U8")
+        self.assertEqual(weight_spec.shape, (2, 160))
+        self.assertEqual(scale_spec.dtype, "F32")
+        self.assertEqual(scale_spec.shape, (2, 1))
+        self.assertEqual(marker_spec.dtype, "U8")
+
+        result = quantize_int5_convrot(tensor)
+        packed = pack_int5_row_major(result.codes)
+        self.assertEqual(payloads[0][1], tensor_to_raw_bytes(packed.packed_codes))
+        self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
+        self.assertEqual(payloads[2][1], INT5_CONVROT_MARKER_PAYLOAD)
+
+        emitted_codes = torch.frombuffer(
+            bytearray(payloads[0][1]),
+            dtype=torch.uint8,
+        ).reshape(weight_spec.shape)
+        emitted_scales = torch.frombuffer(
+            bytearray(payloads[1][1]),
+            dtype=torch.float32,
+        ).reshape(scale_spec.shape)
+        decoded = unpack_int5_row_major(
+            Int5PackedResult(emitted_codes, tuple(tensor.shape))
+        )
+        self.assertTrue(torch.equal(decoded, result.codes))
+        self.assertTrue(
+            torch.equal(
+                dequantize_int5_convrot(
+                    Int5RowwiseResult(decoded, emitted_scales)
+                ),
+                dequantize_int5_convrot(result),
+            )
+        )
+
+        marker = json.loads(payloads[2][1])
+        self.assertEqual(marker["format"], "int5_rowwise")
+        self.assertIs(marker["convrot"], True)
+        self.assertEqual(marker["convrot_groupsize"], 256)
 
     def test_stream_source_payload_convrot_w4a4(self) -> None:
         tensor = torch.zeros(

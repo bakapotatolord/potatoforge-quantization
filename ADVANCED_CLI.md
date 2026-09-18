@@ -83,8 +83,8 @@ The estimate prints `estimated_output_bytes`, `estimated_output_mib`, and
 `estimated_output_gib`, including the safetensors header and quantization
 metadata.
 
-Use `--device cuda` for the supported ConvRot paths when CUDA is available.
-Plain `int8` and `int6_rowwise` remain CPU paths; CPU is the default.
+Use `--device cuda` for supported ConvRot paths when CUDA is available. Plain
+`int8` and `int6_rowwise` remain CPU paths; CPU is the default.
 
 ```powershell
 uv run potatoforge quantize `
@@ -337,10 +337,13 @@ uv run potatoforge extract `
 ## Formats and output safety
 
 Profiles can select `keep`, `int8`, `int8_convrot`, `int6_rowwise`,
-`int6_convrot`, `convrot_w4a4`, or `convrot_w4a4_mse` per tensor. ConvRot
-formats use the runtime-specific group size and storage layout defined by
-their format markers. Rules are validated before conversion and applied in
-order by prefix and suffix, with an explicit default action.
+`int5_convrot`, `int6_convrot`, `convrot_w4a4`, or `convrot_w4a4_mse` per
+tensor. ConvRot formats use the runtime-specific group size and storage layout
+defined by their format markers. `int5_convrot` requires input widths divisible
+by 256 and writes the `int5_rowwise` marker; loading it requires the
+INT5-capable `ComfyUI-PotatoForge-INT6` runtime. This does not add a plain
+`int5_rowwise` PotatoForge action. Rules are validated before conversion and
+applied in order by prefix and suffix, with an explicit default action.
 
 Conversion, LoRA merging, patching, and extraction refuse source/output
 collisions and existing artifacts unless the operation exposes and receives

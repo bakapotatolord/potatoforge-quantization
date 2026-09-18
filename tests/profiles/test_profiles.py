@@ -344,6 +344,24 @@ class TestProfiles(unittest.TestCase):
             "int6_convrot",
         )
 
+    def test_loads_int5_convrot_action(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "int5_convrot",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            }
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertEqual(
+            resolve_profile(profile, "blocks.0.attn.wq.weight"),
+            "int5_convrot",
+        )
+
     def test_loads_w4a4_mse_action(self) -> None:
         document = self._base_document()
         document["rules"] = [

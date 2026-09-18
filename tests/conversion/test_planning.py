@@ -4,6 +4,7 @@ import unittest
 from potatoforge.planning import (
     BFLOAT16_BYTES_PER_ELEMENT,
     CONVROT_W4A4_MARKER_BYTE_COUNT,
+    INT5_CONVROT_MARKER_BYTE_COUNT,
     INT6_CONVROT_MARKER_BYTE_COUNT,
     INT6_ROWWISE_MARKER_BYTE_COUNT,
     INT8_MARKER_PAYLOAD,
@@ -628,6 +629,41 @@ class TestInt8TensorwisePlan(unittest.TestCase):
             [(2, 192), (2, 1), (INT6_CONVROT_MARKER_BYTE_COUNT,)],
         )
 
+    def test_plans_int5_convrot_weights_and_byte_counts(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 256],
+                "data_offsets": [0, 2048],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int5_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+        layout = build_output_layout(entries)
+
+        self.assertEqual(entries[0]["action"], "int5_convrot")
+        self.assertEqual(
+            [tensor.spec.shape for tensor in layout.tensors],
+            [(2, 160), (2, 1), (INT5_CONVROT_MARKER_BYTE_COUNT,)],
+        )
+        self.assertEqual(layout.tensors[0].spec.dtype, "U8")
+        self.assertEqual(layout.tensors[1].spec.dtype, "F32")
+        self.assertEqual(
+            entries[0]["estimated_bytes"],
+            sum(tensor.spec.byte_count for tensor in layout.tensors),
+        )
+        self.assertEqual(layout.raw_data_bytes, entries[0]["estimated_bytes"])
+
     def test_keeps_int6_rowwise_weights_with_ineligible_width(self) -> None:
         header: dict[str, TensorDescriptor] = {
             "blocks.0.attn.wq.weight": {
@@ -665,6 +701,30 @@ class TestInt8TensorwisePlan(unittest.TestCase):
             "rules": (
                 {
                     "action": "int6_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        entries = build_plan(header, profile)
+
+        self.assertEqual(entries[0]["action"], "keep")
+        self.assertIn("divisible by 256", entries[0]["reason"])
+
+    def test_keeps_int5_convrot_weights_with_ineligible_width(self) -> None:
+        header: dict[str, TensorDescriptor] = {
+            "blocks.0.attn.wq.weight": {
+                "dtype": "F32",
+                "shape": [2, 4],
+                "data_offsets": [0, 32],
+            },
+        }
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int5_convrot",
                     "prefix": "blocks.",
                     "suffixes": (".attn.wq.weight",),
                 },

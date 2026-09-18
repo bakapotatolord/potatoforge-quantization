@@ -5,6 +5,7 @@ from typing import Any, BinaryIO, Callable, TypeAlias
 
 from .planning import (
     CONVROT_W4A4_MARKER_PAYLOAD,
+    INT5_CONVROT_MARKER_PAYLOAD,
     INT6_CONVROT_MARKER_PAYLOAD,
     INT6_ROWWISE_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_PAYLOAD,
@@ -22,6 +23,7 @@ from .quantization.int6_rowwise import (
     quantize_int6_rowwise,
 )
 from .quantization.int6_packing import pack_int6_row_major
+from .quantization.int5_rowwise import quantize_int5_convrot_packed
 from .quantization import (
     quantize_int8_convrot,
     quantize_int8_tensorwise,
@@ -46,6 +48,7 @@ _TORCH_DTYPES: dict[str, torch.dtype] = {
     "F32": torch.float32,
     "F64": torch.float64,
 }
+
 
 def tensor_to_raw_bytes(tensor: torch.Tensor) -> bytes:
     if tensor.device.type != "cpu":
@@ -207,6 +210,8 @@ def _stream_entry_payloads(
     record: TensorTiming | None = None,
     device: str = "cpu",
 ) -> Iterator[TensorPayload]:
+    action = entry["action"]
+
     if timing is not None:
         if record is None:
             record = timing.start_tensor(entry)
@@ -214,8 +219,6 @@ def _stream_entry_payloads(
             record,
             tuple(output.name for output in entry["output_tensors"]),
         )
-
-    action = entry["action"]
 
     if action == "keep":
         (output_spec,) = entry["output_tensors"]
@@ -264,6 +267,9 @@ def _stream_entry_payloads(
     elif action == "int6_convrot":
         quantizer = quantize_int6_convrot
         marker_payload = INT6_CONVROT_MARKER_PAYLOAD
+    elif action == "int5_convrot":
+        quantizer = quantize_int5_convrot_packed
+        marker_payload = INT5_CONVROT_MARKER_PAYLOAD
     elif action == "int8_convrot":
         quantizer = quantize_int8_convrot
         marker_payload = INT8_CONVROT_MARKER_PAYLOAD
@@ -294,8 +300,16 @@ def _stream_entry_payloads(
             result = quantize_convrot_w4a4(weights, device=device)
         else:
             result = quantize_convrot_w4a4_mse(weights, device=device)
-    elif timing is None and action == "int6_convrot" and device != "cpu":
-        result = quantize_int6_convrot_packed(weights, device=device)
+    elif (
+        timing is None
+        and action in ("int5_convrot", "int6_convrot")
+        and device != "cpu"
+    ):
+        result = (
+            quantize_int5_convrot_packed(weights, device=device)
+            if action == "int5_convrot"
+            else quantize_int6_convrot_packed(weights, device=device)
+        )
     elif timing is None:
         result = quantizer(weights)
     elif action == "int8_convrot":
@@ -320,7 +334,12 @@ def _stream_entry_payloads(
                     ),
                 )
     elif (
-        action in ("convrot_w4a4", "convrot_w4a4_mse", "int6_convrot")
+        action in (
+            "convrot_w4a4",
+            "convrot_w4a4_mse",
+            "int5_convrot",
+            "int6_convrot",
+        )
         and device != "cpu"
     ):
         with timed_stage(record, "quantize"):
@@ -344,6 +363,16 @@ def _stream_entry_payloads(
                         else None
                     ),
                 )
+            elif action == "int5_convrot":
+                result = quantize_int5_convrot_packed(
+                    weights,
+                    device=device,
+                    internal_timings=(
+                        record.internal_stages
+                        if record is not None
+                        else None
+                    ),
+                )
             else:
                 result = quantize_int6_convrot_packed(
                     weights,
@@ -358,7 +387,7 @@ def _stream_entry_payloads(
         with timed_stage(record, "quantize"):
             result = quantizer(weights)
 
-    if action == "int6_convrot" and device != "cpu":
+    if action in ("int5_convrot", "int6_convrot") and device != "cpu":
         code_tensor = result.packed_codes
     elif action in ("int6_rowwise", "int6_convrot"):
         if timing is None:

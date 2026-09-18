@@ -149,4 +149,4 @@ start with `blocks`.
 
 - [Advanced CLI reference](ADVANCED_CLI.md)
 - [ComfyUI-PotatoForge](https://github.com/bakapotatolord/ComfyUI-PotatoForge) for activation calibration and quantization patches
-- [ComfyUI-PotatoForge-INT6](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INT6) for INT6 and INT6 ConvRot loading
+- [ComfyUI-PotatoForge-INTx](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INTx) for INT5/INT6 and ConvRot loading

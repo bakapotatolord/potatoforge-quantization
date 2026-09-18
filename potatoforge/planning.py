@@ -99,6 +99,18 @@ INT6_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
     INT6_CONVROT_MARKER_PAYLOAD,
 )
 
+INT5_CONVROT_MARKER = {
+    "format": "int5_rowwise",
+    "convrot": True,
+    "convrot_groupsize": CONVROT_GROUP_SIZE,
+}
+INT5_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
+    INT5_CONVROT_MARKER,
+).encode("utf-8")
+INT5_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
+    INT5_CONVROT_MARKER_PAYLOAD,
+)
+
 INT8_CONVROT_MARKER = {
     "format": "int8_tensorwise",
     "convrot": True,
@@ -292,6 +304,30 @@ def plan_int6_convrot(
     )
 
 
+def plan_int5_convrot(
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+) -> QuantizedPlan:
+    """Plan packed rowwise W5 weights with the fixed ConvRot contract."""
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "ConvRot INT5",
+    )
+    if in_features % CONVROT_GROUP_SIZE != 0:
+        raise ValueError(
+            "ConvRot INT5 input features must be divisible by "
+            f"{CONVROT_GROUP_SIZE}."
+        )
+    return _build_quantized_plan(
+        tensor_name,
+        code_shape=(out_features, (in_features // 8) * 5),
+        scale_shape=(out_features, 1),
+        marker_payload=INT5_CONVROT_MARKER_PAYLOAD,
+        storage_dtype="U8",
+    )
+
+
 def plan_int8_convrot(
     tensor_name: str,
     descriptor: TensorDescriptor,
@@ -343,6 +379,7 @@ def plan_convrot_w4a4(
 _PLAN_BUILDERS: Mapping[QuantizationAction, PlanBuilder] = {
     "int8": plan_int8_tensorwise,
     "int6_rowwise": plan_int6_rowwise,
+    "int5_convrot": plan_int5_convrot,
     "int6_convrot": plan_int6_convrot,
     "int8_convrot": plan_int8_convrot,
     "convrot_w4a4": plan_convrot_w4a4,
