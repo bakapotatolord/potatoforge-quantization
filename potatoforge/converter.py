@@ -23,6 +23,10 @@ from .source_payloads import (
 from .timing import TimingCollector
 
 
+class ConversionCancelled(Exception):
+    """Raised when a conversion is cooperatively stopped between tensors."""
+
+
 def _validate_device(device: str) -> None:
     if device not in ("cpu", "cuda"):
         raise ValueError("Quantization device must be cpu or cuda.")
@@ -32,12 +36,19 @@ def _validate_device(device: str) -> None:
         )
 
 
-def print_conversion_progress(entry_index: int, entry_count: int, entry: PlanEntry) -> None:
-    print(
+def format_conversion_progress(
+    entry_index: int,
+    entry_count: int,
+    entry: PlanEntry,
+) -> str:
+    return (
         f"[{entry_index}/{entry_count}] "
-        f"{entry['action']}: {entry['tensor_name']}",
-        flush=True,
+        f"{entry['action']}: {entry['tensor_name']}"
     )
+
+
+def print_conversion_progress(entry_index: int, entry_count: int, entry: PlanEntry) -> None:
+    print(format_conversion_progress(entry_index, entry_count, entry), flush=True)
 
 
 def estimate_output_bytes(
@@ -92,7 +103,6 @@ def convert_model(
 
     plan_entries = build_plan(model.tensors, profile)
     layout = build_output_layout(plan_entries)
-
     source_payload_transform = build_adapter_merger(model, adapters)
     payloads = stream_output_payloads(
         source,
@@ -103,16 +113,20 @@ def convert_model(
         device=device,
     )
 
-    write_safetensors_file(
-        partial,
-        layout,
-        payloads,
-        metadata={
-            **model.metadata,
-            **build_quantization_metadata(plan_entries),
-        },
-        timing=timing,
-    )
+    try:
+        write_safetensors_file(
+            partial,
+            layout,
+            payloads,
+            metadata={
+                **model.metadata,
+                **build_quantization_metadata(plan_entries),
+            },
+            timing=timing,
+        )
+    except ConversionCancelled:
+        partial.unlink(missing_ok=True)
+        raise
 
     partial.rename(output)
     if timing is not None:

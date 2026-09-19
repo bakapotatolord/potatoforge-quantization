@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict, cast
 
+from .conversion_method_types import QuantizationAction
 from .profile_documents import (
     load_json_object,
     require_format_version,
@@ -9,28 +10,7 @@ from .profile_documents import (
 )
 
 
-QuantizationAction = Literal[
-    "keep",
-    "int8",
-    "int6_rowwise",
-    "int5_convrot",
-    "int6_convrot",
-    "int8_convrot",
-    "convrot_w4a4",
-    "convrot_w4a4_mse",
-]
 KeepDType = Literal["BF16"]
-
-_SUPPORTED_ACTIONS: tuple[QuantizationAction, ...] = (
-    "keep",
-    "int8",
-    "int6_rowwise",
-    "int5_convrot",
-    "int6_convrot",
-    "int8_convrot",
-    "convrot_w4a4",
-    "convrot_w4a4_mse",
-)
 
 
 class ProfileRule(TypedDict):
@@ -48,16 +28,26 @@ class QuantizationProfile(TypedDict):
     description: NotRequired[str]
 
 
+def _supported_actions(
+    *,
+    allow_keep: bool,
+) -> tuple[QuantizationAction, ...]:
+    from .conversion_methods import supported_quantizing_actions
+
+    quantizing_actions = supported_quantizing_actions()
+    if allow_keep:
+        return ("keep", *quantizing_actions)
+    return quantizing_actions
+
+
 def validate_quantization_action(
     value: object,
     field_name: str,
     *,
     allow_keep: bool = True,
 ) -> QuantizationAction:
-    supported_actions = (
-        _SUPPORTED_ACTIONS
-        if allow_keep
-        else tuple(action for action in _SUPPORTED_ACTIONS if action != "keep")
+    supported_actions = _supported_actions(
+        allow_keep=allow_keep,
     )
     if not isinstance(value, str) or value not in supported_actions:
         raise ValueError(

@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 import unittest
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 import torch
 from tempfile import TemporaryDirectory
@@ -16,6 +16,7 @@ from potatoforge.planning import (
     INT8_MARKER_PAYLOAD,
     build_plan,
 )
+from potatoforge.conversion_method_types import EncodedQuantizedPayload
 from potatoforge.profiles import QuantizationProfile
 from potatoforge.headers.source_header import read_source_model_header
 from potatoforge.source_payloads import tensor_to_raw_bytes, stream_output_payloads
@@ -45,6 +46,38 @@ from potatoforge.quantization.convrot_w4a4 import (
 
 
 class TestSourcePayloads(unittest.TestCase):
+    def test_rejects_encoder_payload_with_wrong_shape(self) -> None:
+        tensor = torch.zeros((2, 256), dtype=torch.bfloat16)
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int8",
+                    "prefix": "blocks.",
+                    "suffixes": (".weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            entries = build_plan(header.tensors, profile)
+            malformed_method = Mock()
+            malformed_method.encode.return_value = EncodedQuantizedPayload(
+                torch.zeros(1, dtype=torch.int8),
+                torch.zeros(1, dtype=torch.float32),
+            )
+            with patch(
+                "potatoforge.source_payloads.get_conversion_method",
+                return_value=malformed_method,
+            ), self.assertRaisesRegex(
+                ValueError,
+                "int8 encoder returned invalid codes",
+            ):
+                list(stream_output_payloads(source_path, entries))
+
     def test_stream_source_payload_casts_kept_float32_to_bfloat16(self) -> None:
         tensor = torch.tensor(
             [
@@ -248,7 +281,7 @@ class TestSourcePayloads(unittest.TestCase):
             entries = build_plan(header.tensors, profile)
             expected = quantize_convrot_w4a4_mse(tensor)
             with patch(
-                "potatoforge.source_payloads.quantize_convrot_w4a4_mse",
+                "potatoforge.conversion_methods.quantize_convrot_w4a4_mse",
                 return_value=expected,
             ) as quantizer:
                 list(

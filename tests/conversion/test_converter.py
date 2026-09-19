@@ -14,6 +14,7 @@ from potatoforge.planning import (
     INT8_CONVROT_MARKER,
 )
 from potatoforge.converter import (
+    ConversionCancelled,
     convert_model,
     convert_model_from_profile,
     estimate_output_bytes,
@@ -120,6 +121,35 @@ class TestConverter(unittest.TestCase):
                     on_entry_started=None,
                 )
 
+            self.assertFalse(output_path.exists())
+
+    def test_cancelled_conversion_removes_partial_output(self) -> None:
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            output_path = Path(directory) / "output.safetensors"
+            partial_path = output_path.with_name(f"{output_path.name}.partial")
+            save_file(
+                {"tensor.weight": torch.tensor([[1.0]], dtype=torch.bfloat16)},
+                str(source_path),
+            )
+
+            def cancelled_writer(destination, *args, **kwargs):
+                Path(destination).write_bytes(b"partial")
+                raise ConversionCancelled
+
+            with patch(
+                "potatoforge.converter.write_safetensors_file",
+                side_effect=cancelled_writer,
+            ) as writer, self.assertRaises(ConversionCancelled):
+                convert_model(
+                    source_path,
+                    output_path,
+                    {"default": "keep", "rules": ()},
+                    on_entry_started=None,
+                )
+
+            self.assertEqual(writer.call_args.args[0], partial_path)
+            self.assertFalse(partial_path.exists())
             self.assertFalse(output_path.exists())
 
     def test_converter_preserves_top_level_metadata(self) -> None:
@@ -869,11 +899,11 @@ class TestConverter(unittest.TestCase):
 
             with (
                 patch(
-                    "potatoforge.source_payloads.quantize_int8_convrot",
+                    "potatoforge.conversion_methods.quantize_int8_convrot",
                     side_effect=RuntimeError("primary quantizer failed"),
                 ),
                 patch(
-                    "potatoforge.source_payloads.quantize_int8_tensorwise",
+                    "potatoforge.conversion_methods.quantize_int8_tensorwise",
                 ) as fallback_quantizer,
                 self.assertRaisesRegex(
                     RuntimeError,

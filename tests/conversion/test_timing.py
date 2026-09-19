@@ -457,6 +457,50 @@ class TestTimedConversion(unittest.TestCase):
         self.assertIn("quantize_values", convrot.internal_stages)
         self.assertIn("finalize", convrot.internal_stages)
 
+    def test_timed_cpu_int6_methods_keep_packing_separate(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.safetensors"
+            save_file(
+                {
+                    "blocks.0.weight": torch.arange(
+                        512,
+                        dtype=torch.float32,
+                    ).reshape(2, 256).to(torch.bfloat16),
+                },
+                str(source_path),
+            )
+
+            for action in ("int6_rowwise", "int6_convrot"):
+                with self.subTest(action=action):
+                    profile: QuantizationProfile = {
+                        "default": "keep",
+                        "rules": (
+                            {
+                                "action": action,
+                                "prefix": "",
+                                "suffixes": (".weight",),
+                            },
+                        ),
+                    }
+                    timing = TimingCollector()
+                    convert_model(
+                        source_path,
+                        root / f"{action}.safetensors",
+                        profile,
+                        on_entry_started=None,
+                        timing=timing,
+                    )
+                    record = next(
+                        item
+                        for item in timing.records
+                        if item.action == action
+                    )
+                    self.assertIn("quantize", record.stages)
+                    self.assertIn("pack", record.stages)
+                    self.assertGreaterEqual(record.stages["quantize"], 0.0)
+                    self.assertGreaterEqual(record.stages["pack"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

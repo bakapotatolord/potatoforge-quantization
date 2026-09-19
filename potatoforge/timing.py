@@ -18,13 +18,6 @@ TIMING_STAGES = (
     "payload_bytes",
     "write",
 )
-CONVROT_ACTIONS = (
-    "int8_convrot",
-    "convrot_w4a4",
-    "convrot_w4a4_mse",
-    "int5_convrot",
-    "int6_convrot",
-)
 CONVROT_INTERNAL_STAGES = (
     "resolve_device",
     "validate_metadata",
@@ -54,14 +47,11 @@ _MIB = 1024**2
 def _internal_stages_for_actions(
     actions: tuple[str, ...],
 ) -> tuple[str, ...]:
+    from .conversion_methods import get_conversion_method
+
     stages: list[str] = []
     for action in actions:
-        action_stages = (
-            W4A4_MSE_INTERNAL_STAGES
-            if action == "convrot_w4a4_mse"
-            else CONVROT_INTERNAL_STAGES
-        )
-        for stage in action_stages:
+        for stage in get_conversion_method(action).internal_stages:
             if stage not in stages:
                 stages.append(stage)
     return tuple(stages)
@@ -389,14 +379,10 @@ class TimingCollector:
                 f"{record.total:>8.3f} s"
             )
 
-        convrot_labels = {
-            "int8_convrot": "INT8 ConvRot",
-            "convrot_w4a4": "W4A4 ConvRot",
-            "convrot_w4a4_mse": "W4A4 ConvRot MSE",
-            "int5_convrot": "INT5 ConvRot",
-            "int6_convrot": "INT6 ConvRot",
-        }
-        for action in CONVROT_ACTIONS:
+        from .conversion_methods import convrot_conversion_methods
+
+        for method in convrot_conversion_methods():
+            action = method.action
             convrot_records = [
                 record
                 for record in self.records
@@ -404,7 +390,7 @@ class TimingCollector:
             ]
             if not convrot_records:
                 continue
-            label = convrot_labels[action]
+            label = method.label
             internal_stages = _internal_stages_for_actions((action,))
             internal_totals, quantize_total, other_internal = (
                 self.convrot_internal_totals((action,))

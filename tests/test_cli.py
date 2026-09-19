@@ -49,6 +49,7 @@ class TestCli(unittest.TestCase):
                 "quantize",
                 "patch",
                 "extract",
+                "ui",
             },
         )
 
@@ -268,6 +269,11 @@ class TestCli(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "0.1.0")
 
+    def test_ui_rejects_removed_dev_mode(self) -> None:
+        result = self.runner.invoke(app, ["ui", "--dev"])
+
+        self.assertNotEqual(result.exit_code, 0)
+
     def test_audit_forwards_device(self) -> None:
         audit_document = {
             "selection": {"dtype": "BF16"},
@@ -440,6 +446,43 @@ class TestCli(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.stdout)
         self.assertEqual(optimize_mock.call_args.args[2], 4 * 1024**3)
+
+    def test_optimize_rejects_same_audit_and_profile_paths_before_io(self) -> None:
+        with TemporaryDirectory() as directory:
+            audit = Path(directory) / "audit.json"
+            audit.write_text("original", encoding="utf-8")
+            optimized = OptimizedProfile(
+                profile={"profile_id": "same", "default": "keep", "rules": ()},
+                output_bytes=123,
+                target_bytes=456,
+                reconstruction_sse=0.0,
+            )
+            with (
+                patch("potatoforge.cli.load_weight_audit", return_value={}) as load_mock,
+                patch("potatoforge.cli.optimize_target_size", return_value=optimized),
+                patch("potatoforge.cli.write_profile") as write_mock,
+                patch("potatoforge.cli.audited_global_relative_l2", return_value=0.0),
+            ):
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "profile",
+                        "optimize",
+                        str(audit),
+                        str(audit),
+                        "--profile-id",
+                        "same",
+                        "--target-size-gib",
+                        "1.0",
+                        "--overwrite",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 3, result.output)
+            self.assertIn("Profile output path cannot be the audit report.", result.output)
+            load_mock.assert_not_called()
+            write_mock.assert_not_called()
+            self.assertEqual(audit.read_text(encoding="utf-8"), "original")
 
     def test_analyze_single_tensor_does_not_write_a_workbook(self) -> None:
         with (

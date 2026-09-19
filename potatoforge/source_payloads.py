@@ -1,15 +1,14 @@
 from collections.abc import Iterator, Sequence
 from math import prod
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, TypeAlias
+from typing import BinaryIO, Callable, TypeAlias
 
+from .conversion_method_types import (
+    EncodedQuantizedPayload,
+    QuantizationAction,
+)
+from .conversion_methods import get_conversion_method
 from .planning import (
-    CONVROT_W4A4_MARKER_PAYLOAD,
-    INT5_CONVROT_MARKER_PAYLOAD,
-    INT6_CONVROT_MARKER_PAYLOAD,
-    INT6_ROWWISE_MARKER_PAYLOAD,
-    INT8_CONVROT_MARKER_PAYLOAD,
-    INT8_MARKER_PAYLOAD,
     OutputTensorSpec,
     PlanEntry,
     QUANTIZATION_SOURCE_DTYPES,
@@ -17,22 +16,6 @@ from .planning import (
 )
 from .headers.header_reader import read_raw_data_start
 from .safetensors_writer import TensorPayload
-from .quantization.int6_rowwise import (
-    quantize_int6_convrot,
-    quantize_int6_convrot_packed,
-    quantize_int6_rowwise,
-)
-from .quantization.int6_packing import pack_int6_row_major
-from .quantization.int5_rowwise import quantize_int5_convrot_packed
-from .quantization import (
-    quantize_int8_convrot,
-    quantize_int8_tensorwise,
-)
-from .quantization.convrot_w4a4 import (
-    quantize_convrot_w4a4,
-    quantize_convrot_w4a4_mse,
-)
-from .profiles import QuantizationAction
 from .timing import TensorTiming, TimingCollector, timed_stage
 
 import torch
@@ -202,6 +185,44 @@ def stream_bf16_source_tensors(
                 tensor_name=tensor_name,
             )
 
+
+def _validate_encoded_payload(
+    action: QuantizationAction,
+    entry: PlanEntry,
+    payload: EncodedQuantizedPayload,
+) -> None:
+    weight_spec, scale_spec, _ = entry["output_tensors"]
+    expected_dtypes = {
+        "I8": torch.int8,
+        "U8": torch.uint8,
+        "F32": torch.float32,
+    }
+
+    for field_name, tensor, spec in (
+        ("codes", payload.codes, weight_spec),
+        ("scales", payload.scales, scale_spec),
+    ):
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(
+                f"{action} encoder returned non-tensor {field_name}."
+            )
+        if tensor.device.type != "cpu":
+            raise ValueError(
+                f"{action} encoder returned GPU {field_name}; "
+                "encoded payloads must be on the CPU."
+            )
+        expected_dtype = expected_dtypes.get(spec.dtype)
+        if (
+            tensor.dtype != expected_dtype
+            or tuple(tensor.shape) != spec.shape
+        ):
+            raise ValueError(
+                f"{action} encoder returned invalid {field_name}: "
+                f"expected {spec.dtype}{spec.shape}, "
+                f"got {tensor.dtype}{tuple(tensor.shape)}."
+            )
+
+
 def _stream_entry_payloads(
     entry: PlanEntry,
     source_bytes: bytes,
@@ -257,166 +278,27 @@ def _stream_entry_payloads(
         record=record,
     )
 
-    quantizer: Callable[[torch.Tensor], Any]
-    if action == "int8":
-        quantizer = quantize_int8_tensorwise
-        marker_payload = INT8_MARKER_PAYLOAD
-    elif action == "int6_rowwise":
-        quantizer = quantize_int6_rowwise
-        marker_payload = INT6_ROWWISE_MARKER_PAYLOAD
-    elif action == "int6_convrot":
-        quantizer = quantize_int6_convrot
-        marker_payload = INT6_CONVROT_MARKER_PAYLOAD
-    elif action == "int5_convrot":
-        quantizer = quantize_int5_convrot_packed
-        marker_payload = INT5_CONVROT_MARKER_PAYLOAD
-    elif action == "int8_convrot":
-        quantizer = quantize_int8_convrot
-        marker_payload = INT8_CONVROT_MARKER_PAYLOAD
-    elif action in (
-        "convrot_w4a4",
-        "convrot_w4a4_mse",
-    ):
-        quantizer = (
-            quantize_convrot_w4a4_mse
-            if action == "convrot_w4a4_mse"
-            else quantize_convrot_w4a4
-        )
-        marker_payload = CONVROT_W4A4_MARKER_PAYLOAD
-    else:
-        raise ValueError(f"Unknown payload action: {action}")
+    method = get_conversion_method(action)
+    encoded = method.encode(weights, device, record)
 
-    if timing is None and action == "int8_convrot":
-        if device == "cpu":
-            result = quantize_int8_convrot(weights)
-        else:
-            result = quantize_int8_convrot(weights, device=device)
-    elif (
-        timing is None
-        and action in ("convrot_w4a4", "convrot_w4a4_mse")
-        and device != "cpu"
-    ):
-        if action == "convrot_w4a4":
-            result = quantize_convrot_w4a4(weights, device=device)
-        else:
-            result = quantize_convrot_w4a4_mse(weights, device=device)
-    elif (
-        timing is None
-        and action in ("int5_convrot", "int6_convrot")
-        and device != "cpu"
-    ):
-        result = (
-            quantize_int5_convrot_packed(weights, device=device)
-            if action == "int5_convrot"
-            else quantize_int6_convrot_packed(weights, device=device)
-        )
-    elif timing is None:
-        result = quantizer(weights)
-    elif action == "int8_convrot":
-        with timed_stage(record, "quantize"):
-            if device == "cpu":
-                result = quantize_int8_convrot(
-                    weights,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-            else:
-                result = quantize_int8_convrot(
-                    weights,
-                    device=device,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-    elif (
-        action in (
-            "convrot_w4a4",
-            "convrot_w4a4_mse",
-            "int5_convrot",
-            "int6_convrot",
-        )
-        and device != "cpu"
-    ):
-        with timed_stage(record, "quantize"):
-            if action == "convrot_w4a4":
-                result = quantize_convrot_w4a4(
-                    weights,
-                    device=device,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-            elif action == "convrot_w4a4_mse":
-                result = quantize_convrot_w4a4_mse(
-                    weights,
-                    device=device,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-            elif action == "int5_convrot":
-                result = quantize_int5_convrot_packed(
-                    weights,
-                    device=device,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-            else:
-                result = quantize_int6_convrot_packed(
-                    weights,
-                    device=device,
-                    internal_timings=(
-                        record.internal_stages
-                        if record is not None
-                        else None
-                    ),
-                )
-    else:
-        with timed_stage(record, "quantize"):
-            result = quantizer(weights)
-
-    if action in ("int5_convrot", "int6_convrot") and device != "cpu":
-        code_tensor = result.packed_codes
-    elif action in ("int6_rowwise", "int6_convrot"):
-        if timing is None:
-            packed_codes = pack_int6_row_major(result.codes).packed_codes
-        else:
-            with timed_stage(record, "pack"):
-                packed_codes = pack_int6_row_major(result.codes).packed_codes
-        code_tensor = packed_codes
-    elif action in ("int8", "int8_convrot"):
-        code_tensor = result.codes
-    else:
-        code_tensor = result.packed_codes
+    _validate_encoded_payload(action, entry, encoded)
 
     if timing is None:
-        code_bytes = tensor_to_raw_bytes(code_tensor)
+        code_bytes = tensor_to_raw_bytes(encoded.codes)
     else:
         with timed_stage(record, "payload_bytes"):
-            code_bytes = tensor_to_raw_bytes(code_tensor)
+            code_bytes = tensor_to_raw_bytes(encoded.codes)
 
     weight_spec, scale_spec, marker_spec = entry["output_tensors"]
     yield weight_spec.name, code_bytes
 
     if timing is None:
-        scale_bytes = tensor_to_raw_bytes(result.scales)
+        scale_bytes = tensor_to_raw_bytes(encoded.scales)
     else:
         with timed_stage(record, "payload_bytes"):
-            scale_bytes = tensor_to_raw_bytes(result.scales)
+            scale_bytes = tensor_to_raw_bytes(encoded.scales)
     yield scale_spec.name, scale_bytes
-    yield marker_spec.name, marker_payload
+    yield marker_spec.name, method.marker_payload
 
 
 def stream_quantized_payloads(

@@ -22,6 +22,15 @@ class TestRelativeL2Error(unittest.TestCase):
 
         self.assertAlmostEqual(error, 1.0)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_supports_reconstruction_on_cuda(self) -> None:
+        original = torch.tensor([3.0, 4.0])
+        reconstructed = torch.zeros(2, device="cuda")
+
+        error = relative_l2_error(original, reconstructed)
+
+        self.assertAlmostEqual(error, 1.0)
+
     def test_rejects_different_shapes(self) -> None:
         original = torch.tensor([1.0, 2.0])
         reconstructed = torch.tensor([[1.0, 2.0]])

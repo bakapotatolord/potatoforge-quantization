@@ -1,17 +1,10 @@
 import json
 from math import prod
-from typing import (
-    Callable,
-    Final,
-    NamedTuple,
-    NotRequired,
-    TypeAlias,
-    TypedDict,
-)
+from typing import Final, NamedTuple, NotRequired, TypeAlias, TypedDict
 from collections.abc import Iterable, Mapping
 
+from .conversion_method_types import QuantizationAction
 from .profiles import (
-    QuantizationAction,
     QuantizationProfile,
     find_profile_rule,
 )
@@ -35,8 +28,6 @@ class QuantizedPlan(NamedTuple):
     output_tensors: tuple[OutputTensorSpec, ...]
     estimated_bytes: int
 
-
-PlanBuilder: TypeAlias = Callable[[str, TensorDescriptor], QuantizedPlan]
 
 class PlanEntry(TypedDict):
     tensor_name: str
@@ -376,17 +367,6 @@ def plan_convrot_w4a4(
     )
 
 
-_PLAN_BUILDERS: Mapping[QuantizationAction, PlanBuilder] = {
-    "int8": plan_int8_tensorwise,
-    "int6_rowwise": plan_int6_rowwise,
-    "int5_convrot": plan_int5_convrot,
-    "int6_convrot": plan_int6_convrot,
-    "int8_convrot": plan_int8_convrot,
-    "convrot_w4a4": plan_convrot_w4a4,
-    "convrot_w4a4_mse": plan_convrot_w4a4,
-}
-
-
 def build_quantized_tensor_plan(
     action: QuantizationAction,
     tensor_name: str,
@@ -397,11 +377,9 @@ def build_quantized_tensor_plan(
             "The keep action does not produce a quantized tensor plan."
         )
 
-    plan_builder = _PLAN_BUILDERS.get(action)
-    if plan_builder is None:
-        raise ValueError(f"Unsupported quantization action: {action}.")
+    from .conversion_methods import get_conversion_method
 
-    return plan_builder(tensor_name, descriptor)
+    return get_conversion_method(action).plan(tensor_name, descriptor)
 
 
 def build_plan(

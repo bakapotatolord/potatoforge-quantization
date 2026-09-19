@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
 
+from .conversion_method_types import QuantizationAction
 from .headers.source_header import (
     validate_data_offsets,
     validate_dtype,
@@ -18,7 +19,6 @@ from .planning import (
     logical_layer_name_for_weight,
     source_bytes,
 )
-from .profiles import QuantizationAction
 
 
 class PatchEntry(NamedTuple):
