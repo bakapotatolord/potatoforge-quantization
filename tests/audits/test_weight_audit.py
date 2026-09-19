@@ -89,6 +89,24 @@ class TestWeightAudit(unittest.TestCase):
             methods["convrot_w4a4_mse"]["relative_l2_error"]
         )
 
+    def test_audits_only_requested_methods(self) -> None:
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            save_file(
+                {"blocks.0.attn.wq.weight": torch.ones((2, 256), dtype=torch.bfloat16)},
+                str(source_path),
+            )
+            methods = audit_bf16_source(
+                source_path,
+                methods=("int8", "convrot_w4a4_mse"),
+            )["results"][0]["methods"]
+
+        self.assertEqual(methods["bf16"]["relative_l2_error"], 0.0)
+        self.assertIsNotNone(methods["int8"]["relative_l2_error"])
+        self.assertIsNotNone(methods["convrot_w4a4_mse"]["relative_l2_error"])
+        self.assertIsNone(methods["int6"]["relative_l2_error"])
+        self.assertIsNone(methods["int8_convrot"]["relative_l2_error"])
+
     def test_audits_eligible_weights_without_a_profile(self) -> None:
         weights = torch.linspace(
             -1.0,

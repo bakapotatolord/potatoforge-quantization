@@ -142,18 +142,21 @@ def audit_model(
     *,
     device: str = "cpu",
     overwrite: bool = False,
+    methods: Iterable[str] | None = None,
     on_entry_started: Callable[[int, int, PlanEntry], None] | None = None,
     preflight: Callable[[Path, bool], None] = preflight_output,
     audit_source: Callable[..., dict[str, Any]] = audit_bf16_source,
     write_document: Callable[[Path, object, bool], None] = write_json,
 ) -> AuditResult:
     preflight(output, overwrite)
-    document = audit_source(
-        source_path,
-        on_entry_started=on_entry_started,
-        device=device,
-        include_plain_methods=False,
-    )
+    options = {
+        "on_entry_started": on_entry_started,
+        "device": device,
+        "include_plain_methods": methods is not None,
+    }
+    if methods is not None:
+        options["methods"] = tuple(methods)
+    document = audit_source(source_path, **options)
     write_document(output, document, overwrite)
     return AuditResult(document, source_path, output)
 

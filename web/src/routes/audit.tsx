@@ -33,6 +33,7 @@ type AuditFormValues = {
   output_folder: string | null
   output_name: string
   device: 'cpu' | 'cuda'
+  methods: string[]
   overwrite: boolean
 }
 
@@ -78,6 +79,11 @@ type FoldersResponse = {
   folders: string[]
 }
 
+type AuditMethodsResponse = {
+  methods: { label: string; value: string }[]
+  default_methods: string[]
+}
+
 const DEVICE_OPTIONS = [
   { label: 'CPU', value: 'cpu' },
   { label: 'CUDA', value: 'cuda' },
@@ -93,6 +99,7 @@ function AuditPage() {
   const [requestError, setRequestError] = useState<Error | null>(null)
   const [streamError, setStreamError] = useState<string | null>(null)
   const receivedSequences = useRef(new Set<number>())
+  const defaultMethodsApplied = useRef(false)
   const outputViewportRef = useRef<HTMLDivElement>(null)
   const outputAtBottom = useRef(true)
 
@@ -103,6 +110,10 @@ function AuditPage() {
   const outputFoldersQuery = useQuery({
     queryKey: ['output-folders'],
     queryFn: () => getJson<FoldersResponse>('/api/output-folders'),
+  })
+  const auditMethodsQuery = useQuery({
+    queryKey: ['audit-methods'],
+    queryFn: () => getJson<AuditMethodsResponse>('/api/audit-methods'),
   })
 
   useEffect(() => {
@@ -200,6 +211,7 @@ function AuditPage() {
       output_folder: null,
       output_name: '',
       device: 'cuda',
+      methods: [],
       overwrite: false,
     },
     validate: {
@@ -213,11 +225,23 @@ function AuditPage() {
         }
         return null
       },
+      methods: (value) => (value.length ? null : 'Select at least one method'),
     },
   })
 
+  useEffect(() => {
+    if (!defaultMethodsApplied.current && auditMethodsQuery.data) {
+      form.setFieldValue('methods', auditMethodsQuery.data.default_methods)
+      defaultMethodsApplied.current = true
+    }
+  }, [auditMethodsQuery.data, form])
+
   const models = modelsQuery.data?.models ?? []
   const outputFolders = outputFoldersQuery.data?.folders ?? []
+  const methodOptions = auditMethodsQuery.data?.methods ?? []
+  const selectedMethodCount = form.values.methods.length
+  const allMethodsSelected =
+    methodOptions.length > 0 && selectedMethodCount === methodOptions.length
   const nameCounts = new Map<string, number>()
   for (const model of models) {
     const key = model.name.toLowerCase()
@@ -238,7 +262,7 @@ function AuditPage() {
     job !== null &&
     activeJobId !== null &&
     (job.status === 'starting' || job.status === 'running' || job.status === 'stopping')
-  const formDisabled = restoring || startPending || isJobActive
+  const formDisabled = restoring || startPending || isJobActive || auditMethodsQuery.isPending
   const result = job?.status === 'succeeded' ? job.result : null
   const jobError = job?.status === 'failed' ? job.error : null
   const jobCancelled = job?.status === 'cancelled'
@@ -270,6 +294,7 @@ function AuditPage() {
         source_path: values.source_path,
         output: joinOutputPath(values.output_folder, values.output_name.trim()),
         device: values.device,
+        methods: values.methods,
         overwrite: values.overwrite,
       })
       setJob(response.job)
@@ -394,6 +419,52 @@ function AuditPage() {
               CUDA accelerates supported ConvRot INT8, W4A4, and packed ConvRot INT5/INT6 work;
               plain INT8/INT6 stay on CPU.
             </Text>
+
+            <Stack gap={0}>
+              <Text fw={500} size="sm">
+                Methods to audit
+              </Text>
+              <Text c="dimmed" size="xs">
+                BF16 is always included as the reconstruction baseline.
+              </Text>
+              <Group gap="md" mt="xs" wrap="wrap">
+                <Checkbox
+                  label="Select all"
+                  checked={allMethodsSelected}
+                  indeterminate={selectedMethodCount > 0 && !allMethodsSelected}
+                  disabled={formDisabled || methodOptions.length === 0}
+                  onChange={(event) =>
+                    form.setFieldValue(
+                      'methods',
+                      event.currentTarget.checked
+                        ? methodOptions.map((method) => method.value)
+                        : [],
+                    )
+                  }
+                />
+                {methodOptions.map((method) => (
+                  <Checkbox
+                    key={method.value}
+                    {...method}
+                    checked={form.values.methods.includes(method.value)}
+                    disabled={formDisabled}
+                    onChange={(event) =>
+                      form.setFieldValue(
+                        'methods',
+                        event.currentTarget.checked
+                          ? [...form.values.methods, method.value]
+                          : form.values.methods.filter((value) => value !== method.value),
+                      )
+                    }
+                  />
+                ))}
+              </Group>
+              {form.errors.methods && (
+                <Text c="red" size="xs" mt="xs">
+                  {form.errors.methods}
+                </Text>
+              )}
+            </Stack>
 
             <Checkbox
               label="Replace existing report"

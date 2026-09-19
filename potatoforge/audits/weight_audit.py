@@ -18,6 +18,7 @@ from ..planning import (
 from .all_comparison import (
     compare_all_reconstructions,
 )
+from ..conversion_methods import get_conversion_method
 from ..quantization.hadamard import CONVROT_GROUP_SIZE
 from ..headers.source_header import read_source_model_header
 from ..source_payloads import stream_bf16_source_tensors
@@ -33,12 +34,57 @@ QuantizationMethod = Literal[
     "convrot_w4a4_mse",
 ]
 
+_AUDIT_METHOD_ACTIONS: dict[QuantizationMethod, str] = {
+    "int8": "int8",
+    "int6": "int6_rowwise",
+    "int8_convrot": "int8_convrot",
+    "int6_convrot": "int6_convrot",
+    "convrot_w4a4": "convrot_w4a4",
+    "convrot_w4a4_mse": "convrot_w4a4_mse",
+}
+
+AUDIT_METHODS: tuple[QuantizationMethod, ...] = tuple(_AUDIT_METHOD_ACTIONS)
+
+DEFAULT_COMMAND_AUDIT_METHODS: tuple[QuantizationMethod, ...] = tuple(
+    method
+    for method, action in _AUDIT_METHOD_ACTIONS.items()
+    if get_conversion_method(action).is_convrot
+)
+
+
+def audit_method_options() -> list[dict[str, str]]:
+    return [
+        {"value": method, "label": get_conversion_method(action).label}
+        for method, action in _AUDIT_METHOD_ACTIONS.items()
+    ]
+
 AuditProgressReporter = Callable[[int, int, str], None]
+
+
 def _validate_audit_device(device: str) -> None:
     if device not in ("cpu", "cuda"):
         raise ValueError("Audit device must be cpu or cuda.")
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA device requested but CUDA is unavailable.")
+
+
+def _normalise_audit_methods(
+    methods: Sequence[QuantizationMethod] | None,
+    include_plain_methods: bool,
+) -> frozenset[QuantizationMethod]:
+    if methods is None:
+        return frozenset(
+            AUDIT_METHODS if include_plain_methods else DEFAULT_COMMAND_AUDIT_METHODS
+        )
+    requested = tuple(methods)
+    if not requested:
+        raise ValueError("Audit methods must not be empty.")
+    if len(requested) != len(set(requested)):
+        raise ValueError("Audit methods must be unique.")
+    unsupported = set(requested) - set(AUDIT_METHODS)
+    if unsupported:
+        raise ValueError("Audit methods contain unsupported values.")
+    return frozenset(requested)
 
 
 class MethodAudit(NamedTuple):
@@ -170,7 +216,9 @@ def _audit_weight(
     *,
     device: str = "cpu",
     include_plain_methods: bool = True,
+    methods: frozenset[QuantizationMethod] | None = None,
 ) -> WeightAuditResult:
+    methods = _normalise_audit_methods(methods, include_plain_methods)
     original_float = weights.float()
     source_l2 = torch.linalg.vector_norm(original_float)
     comparison = compare_all_reconstructions(
@@ -179,12 +227,13 @@ def _audit_weight(
         source_l2=source_l2,
         device=device,
         include_plain_methods=include_plain_methods,
+        methods=methods,
     )
     bf16_bytes = source_bytes(descriptor)
 
     int8_plan = (
         None
-        if not include_plain_methods
+        if "int8" not in methods
         else plan_int8_tensorwise(tensor_name, descriptor)
     )
     int6_plan = None
@@ -193,14 +242,17 @@ def _audit_weight(
     w4a4_plan = None
 
     if (
-        include_plain_methods and weights.shape[1] % 4 == 0
+        "int6" in methods and weights.shape[1] % 4 == 0
     ):
         int6_plan = plan_int6_rowwise(tensor_name, descriptor)
 
     if weights.shape[1] % CONVROT_GROUP_SIZE == 0:
-        int8_convrot_plan = plan_int8_convrot(tensor_name, descriptor)
-        int6_convrot_plan = plan_int6_convrot(tensor_name, descriptor)
-        w4a4_plan = plan_convrot_w4a4(tensor_name, descriptor)
+        if "int8_convrot" in methods:
+            int8_convrot_plan = plan_int8_convrot(tensor_name, descriptor)
+        if "int6_convrot" in methods:
+            int6_convrot_plan = plan_int6_convrot(tensor_name, descriptor)
+        if "convrot_w4a4" in methods or "convrot_w4a4_mse" in methods:
+            w4a4_plan = plan_convrot_w4a4(tensor_name, descriptor)
 
     methods = MethodAudits(
         bf16=_method_audit(0.0, bf16_bytes, bf16_bytes),
@@ -312,8 +364,10 @@ def audit_bf16_weight_entries(
     *,
     device: str = "cpu",
     include_plain_methods: bool = True,
+    methods: Sequence[QuantizationMethod] | None = None,
 ) -> tuple[WeightAuditResult, ...]:
     _validate_audit_device(device)
+    requested_methods = _normalise_audit_methods(methods, include_plain_methods)
     descriptor_by_name = dict(descriptors)
     results: list[WeightAuditResult] = []
 
@@ -329,6 +383,7 @@ def audit_bf16_weight_entries(
                 weights,
                 device=device,
                 include_plain_methods=include_plain_methods,
+                methods=requested_methods,
             )
         )
 
@@ -373,6 +428,7 @@ def audit_bf16_source(
     tensor_names: Sequence[str] | None = None,
     device: str = "cpu",
     include_plain_methods: bool = True,
+    methods: Sequence[QuantizationMethod] | None = None,
 ) -> WeightAuditDocument:
     _validate_audit_device(device)
     source_header = read_source_model_header(source_path)
@@ -406,6 +462,7 @@ def audit_bf16_source(
         on_entry_started,
         device=device,
         include_plain_methods=include_plain_methods,
+        methods=methods,
     )
 
     source_dtypes = {

@@ -12,18 +12,17 @@ Install frontend dependencies from the repository root:
 pnpm --dir web install
 ```
 
-Start the frontend development server:
+Start the frontend development server from the repository root:
 
 ```powershell
-pnpm --dir web run dev
+pnpm run dev:web
 ```
 
 Vite serves the UI at `http://127.0.0.1:5173` and proxies `/api` requests to
-the local API at `http://127.0.0.1:8000`. Start that API separately from the
-repository root:
+the local API at `http://127.0.0.1:8000`. Start that API in a separate terminal:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn potatoforge.server.app:app --host 127.0.0.1 --port 8000 --reload
+pnpm run dev:api
 ```
 
 ## Build and launch

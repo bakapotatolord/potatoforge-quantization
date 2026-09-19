@@ -27,6 +27,8 @@ def _relative_l2_error_from_float(
     reconstructed: torch.Tensor,
     source_l2: torch.Tensor,
 ) -> float:
+    original_float = original_float.to(device=reconstructed.device)
+    source_l2 = source_l2.to(device=reconstructed.device)
     error_norm = torch.linalg.vector_norm(
         original_float - reconstructed.float()
     )
@@ -82,14 +84,29 @@ def compare_all_reconstructions(
     source_l2: torch.Tensor | None = None,
     device: str | torch.device = "cpu",
     include_plain_methods: bool = True,
+    methods: frozenset[str] | None = None,
 ) -> AllQuantizationComparison:
+    methods = (
+        frozenset(
+            (
+                "int8",
+                "int6",
+                "int8_convrot",
+                "int6_convrot",
+                "convrot_w4a4",
+                "convrot_w4a4_mse",
+            )
+        )
+        if methods is None
+        else methods
+    )
     if original_float is None:
         original_float = weights.float()
     if source_l2 is None:
         source_l2 = torch.linalg.vector_norm(original_float)
 
     int8_error = None
-    if include_plain_methods:
+    if include_plain_methods and "int8" in methods:
         int8_result = quantize_int8_tensorwise(weights)
         int8_reconstructed = dequantize_int8_tensorwise(int8_result)
         int8_error = _relative_l2_error_from_float(
@@ -112,7 +129,7 @@ def compare_all_reconstructions(
         )
 
     int6_error = None
-    if include_plain_methods:
+    if include_plain_methods and "int6" in methods:
         int6_result = quantize_int6_rowwise(weights)
         int6_reconstructed = dequantize_int6_rowwise(int6_result)
         int6_error = _relative_l2_error_from_float(
@@ -134,54 +151,36 @@ def compare_all_reconstructions(
             w4a4_mse_relative_l2_error=None,
         )
 
-    int8_convrot_result = quantize_int8_convrot(
-        weights,
-        device=device,
-    )
-    int8_convrot_reconstructed = dequantize_int8_convrot(
-        int8_convrot_result,
-    )
-    int8_convrot_error = _relative_l2_error_from_float(
-        original_float,
-        int8_convrot_reconstructed,
-        source_l2,
-    )
+    int8_convrot_error = None
+    if "int8_convrot" in methods:
+        int8_convrot_result = quantize_int8_convrot(weights, device=device)
+        int8_convrot_reconstructed = dequantize_int8_convrot(int8_convrot_result)
+        int8_convrot_error = _relative_l2_error_from_float(
+            original_float, int8_convrot_reconstructed, source_l2
+        )
 
-    del int8_convrot_result
-    del int8_convrot_reconstructed
+    int6_convrot_error = None
+    if "int6_convrot" in methods:
+        int6_convrot_reconstructed = _dequantize_int6_convrot_for_device(weights, device)
+        int6_convrot_error = _relative_l2_error_from_float(
+            original_float, int6_convrot_reconstructed, source_l2
+        )
 
-    int6_convrot_reconstructed = _dequantize_int6_convrot_for_device(
-        weights,
-        device,
-    )
-    int6_convrot_error = _relative_l2_error_from_float(
-        original_float,
-        int6_convrot_reconstructed,
-        source_l2,
-    )
+    w4a4_error = None
+    if "convrot_w4a4" in methods:
+        w4a4_result = quantize_convrot_w4a4(weights, device=device)
+        w4a4_reconstructed = dequantize_convrot_w4a4(w4a4_result)
+        w4a4_error = _relative_l2_error_from_float(
+            original_float, w4a4_reconstructed, source_l2
+        )
 
-    del int6_convrot_reconstructed
-
-    w4a4_result = quantize_convrot_w4a4(
-        weights,
-        device=device,
-    )
-    w4a4_reconstructed = dequantize_convrot_w4a4(w4a4_result)
-    w4a4_error = _relative_l2_error_from_float(
-        original_float,
-        w4a4_reconstructed,
-        source_l2,
-    )
-    w4a4_mse_result = quantize_convrot_w4a4_mse(
-        weights,
-        device=device,
-    )
-    w4a4_mse_reconstructed = dequantize_convrot_w4a4(w4a4_mse_result)
-    w4a4_mse_error = _relative_l2_error_from_float(
-        original_float,
-        w4a4_mse_reconstructed,
-        source_l2,
-    )
+    w4a4_mse_error = None
+    if "convrot_w4a4_mse" in methods:
+        w4a4_mse_result = quantize_convrot_w4a4_mse(weights, device=device)
+        w4a4_mse_reconstructed = dequantize_convrot_w4a4(w4a4_mse_result)
+        w4a4_mse_error = _relative_l2_error_from_float(
+            original_float, w4a4_mse_reconstructed, source_l2
+        )
 
     return AllQuantizationComparison(
         int8_relative_l2_error=int8_error,

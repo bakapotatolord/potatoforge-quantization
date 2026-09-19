@@ -16,6 +16,11 @@ from ..application.commands import (
     optimize_profile,
     quantize_model,
 )
+from ..audits.weight_audit import (
+    DEFAULT_COMMAND_AUDIT_METHODS,
+    QuantizationMethod,
+    audit_method_options,
+)
 from ..profiles import load_profile
 from .model_library import (
     DEFAULT_CONFIG_PATH,
@@ -64,6 +69,10 @@ class AuditRequest(BaseModel):
     output: Path
     device: Literal["cpu", "cuda"] = "cpu"
     overwrite: bool = False
+    methods: list[QuantizationMethod] = Field(
+        default_factory=lambda: list(DEFAULT_COMMAND_AUDIT_METHODS),
+        min_length=1,
+    )
 
 
 class OptimizeRequest(BaseModel):
@@ -288,6 +297,13 @@ def create_app(
     def audit_reports() -> dict[str, list[dict[str, str]]]:
         return {"reports": discover_audit_reports(config_path)}
 
+    @app.get("/api/audit-methods")
+    def audit_methods() -> dict[str, list[dict[str, str]] | list[str]]:
+        return {
+            "methods": audit_method_options(),
+            "default_methods": list(DEFAULT_COMMAND_AUDIT_METHODS),
+        }
+
     @app.post("/api/output-folders", status_code=201)
     def add_configured_output_folder(
         request: ModelFolderRequest,
@@ -335,6 +351,7 @@ def create_app(
             request.output,
             device=request.device,
             overwrite=request.overwrite,
+            methods=request.methods,
         )
         summary = result.document["summary"]
         return CommandResult(

@@ -233,6 +233,22 @@ class ServerAppTests(TestCase):
                 },
             )
 
+    def test_audit_methods_use_the_conversion_catalog(self) -> None:
+        response = TestClient(create_app()).get("/api/audit-methods")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["methods"],
+            [
+                {"value": "int8", "label": "INT8"},
+                {"value": "int6", "label": "INT6 Rowwise"},
+                {"value": "int8_convrot", "label": "INT8 ConvRot"},
+                {"value": "int6_convrot", "label": "INT6 ConvRot"},
+                {"value": "convrot_w4a4", "label": "W4A4 ConvRot"},
+                {"value": "convrot_w4a4_mse", "label": "W4A4 ConvRot MSE"},
+            ],
+        )
+
     def test_inspect_calls_the_application_workflow(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -314,7 +330,16 @@ class ServerAppTests(TestCase):
             self.assertEqual(audit_model.call_args.args, (source, expected_output))
             self.assertEqual(
                 audit_model.call_args.kwargs,
-                {"device": "cuda", "overwrite": True},
+                {
+                    "device": "cuda",
+                    "overwrite": True,
+                    "methods": [
+                        "int8_convrot",
+                        "int6_convrot",
+                        "convrot_w4a4",
+                        "convrot_w4a4_mse",
+                    ],
+                },
             )
 
     def test_audit_rejects_source_outside_configured_folders(self) -> None:
@@ -353,6 +378,7 @@ class ServerAppTests(TestCase):
                         "output_path": output_path,
                         "device": kwargs["device"],
                         "overwrite": kwargs["overwrite"],
+                        "methods": kwargs["methods"],
                     }
                 )
                 started.set()
@@ -391,6 +417,12 @@ class ServerAppTests(TestCase):
                     "output_path": output,
                     "device": "cuda",
                     "overwrite": True,
+                    "methods": [
+                        "int8_convrot",
+                        "int6_convrot",
+                        "convrot_w4a4",
+                        "convrot_w4a4_mse",
+                    ],
                 },
             )
             self.assertEqual(current.json()["job"]["id"], job_id)

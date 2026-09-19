@@ -28,6 +28,7 @@ class AuditJobManager(LocalJobManager):
                 request.output,
                 device=request.device,
                 overwrite=request.overwrite,
+                methods=getattr(request, "methods", None),
                 on_entry_started=lambda index, total, entry: self._on_entry_started(
                     job, index, total, entry
                 ),
