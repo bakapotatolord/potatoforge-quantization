@@ -5,6 +5,7 @@ description = "Streaming safetensors quantization toolkit for image models."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi[standard]>=0.141.1",
     "numpy>=2.4.6",
     "openpyxl>=3.1.5",
     "safetensors>=0.8.0",

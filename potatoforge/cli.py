@@ -11,6 +11,12 @@ from typing import Any, Callable, Literal
 
 import typer
 
+from .application.commands import (
+    audit_model,
+    inspect_model,
+    optimize_profile,
+    quantize_model,
+)
 from .audits.analysis import (
     print_tensor_analysis,
     write_analysis_workbook,
@@ -66,7 +72,7 @@ from .calibration import (
     ActivationCalibration,
     merge_activation_calibrations,
 )
-from .timing import TimingCollector
+from .server.runner import run_ui
 
 
 app = typer.Typer(
@@ -303,6 +309,24 @@ def main(version: bool = typer.Option(False, "--version")) -> None:
         raise typer.Exit()
 
 
+@app.command("ui")
+def ui() -> None:
+    """Start the local browser UI and FastAPI server."""
+    static_dir = Path(__file__).resolve().parents[1] / "web" / "dist"
+    if not (static_dir / "index.html").is_file():
+        typer.echo(
+            "Command UI files are missing. Run: pnpm --dir web install; "
+            "pnpm --dir web build",
+            err=True,
+        )
+        raise typer.Exit(3)
+
+    try:
+        run_ui(static_dir)
+    except (OSError, RuntimeError) as error:
+        _fail("ui", error, 5)
+
+
 @app.command("inspect-header", hidden=True)
 @inspect_app.command("model")
 def inspect_header(
@@ -317,45 +341,20 @@ def inspect_header(
 ) -> None:
     """Inspect a safetensors header without reading tensor payloads."""
     def action() -> None:
-        header = read_header_from_safetensors(model_path)
-        metadata = header.get("__metadata__", {})
-        tensors = {
-            name: descriptor
-            for name, descriptor in header.items()
-            if name != "__metadata__"
-        }
-        total_bytes = sum(
-            descriptor["data_offsets"][1] - descriptor["data_offsets"][0]
-            for descriptor in tensors.values()
+        result = inspect_model(
+            model_path,
+            output=output,
+            overwrite=overwrite,
+            read_header=read_header_from_safetensors,
+            write_document=_write_json,
         )
-        prefix_counts = Counter(name.split(".", 1)[0] for name in tensors)
-        quantization_summary, quantization_layers = (
-            _parse_quantization_metadata(metadata)
-        )
-        report = {
-            "source_path": str(model_path),
-            "metadata": metadata,
-            "model_info": tensors,
-            "quantization": {
-                "summary": quantization_summary,
-                "layers": quantization_layers,
-            },
-            "summary": {
-                "metadata_count": len(metadata) if isinstance(metadata, dict) else 0,
-                "tensor_count": len(tensors),
-                "group_count": len(prefix_counts),
-                "total_raw_payload_bytes": total_bytes,
-            },
-        }
-        if output is not None:
-            _write_json(output, report, overwrite)
         if show_quantization:
             _print_quantization(
-                quantization_summary,
-                quantization_layers,
+                result.quantization_summary,
+                result.quantization_layers,
             )
         else:
-            _finish(report["summary"])
+            _finish(result.report["summary"])
 
     _run("inspect-header", action)
 
@@ -449,18 +448,20 @@ def audit(
 ) -> None:
     """Measure supported weight reconstruction formats."""
     def action() -> None:
-        _preflight_audit_output(output, overwrite)
-        audit_kwargs: dict[str, Any] = {
-            "on_entry_started": _print_progress,
-            "device": device,
-            "include_plain_methods": False,
-        }
-        document = audit_bf16_source(source_path, **audit_kwargs)
-        _write_json(output, document, overwrite)
-        summary = document["summary"]
+        result = audit_model(
+            source_path,
+            output,
+            device=device,
+            overwrite=overwrite,
+            on_entry_started=_print_progress,
+            preflight=_preflight_audit_output,
+            audit_source=audit_bf16_source,
+            write_document=_write_json,
+        )
+        summary = result.document["summary"]
         print_weight_audit_table(
-            document["results"],
-            source_dtype=str(document["selection"]["dtype"]),
+            result.document["results"],
+            source_dtype=str(result.document["selection"]["dtype"]),
         )
         _finish(
             {
@@ -1111,103 +1112,38 @@ def optimize(
 ) -> None:
     """Generate a target-size profile from a weight audit."""
     def action() -> None:
-        if config is not None:
-            if audit_path is not None or output_path is not None:
-                raise ValueError("Positional paths cannot be combined with --config.")
-            optimize_config = load_optimize_config(config)
-            effective_audit_path = optimize_config.paths.audit_report
-            effective_output_path = output or optimize_config.paths.profile
-            effective_profile_id = (
-                profile_id
-                if profile_id is not None
-                else optimize_config.profile_id
-            )
-            effective_target_size_gib = (
-                target_size_gib
-                if target_size_gib is not None
-                else optimize_config.target_size_gib
-            )
-            effective_methods = (
-                _split_comma_separated(method)
-                if method is not None
-                else list(optimize_config.methods)
-            )
-            effective_max_error = (
-                max_relative_l2_error
-                if max_relative_l2_error is not None
-                else optimize_config.max_relative_l2_error
-            )
-            effective_prefixes = (
-                _split_comma_separated(exclude_prefix)
-                if exclude_prefix is not None
-                else optimize_config.exclude_prefixes
-            )
-            effective_suffixes = (
-                _split_comma_separated(exclude_suffix)
-                if exclude_suffix is not None
-                else optimize_config.exclude_suffixes
-            )
-            effective_overwrite = (
-                overwrite
-                if overwrite is not None
-                else optimize_config.overwrite
-            )
-        else:
-            if (
-                audit_path is None
-                or output_path is None
-                or profile_id is None
-                or target_size_gib is None
-            ):
-                raise ValueError(
-                    "Direct optimize requires AUDIT_PATH, OUTPUT_PATH, "
-                    "--profile-id, and --target-size-gib."
-                )
-            if output is not None:
-                raise ValueError("--output requires --config.")
-            effective_audit_path = audit_path
-            effective_output_path = output_path
-            effective_profile_id = profile_id
-            effective_target_size_gib = target_size_gib
-            effective_methods = (
-                _split_comma_separated(method)
-                if method is not None
-                else list(SUPPORTED_METHODS)
-            )
-            effective_max_error = max_relative_l2_error
-            effective_prefixes = _split_comma_separated(exclude_prefix)
-            effective_suffixes = _split_comma_separated(exclude_suffix)
-            effective_overwrite = bool(overwrite)
-
-        audit_document = load_weight_audit(effective_audit_path)
-        optimized = optimize_target_size(
-            audit_document,
-            effective_profile_id,
-            _gib_to_bytes(effective_target_size_gib),
-            frozenset(effective_methods),
-            effective_max_error,
-            effective_prefixes,
-            effective_suffixes,
+        result = optimize_profile(
+            audit_path,
+            output_path,
+            profile_id=profile_id,
+            target_size_gib=target_size_gib,
+            method=method,
+            max_relative_l2_error=max_relative_l2_error,
+            exclude_prefix=exclude_prefix,
+            exclude_suffix=exclude_suffix,
+            overwrite=overwrite,
+            config=config,
+            output=output,
+            dry_run=dry_run,
+            to_bytes=_gib_to_bytes,
+            load_config=load_optimize_config,
+            load_audit=load_weight_audit,
+            optimize=optimize_target_size,
+            write=write_profile,
         )
-        if not dry_run:
-            write_profile(
-                effective_output_path,
-                optimized.profile,
-                overwrite=effective_overwrite,
-            )
         _finish(
             {
-                "audit_path": str(effective_audit_path),
-                "profile_path": None if dry_run else str(effective_output_path),
-                "profile_id": effective_profile_id,
-                "target_bytes": optimized.target_bytes,
-                "estimated_output_bytes": optimized.output_bytes,
-                "reconstruction_sse": optimized.reconstruction_sse,
+                "audit_path": str(result.audit_path),
+                "profile_path": None if result.dry_run else str(result.output_path),
+                "profile_id": result.profile_id,
+                "target_bytes": result.optimized.target_bytes,
+                "estimated_output_bytes": result.optimized.output_bytes,
+                "reconstruction_sse": result.optimized.reconstruction_sse,
                 "audited_global_relative_l2": audited_global_relative_l2(
-                    audit_document,
-                    optimized.reconstruction_sse,
+                    result.audit_document,
+                    result.optimized.reconstruction_sse,
                 ),
-                "dry_run": dry_run,
+                "dry_run": result.dry_run,
                 "warning": "Generated profiles still require artifact and runtime validation.",
             },
         )
@@ -1259,93 +1195,51 @@ def quantize(
 ) -> None:
     """Convert or estimate a checkpoint with an explicit JSON profile."""
     def action() -> None:
-        timing_collector = (
-            None if dry_run or not timing else TimingCollector()
+        result = quantize_model(
+            source_path,
+            output_path,
+            profile=profile,
+            device=device,
+            adapter_path=adapter_path,
+            adapter_strength=adapter_strength,
+            config=config,
+            dry_run=dry_run,
+            timing=timing,
+            on_entry_started=print_conversion_progress,
+            build_adapters=_build_adapter_inputs,
+            load_config=load_quantize_config,
+            estimate=estimate_output_bytes,
+            convert=convert_model_from_profile,
         )
-        cli_adapters = _build_adapter_inputs(adapter_path, adapter_strength)
-
-        if config is not None:
-            if source_path is not None or output_path is not None:
-                raise ValueError(
-                    "Source and output positional paths cannot be combined "
-                    "with --config."
-                )
-            quantize_config = load_quantize_config(config)
-            effective_source_path = quantize_config.paths.source
-            effective_output_path = quantize_config.paths.quantized_output
-            effective_profile = profile or quantize_config.paths.profile
-            effective_adapters = (
-                cli_adapters if cli_adapters else quantize_config.adapters
-            )
-        else:
-            if (
-                source_path is None
-                or (output_path is None and not dry_run)
-                or profile is None
-            ):
-                raise ValueError(
-                    "Direct quantize requires SOURCE_PATH, "
-                    + ("OUTPUT_PATH, " if not dry_run else "")
-                    + "and --profile."
-                )
-            effective_source_path = source_path
-            effective_output_path = output_path
-            effective_profile = profile
-            effective_adapters = cli_adapters
-
-        if effective_source_path is None or effective_profile is None:
-            raise ValueError(
-                "Quantize config requires paths.source and paths.profile."
-            )
-
-        if dry_run:
-            estimated_bytes = estimate_output_bytes(
-                effective_source_path,
-                effective_profile,
-            )
+        if result.estimated_bytes is not None:
             _finish(
                 {
-                    "source_path": str(effective_source_path),
-                    "profile_path": str(effective_profile),
-                    "estimated_output_bytes": estimated_bytes,
+                    "source_path": str(result.source_path),
+                    "profile_path": str(result.profile),
+                    "estimated_output_bytes": result.estimated_bytes,
                     "estimated_output_mib": round(
-                        estimated_bytes / 1024**2,
+                        result.estimated_bytes / 1024**2,
                         2,
                     ),
                     "estimated_output_gib": round(
-                        estimated_bytes / 1024**3,
+                        result.estimated_bytes / 1024**3,
                         3,
                     ),
                     "dry_run": True,
                 }
             )
             return
-
-        if effective_output_path is None:
-            raise ValueError(
-                "Quantize config requires paths.quantized_output."
-            )
-
-        convert_model_from_profile(
-            effective_source_path,
-            effective_output_path,
-            effective_profile,
-            on_entry_started=print_conversion_progress,
-            adapters=effective_adapters,
-            timing=timing_collector,
-            device=device,
-        )
         _finish(
             {
-                "source_path": str(effective_source_path),
-                "profile_path": str(effective_profile),
-                "output_path": str(effective_output_path),
-                "output_bytes": effective_output_path.stat().st_size,
-                "adapter_count": len(effective_adapters),
+                "source_path": str(result.source_path),
+                "profile_path": str(result.profile),
+                "output_path": str(result.output_path),
+                "output_bytes": result.output_path.stat().st_size,
+                "adapter_count": result.adapter_count,
             },
         )
-        if timing_collector is not None:
-            typer.echo(timing_collector.render())
+        if result.timing is not None:
+            typer.echo(result.timing.render())
 
     _run("quantize", action)
 

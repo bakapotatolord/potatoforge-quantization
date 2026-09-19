@@ -21,6 +21,7 @@ wheels/
 
 # Local model files and conversion outputs
 *.safetensors
+potatoforge/server/model_library.toml
 
 *.safetensors.partial
 
