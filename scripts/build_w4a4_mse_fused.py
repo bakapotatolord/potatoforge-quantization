@@ -1,4 +1,4 @@
-"""Build the optional CUDA W4A4-MSE candidate evaluator."""
+"""Build the optional CUDA ConvRot-MSE candidate evaluator library."""
 
 from __future__ import annotations
 
@@ -14,7 +14,9 @@ SOURCE = PROJECT_ROOT / "potatoforge" / "quantization" / "w4a4_mse_fused.cu"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Build the optional W4A4, INT5, INT6, and INT7 ConvRot-MSE candidate library."
+    )
     parser.add_argument(
         "--output",
         type=Path,

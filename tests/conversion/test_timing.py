@@ -307,6 +307,39 @@ class TestTimingCollector(unittest.TestCase):
         self.assertAlmostEqual(other, 0.0)
         self.assertIn("W4A4 ConvRot MSE breakdown", collector.render())
 
+    def test_int7_mse_internal_stages_render_separately(self) -> None:
+        collector = TimingCollector()
+        collector.records = [
+            timing_record(
+                "mse",
+                "int7_convrot_mse",
+                17 * 1024**2,
+                4.0,
+                {"quantize": 3.5},
+                {
+                    "prepare": 0.2,
+                    "rotation": 0.3,
+                    "scale_init": 0.1,
+                    "zero_row_check": 0.01,
+                    "coarse_search": 1.5,
+                    "fine_search": 1.0,
+                    "final_quantize": 0.2,
+                    "pack": 0.1,
+                    "finalize": 0.09,
+                },
+            )
+        ]
+        collector.wall_seconds = 4.0
+
+        internal, quantize_total, other = collector.convrot_internal_totals(
+            ("int7_convrot_mse",)
+        )
+
+        self.assertAlmostEqual(internal["coarse_search"], 1.5)
+        self.assertAlmostEqual(quantize_total, 3.5)
+        self.assertAlmostEqual(other, 0.0)
+        self.assertIn("INT7 ConvRot MSE breakdown", collector.render())
+
     def test_size_bucket_boundaries_are_source_byte_based(self) -> None:
         self.assertEqual(TimingCollector.size_bucket(1024**2 - 1), "<1 MiB")
         self.assertEqual(TimingCollector.size_bucket(1024**2), "1–16 MiB")

@@ -17,11 +17,26 @@ from .int6_packing import (
     unpack_int6_row_major,
 )
 from ..timing import timed_internal_stage
-from .int8_tensorwise import quantize_int8_rows
+from .rowwise import (
+    dequantize_rowwise,
+    quantize_rows_with_scale,
+    quantize_symmetric_rows,
+    resolve_convrot_device,
+    run_rowwise_mse_coarse_search,
+    run_rowwise_mse_fine_search,
+    select_rowwise_absmax_scale,
+    select_rowwise_mse_scale,
+    validate_convrot_input_width,
+    validate_rowwise_finite_weights,
+    validate_rowwise_weight_metadata,
+    validate_rowwise_weights,
+)
+from .w4a4_mse_native import load_int6_convrot_mse_candidate
 
 
 INT6_QMAX: Final[int] = 31
 INT6_QMIN: Final[int] = -31
+INT6_FORMAT_NAME: Final[str] = "INT6"
 
 
 class Int6RowwiseResult(NamedTuple):
@@ -39,56 +54,11 @@ class Int6ConvRotPackedResult(NamedTuple):
     original_shape: tuple[int, int]
 
 
-def _validate_weight_metadata(
-    weights: torch.Tensor,
-    *,
-    internal_timings: dict[str, float] | None = None,
-) -> None:
-    with timed_internal_stage(
-        internal_timings,
-        "validate_metadata",
-        None,
-    ):
-        if weights.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            raise ValueError(
-                "INT6 weights must use float16, bfloat16, or float32."
-            )
-        if weights.ndim != 2:
-            raise ValueError("INT6 weights must be a rank-2 matrix.")
-
-
-def _validate_finite(
-    weights: torch.Tensor,
-    *,
-    internal_timings: dict[str, float] | None = None,
-) -> None:
-    with timed_internal_stage(
-        internal_timings,
-        "validate_finite",
-        None,
-    ):
-        finite = torch.isfinite(weights).all()
-        if not bool(finite):
-            raise ValueError("INT6 weights must contain only finite values.")
-
-
-def _validate_weights(
-    weights: torch.Tensor,
-    *,
-    internal_timings: dict[str, float] | None = None,
-) -> None:
-    _validate_weight_metadata(
-        weights,
-        internal_timings=internal_timings,
-    )
-    _validate_finite(weights, internal_timings=internal_timings)
-
-
 def quantize_int6_rowwise(weights: torch.Tensor) -> Int6RowwiseResult:
     """Quantize weights to logical signed INT6 codes held in an int8 tensor."""
 
-    _validate_weights(weights)
-    result = quantize_int8_rows(
+    validate_rowwise_weights(weights, format_name=INT6_FORMAT_NAME)
+    result = quantize_symmetric_rows(
         weights,
         qmin=INT6_QMIN,
         qmax=INT6_QMAX,
@@ -98,24 +68,25 @@ def quantize_int6_rowwise(weights: torch.Tensor) -> Int6RowwiseResult:
     return Int6RowwiseResult(result.codes, result.scales)
 
 
+def select_int6_mse_scale(weights: torch.Tensor) -> torch.Tensor:
+    validate_rowwise_weights(weights, format_name=INT6_FORMAT_NAME)
+    return select_rowwise_mse_scale(
+        weights,
+        qmin=INT6_QMIN,
+        qmax=INT6_QMAX,
+    )
+
+
 def dequantize_int6_rowwise(result: Int6RowwiseResult) -> torch.Tensor:
     """Reconstruct float32 weights from an INT6 rowwise result."""
 
-    if result.codes.dtype != torch.int8 or result.codes.ndim != 2:
-        raise ValueError("INT6 codes must be a rank-2 int8 tensor.")
-    if result.scales.dtype != torch.float32:
-        raise ValueError("INT6 scales must be float32.")
-    if not bool(torch.isfinite(result.scales).all()) or bool(
-        (result.scales <= 0).any()
-    ):
-        raise ValueError("INT6 scales must be finite and positive.")
-    if result.scales.shape != (result.codes.shape[0], 1):
-        raise ValueError("INT6 scales must have shape [out_features, 1].")
-    if bool((result.codes < INT6_QMIN).any()) or bool(
-        (result.codes > INT6_QMAX).any()
-    ):
-        raise ValueError("INT6 codes must be in the signed range [-31, 31].")
-    return result.codes.float() * result.scales
+    return dequantize_rowwise(
+        result.codes,
+        result.scales,
+        format_name=INT6_FORMAT_NAME,
+        qmin=INT6_QMIN,
+        qmax=INT6_QMAX,
+    )
 
 
 def quantize_int6_convrot(weights: torch.Tensor) -> Int6RowwiseResult:
@@ -129,23 +100,27 @@ def quantize_int6_convrot(weights: torch.Tensor) -> Int6RowwiseResult:
     return quantize_int6_rowwise(rotated_weights)
 
 
-def _resolve_device(device: str | torch.device) -> torch.device:
-    try:
-        target_device = torch.device(device)
-    except (RuntimeError, TypeError) as error:
-        raise ValueError("INT6 ConvRot device must be cpu or cuda.") from error
+def quantize_int6_convrot_mse(weights: torch.Tensor) -> Int6RowwiseResult:
+    """Rotate then quantize W6 weights with rowwise MSE scale selection."""
 
-    if target_device.type not in ("cpu", "cuda"):
-        raise ValueError("INT6 ConvRot device must be cpu or cuda.")
-    if target_device.type == "cuda":
-        if not torch.cuda.is_available():
-            raise ValueError("CUDA device requested but CUDA is unavailable.")
-        if target_device.index is None:
-            target_device = torch.device(
-                "cuda",
-                torch.cuda.current_device(),
-            )
-    return target_device
+    validate_rowwise_weights(weights, format_name=INT6_FORMAT_NAME)
+    validate_convrot_input_width(
+        weights,
+        format_name=INT6_FORMAT_NAME,
+        group_size=CONVROT_GROUP_SIZE,
+    )
+    rotated_weights = apply_hadamard_rotation(
+        weights,
+        group_size=CONVROT_GROUP_SIZE,
+        output_dtype=torch.float32,
+    )
+    result = quantize_rows_with_scale(
+        rotated_weights,
+        select_int6_mse_scale(rotated_weights),
+        qmin=INT6_QMIN,
+        qmax=INT6_QMAX,
+    )
+    return Int6RowwiseResult(result.codes, result.scales)
 
 
 def _quantize_int6_convrot_cuda(
@@ -153,8 +128,9 @@ def _quantize_int6_convrot_cuda(
     device: torch.device,
     internal_timings: dict[str, float] | None,
 ) -> Int6ConvRotPackedResult:
-    _validate_weight_metadata(
+    validate_rowwise_weight_metadata(
         weights,
+        format_name=INT6_FORMAT_NAME,
         internal_timings=internal_timings,
     )
     with timed_internal_stage(
@@ -169,7 +145,10 @@ def _quantize_int6_convrot_cuda(
         "validate_finite",
         device,
     ):
-        _validate_finite(device_weights)
+        validate_rowwise_finite_weights(
+            device_weights,
+            format_name=INT6_FORMAT_NAME,
+        )
 
     with timed_internal_stage(
         internal_timings,
@@ -186,7 +165,7 @@ def _quantize_int6_convrot_cuda(
                 torch.float32,
             ),
         )
-    rowwise_result = quantize_int8_rows(
+    rowwise_result = quantize_symmetric_rows(
         rotated_weights,
         qmin=INT6_QMIN,
         qmax=INT6_QMAX,
@@ -227,7 +206,10 @@ def quantize_int6_convrot_packed(
         "resolve_device",
         None,
     ):
-        target_device = _resolve_device(device)
+        target_device = resolve_convrot_device(
+            device,
+            format_name=INT6_FORMAT_NAME,
+        )
     if target_device.type == "cuda":
         return _quantize_int6_convrot_cuda(
             weights,
@@ -242,6 +224,162 @@ def quantize_int6_convrot_packed(
         scales=rowwise_result.scales,
         original_shape=packed_result.original_shape,
     )
+
+
+def quantize_int6_convrot_mse_packed(
+    weights: torch.Tensor,
+    *,
+    device: str | torch.device = "cpu",
+    internal_timings: dict[str, float] | None = None,
+) -> Int6ConvRotPackedResult:
+    """Quantize ConvRot INT6 with MSE scales for serialization."""
+
+    with timed_internal_stage(
+        internal_timings,
+        "resolve_device",
+        None,
+    ):
+        target_device = resolve_convrot_device(
+            device,
+            format_name=INT6_FORMAT_NAME,
+        )
+    if target_device.type == "cuda":
+        return _quantize_int6_convrot_mse_cuda(
+            weights,
+            target_device,
+            internal_timings,
+        )
+
+    rowwise_result = quantize_int6_convrot_mse(weights)
+    packed_result = pack_int6_row_major(rowwise_result.codes)
+    return Int6ConvRotPackedResult(
+        packed_codes=packed_result.packed_codes,
+        scales=rowwise_result.scales,
+        original_shape=packed_result.original_shape,
+    )
+
+
+def _quantize_int6_convrot_mse_cuda(
+    weights: torch.Tensor,
+    device: torch.device,
+    internal_timings: dict[str, float] | None,
+) -> Int6ConvRotPackedResult:
+    validate_rowwise_weight_metadata(
+        weights,
+        format_name=INT6_FORMAT_NAME,
+    )
+    with timed_internal_stage(
+        internal_timings,
+        "prepare",
+        device,
+    ):
+        device_weights = weights.to(device=device)
+    validate_rowwise_finite_weights(
+        device_weights,
+        format_name=INT6_FORMAT_NAME,
+    )
+    with timed_internal_stage(
+        internal_timings,
+        "rotation",
+        device,
+    ):
+        rotated_weights = apply_hadamard_rotation(
+            device_weights,
+            group_size=CONVROT_GROUP_SIZE,
+            output_dtype=torch.float32,
+            hadamard=cached_cuda_hadamard_matrix(
+                CONVROT_GROUP_SIZE,
+                device,
+                torch.float32,
+            ),
+        )
+    with timed_internal_stage(
+        internal_timings,
+        "scale_init",
+        device,
+    ):
+        base_scale = select_rowwise_absmax_scale(
+            rotated_weights,
+            qmax=INT6_QMAX,
+        )
+    with timed_internal_stage(
+        internal_timings,
+        "zero_row_check",
+        device,
+    ):
+        weights_float = rotated_weights.float()
+        zero_rows = weights_float.abs().amax(dim=1, keepdim=True) == 0
+        all_zero = bool(zero_rows.all())
+
+    best_mse = base_scale
+    best_multiplier = torch.ones_like(base_scale)
+    if not all_zero:
+        candidate_mse = load_int6_convrot_mse_candidate(
+            device.index
+            if device.index is not None
+            else torch.cuda.current_device()
+        )
+        with timed_internal_stage(
+            internal_timings,
+            "coarse_search",
+            device,
+        ):
+            best_mse, best_multiplier = run_rowwise_mse_coarse_search(
+                rotated_weights,
+                weights_float,
+                base_scale,
+                qmin=INT6_QMIN,
+                qmax=INT6_QMAX,
+                candidate_mse=candidate_mse,
+            )
+        with timed_internal_stage(
+            internal_timings,
+            "fine_search",
+            device,
+        ):
+            best_mse, best_multiplier = run_rowwise_mse_fine_search(
+                rotated_weights,
+                weights_float,
+                base_scale,
+                best_mse,
+                best_multiplier,
+                qmin=INT6_QMIN,
+                qmax=INT6_QMAX,
+                candidate_mse=candidate_mse,
+            )
+
+    with timed_internal_stage(
+        internal_timings,
+        "final_quantize",
+        device,
+    ):
+        scales = torch.where(
+            zero_rows,
+            base_scale,
+            base_scale * best_multiplier,
+        ).clamp_min(1e-30)
+        rowwise_result = quantize_rows_with_scale(
+            rotated_weights,
+            scales,
+            qmin=INT6_QMIN,
+            qmax=INT6_QMAX,
+        )
+    with timed_internal_stage(
+        internal_timings,
+        "pack",
+        device,
+    ):
+        packed_result = pack_int6_row_major(rowwise_result.codes)
+    with timed_internal_stage(
+        internal_timings,
+        "finalize",
+        device,
+    ):
+        return Int6ConvRotPackedResult(
+            packed_codes=packed_result.packed_codes.cpu(),
+            scales=rowwise_result.scales.cpu(),
+            original_shape=packed_result.original_shape,
+        )
 
 
 def dequantize_int6_convrot(result: Int6RowwiseResult) -> torch.Tensor:

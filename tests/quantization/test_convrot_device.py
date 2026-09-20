@@ -20,7 +20,17 @@ from potatoforge.quantization.int6_packing import (
 )
 from potatoforge.quantization.int6_rowwise import (
     quantize_int6_convrot,
+    quantize_int6_convrot_mse,
+    quantize_int6_convrot_mse_packed,
     quantize_int6_convrot_packed,
+)
+from potatoforge.quantization.int7_packing import (
+    Int7PackedResult,
+    unpack_int7_row_major,
+)
+from potatoforge.quantization.int7_rowwise import (
+    quantize_int7_convrot_mse,
+    quantize_int7_convrot_mse_packed,
 )
 from potatoforge.quantization.int5_packing import (
     Int5PackedResult,
@@ -28,6 +38,8 @@ from potatoforge.quantization.int5_packing import (
 )
 from potatoforge.quantization.int5_rowwise import (
     quantize_int5_convrot,
+    quantize_int5_convrot_mse,
+    quantize_int5_convrot_mse_packed,
     quantize_int5_convrot_packed,
 )
 from potatoforge.timing import TimingCollector
@@ -57,6 +69,7 @@ W4A4_MSE_CUDA_STAGES = (
     "pack",
     "finalize",
 )
+INT_MSE_CUDA_STAGES = W4A4_MSE_CUDA_STAGES
 
 
 class TestConvRotDevice(unittest.TestCase):
@@ -218,6 +231,86 @@ class TestConvRotDevice(unittest.TestCase):
         self.assertTrue(torch.allclose(cuda.scales, cpu.scales, atol=1e-6))
         for stage in (*INT6_VALIDATION_STAGES, *CUDA_STAGES):
             self.assertIn(stage, timings)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_int5_and_int6_mse_cuda_fallback_matches_cpu(self) -> None:
+        torch.manual_seed(83)
+        weights = torch.randn((2, 256), dtype=torch.bfloat16)
+
+        for bit, cpu_quantize, cuda_quantize, unpack, packed_type in (
+            (
+                5,
+                quantize_int5_convrot_mse,
+                quantize_int5_convrot_mse_packed,
+                unpack_int5_row_major,
+                Int5PackedResult,
+            ),
+            (
+                6,
+                quantize_int6_convrot_mse,
+                quantize_int6_convrot_mse_packed,
+                unpack_int6_row_major,
+                Int6PackedResult,
+            ),
+            (
+                7,
+                quantize_int7_convrot_mse,
+                quantize_int7_convrot_mse_packed,
+                unpack_int7_row_major,
+                Int7PackedResult,
+            ),
+        ):
+            with self.subTest(bit=bit):
+                cpu = cpu_quantize(weights)
+                timings: dict[str, float] = {}
+                cuda = cuda_quantize(
+                    weights,
+                    device="cuda",
+                    internal_timings=timings,
+                )
+                cuda_codes = unpack(
+                    packed_type(cuda.packed_codes, cuda.original_shape),
+                )
+
+                self.assertEqual(cuda.packed_codes.device.type, "cpu")
+                self.assertEqual(cuda.scales.device.type, "cpu")
+                self.assertLessEqual(
+                    int(
+                        (
+                            cuda_codes.to(torch.int16)
+                            - cpu.codes.to(torch.int16)
+                        ).abs().max()
+                    ),
+                    1,
+                )
+                self.assertTrue(
+                    torch.allclose(cuda.scales, cpu.scales, atol=1e-6)
+                )
+                for stage in INT_MSE_CUDA_STAGES:
+                    self.assertIn(stage, timings)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_int5_int6_and_int7_mse_cuda_match_cpu_for_small_scales(self) -> None:
+        torch.manual_seed(84)
+        weights = torch.randn((2, 256), dtype=torch.float32) * 1e-12
+
+        for bit, cpu_quantize, cuda_quantize in (
+            (5, quantize_int5_convrot_mse, quantize_int5_convrot_mse_packed),
+            (6, quantize_int6_convrot_mse, quantize_int6_convrot_mse_packed),
+            (7, quantize_int7_convrot_mse, quantize_int7_convrot_mse_packed),
+        ):
+            with self.subTest(bit=bit):
+                cpu = cpu_quantize(weights)
+                cuda = cuda_quantize(weights, device="cuda")
+
+                self.assertTrue(
+                    torch.allclose(
+                        cuda.scales,
+                        cpu.scales,
+                        rtol=1e-3,
+                        atol=0,
+                    )
+                )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_new_cuda_paths_record_their_internal_stages(self) -> None:

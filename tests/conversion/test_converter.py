@@ -9,6 +9,8 @@ from unittest.mock import patch
 from potatoforge.planning import (
     INT5_CONVROT_MARKER,
     INT6_ROWWISE_MARKER,
+    INT7_CONVROT_MARKER,
+    INT7_ROWWISE_MARKER,
     INT8_MARKER,
     CONVROT_W4A4_MARKER,
     INT8_CONVROT_MARKER,
@@ -30,6 +32,12 @@ from potatoforge.quantization import (
 )
 from potatoforge.quantization.int6_rowwise import quantize_int6_rowwise
 from potatoforge.quantization.int6_packing import pack_int6_row_major
+from potatoforge.quantization.int7_rowwise import (
+    quantize_int7_convrot,
+    quantize_int7_convrot_mse,
+    quantize_int7_rowwise,
+)
+from potatoforge.quantization.int7_packing import pack_int7_row_major
 from potatoforge.quantization.int5_rowwise import quantize_int5_convrot_packed
 from potatoforge.profiles import QuantizationProfile
 from potatoforge.quantization.convrot_w4a4 import (
@@ -959,6 +967,138 @@ class TestConverter(unittest.TestCase):
             output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
         ).decode("utf-8")
         self.assertEqual(json.loads(marker), INT6_ROWWISE_MARKER)
+
+    def test_converter_writes_packed_int7_rowwise(self) -> None:
+        weights = torch.tensor(
+            [[1.0, 0.25, -1.0, 0.0, 0.5, -0.5, 0.125, -0.125]],
+            dtype=torch.bfloat16,
+        )
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int7_rowwise",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            save_file({"blocks.0.attn.wq.weight": weights}, str(source_path))
+
+            convert_model(source_path, target_path, profile)
+            output_tensors = load_file(target_path)
+
+        expected = quantize_int7_rowwise(weights)
+        expected_packed = pack_int7_row_major(expected.codes)
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight"],
+                expected_packed.packed_codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight_scale"],
+                expected.scales,
+            )
+        )
+        marker = bytes(
+            output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
+        ).decode("utf-8")
+        self.assertEqual(json.loads(marker), INT7_ROWWISE_MARKER)
+
+    def test_converter_writes_packed_int7_convrot(self) -> None:
+        weights = torch.zeros((1, 256), dtype=torch.bfloat16)
+        weights[0, 0] = 70.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int7_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            save_file({"blocks.0.attn.wq.weight": weights}, str(source_path))
+
+            convert_model(source_path, target_path, profile)
+            output_tensors = load_file(target_path)
+
+        expected = quantize_int7_convrot(weights)
+        expected_packed = pack_int7_row_major(expected.codes)
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight"],
+                expected_packed.packed_codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight_scale"],
+                expected.scales,
+            )
+        )
+        marker = bytes(
+            output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
+        ).decode("utf-8")
+        self.assertEqual(json.loads(marker), INT7_CONVROT_MARKER)
+
+    def test_converter_writes_packed_int7_convrot_mse_with_ordinary_metadata(
+        self,
+    ) -> None:
+        weights = torch.zeros((1, 256), dtype=torch.bfloat16)
+        weights[0, 0] = 70.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int7_convrot_mse",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            target_path = Path(directory) / "target.safetensors"
+            save_file({"blocks.0.attn.wq.weight": weights}, str(source_path))
+
+            convert_model(source_path, target_path, profile)
+            output_tensors = load_file(target_path)
+            output_header = read_header_from_safetensors(target_path)
+
+        expected = quantize_int7_convrot_mse(weights)
+        expected_packed = pack_int7_row_major(expected.codes)
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight"],
+                expected_packed.packed_codes,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                output_tensors["blocks.0.attn.wq.weight_scale"],
+                expected.scales,
+            )
+        )
+        marker = bytes(
+            output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
+        ).decode("utf-8")
+        self.assertEqual(json.loads(marker), INT7_CONVROT_MARKER)
+        self.assertEqual(
+            output_header["__metadata__"]["potatoforge.quantization"],
+            "int7_convrot",
+        )
 
     def test_converter_writes_packed_int5_convrot(self) -> None:
         weights = torch.zeros((2, 256), dtype=torch.bfloat16)

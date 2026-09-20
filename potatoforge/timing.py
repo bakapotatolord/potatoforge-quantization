@@ -40,6 +40,19 @@ W4A4_MSE_INTERNAL_STAGES = (
     "pack",
     "finalize",
 )
+INT5_MSE_INTERNAL_STAGES = (
+    "prepare",
+    "rotation",
+    "scale_init",
+    "zero_row_check",
+    "coarse_search",
+    "fine_search",
+    "final_quantize",
+    "pack",
+    "finalize",
+)
+INT6_MSE_INTERNAL_STAGES = INT5_MSE_INTERNAL_STAGES
+INT7_MSE_INTERNAL_STAGES = INT5_MSE_INTERNAL_STAGES
 SIZE_BUCKETS = ("<1 MiB", "1–16 MiB", ">16 MiB")
 _MIB = 1024**2
 

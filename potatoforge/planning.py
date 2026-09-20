@@ -90,6 +90,26 @@ INT6_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
     INT6_CONVROT_MARKER_PAYLOAD,
 )
 
+INT7_ROWWISE_MARKER = {"format": "int7_rowwise"}
+INT7_ROWWISE_MARKER_PAYLOAD: Final[bytes] = json.dumps(
+    INT7_ROWWISE_MARKER,
+).encode("utf-8")
+INT7_ROWWISE_MARKER_BYTE_COUNT: Final[int] = len(
+    INT7_ROWWISE_MARKER_PAYLOAD,
+)
+
+INT7_CONVROT_MARKER = {
+    "format": "int7_rowwise",
+    "convrot": True,
+    "convrot_groupsize": CONVROT_GROUP_SIZE,
+}
+INT7_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
+    INT7_CONVROT_MARKER,
+).encode("utf-8")
+INT7_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
+    INT7_CONVROT_MARKER_PAYLOAD,
+)
+
 INT5_CONVROT_MARKER = {
     "format": "int5_rowwise",
     "convrot": True,
@@ -319,6 +339,54 @@ def plan_int5_convrot(
     )
 
 
+def plan_int7_rowwise(
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+) -> QuantizedPlan:
+    """Plan physically packed rowwise INT7 codes."""
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "INT7 rowwise",
+    )
+    if in_features % 8 != 0:
+        raise ValueError(
+            "INT7 rowwise input features must be divisible by 8."
+        )
+
+    return _build_quantized_plan(
+        tensor_name,
+        code_shape=(out_features, (in_features // 8) * 7),
+        scale_shape=(out_features, 1),
+        marker_payload=INT7_ROWWISE_MARKER_PAYLOAD,
+        storage_dtype="U8",
+    )
+
+
+def plan_int7_convrot(
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+) -> QuantizedPlan:
+    """Plan packed rowwise W7 weights with the fixed ConvRot contract."""
+    out_features, in_features = _validate_quantization_weight(
+        tensor_name,
+        descriptor,
+        "ConvRot INT7",
+    )
+    if in_features % CONVROT_GROUP_SIZE != 0:
+        raise ValueError(
+            "ConvRot INT7 input features must be divisible by "
+            f"{CONVROT_GROUP_SIZE}."
+        )
+    return _build_quantized_plan(
+        tensor_name,
+        code_shape=(out_features, (in_features // 8) * 7),
+        scale_shape=(out_features, 1),
+        marker_payload=INT7_CONVROT_MARKER_PAYLOAD,
+        storage_dtype="U8",
+    )
+
+
 def plan_int8_convrot(
     tensor_name: str,
     descriptor: TensorDescriptor,
@@ -483,10 +551,14 @@ def build_quantization_metadata(
 def _quantization_metadata_for_layers(
     layer_actions: Mapping[str, str],
 ) -> dict[str, str]:
+    runtime_actions = {
+        "convrot_w4a4_mse": "convrot_w4a4",
+        "int5_convrot_mse": "int5_convrot",
+        "int6_convrot_mse": "int6_convrot",
+        "int7_convrot_mse": "int7_convrot",
+    }
     layer_actions = {
-        name: "convrot_w4a4"
-        if action == "convrot_w4a4_mse"
-        else action
+        name: runtime_actions.get(action, action)
         for name, action in layer_actions.items()
     }
     actions = sorted(set(layer_actions.values()))

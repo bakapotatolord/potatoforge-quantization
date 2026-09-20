@@ -36,8 +36,9 @@ def _candidate_library_paths() -> tuple[Path, ...]:
 
 def _configure_native_function(
     library: ctypes.CDLL,
+    symbol: str = "potatoforge_w4a4_mse_candidate",
 ) -> ctypes._CFuncPtr:
-    function = library.potatoforge_w4a4_mse_candidate
+    function = getattr(library, symbol)
     function.argtypes = [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -50,16 +51,18 @@ def _configure_native_function(
     return function
 
 
-class W4A4MSECandidateEvaluator:
+class MSECandidateEvaluator:
     def __init__(
         self,
         library: ctypes.CDLL,
         function: ctypes._CFuncPtr,
         device: torch.device,
+        label: str,
     ) -> None:
         self._library = library
         self._function = function
         self._device = device
+        self._label = label
         self._output: torch.Tensor | None = None
 
     def __call__(
@@ -110,7 +113,7 @@ class W4A4MSECandidateEvaluator:
         )
         if status != 0:
             raise RuntimeError(
-                "Fused W4A4-MSE CUDA launch failed "
+                f"Fused {self._label}-MSE CUDA launch failed "
                 f"for {rows}x{columns} on {self._device} with status {status}."
             )
 
@@ -119,18 +122,77 @@ class W4A4MSECandidateEvaluator:
         return self._output
 
 
-@lru_cache(maxsize=8)
-def load_w4a4_mse_candidate(
+class W4A4MSECandidateEvaluator(MSECandidateEvaluator):
+    def __init__(
+        self,
+        library: ctypes.CDLL,
+        function: ctypes._CFuncPtr,
+        device: torch.device,
+    ) -> None:
+        super().__init__(library, function, device, "W4A4")
+
+
+def _load_mse_candidate(
     device_index: int,
-) -> W4A4MSECandidateEvaluator | None:
+    symbol: str,
+    label: str,
+    evaluator_type: type[MSECandidateEvaluator] = MSECandidateEvaluator,
+) -> MSECandidateEvaluator | None:
     device = torch.device("cuda", device_index)
     for library_path in _candidate_library_paths():
         if not library_path.is_file():
             continue
         try:
             library = ctypes.CDLL(str(library_path))
-            function = _configure_native_function(library)
+            function = _configure_native_function(library, symbol)
         except (AttributeError, OSError):
             continue
-        return W4A4MSECandidateEvaluator(library, function, device)
+        if evaluator_type is MSECandidateEvaluator:
+            return MSECandidateEvaluator(library, function, device, label)
+        return evaluator_type(library, function, device)
     return None
+
+
+@lru_cache(maxsize=8)
+def load_w4a4_mse_candidate(
+    device_index: int,
+) -> W4A4MSECandidateEvaluator | None:
+    return _load_mse_candidate(
+        device_index,
+        "potatoforge_w4a4_mse_candidate",
+        "W4A4",
+        W4A4MSECandidateEvaluator,
+    )
+
+
+@lru_cache(maxsize=8)
+def load_int5_convrot_mse_candidate(
+    device_index: int,
+) -> MSECandidateEvaluator | None:
+    return _load_mse_candidate(
+        device_index,
+        "potatoforge_int5_convrot_mse_candidate",
+        "INT5 ConvRot",
+    )
+
+
+@lru_cache(maxsize=8)
+def load_int6_convrot_mse_candidate(
+    device_index: int,
+) -> MSECandidateEvaluator | None:
+    return _load_mse_candidate(
+        device_index,
+        "potatoforge_int6_convrot_mse_candidate",
+        "INT6 ConvRot",
+    )
+
+
+@lru_cache(maxsize=8)
+def load_int7_convrot_mse_candidate(
+    device_index: int,
+) -> MSECandidateEvaluator | None:
+    return _load_mse_candidate(
+        device_index,
+        "potatoforge_int7_convrot_mse_candidate",
+        "INT7 ConvRot",
+    )

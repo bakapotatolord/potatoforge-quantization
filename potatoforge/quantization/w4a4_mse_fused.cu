@@ -12,8 +12,6 @@
 namespace {
 
 constexpr float kScaleFloor = 1.0e-10f;
-constexpr int kQMin = -7;
-constexpr int kQMax = 7;
 constexpr int kThreads = 256;
 
 __global__ void candidate_mse_kernel(
@@ -21,15 +19,18 @@ __global__ void candidate_mse_kernel(
     const float* scales,
     float* output,
     int rows,
-    int columns) {
+    int columns,
+    float scale_floor,
+    int qmin,
+    int qmax) {
     const int row = blockIdx.x;
     if (row >= rows) {
         return;
     }
 
     float scale = scales[row];
-    if (scale < kScaleFloor) {
-        scale = kScaleFloor;
+    if (scale < scale_floor) {
+        scale = scale_floor;
     }
 
     float sum = 0.0f;
@@ -38,10 +39,10 @@ __global__ void candidate_mse_kernel(
     for (int column = threadIdx.x; column < columns; column += blockDim.x) {
         const float weight = weights[row_offset + column];
         float code = nearbyintf(weight / scale);
-        if (code < static_cast<float>(kQMin)) {
-            code = static_cast<float>(kQMin);
-        } else if (code > static_cast<float>(kQMax)) {
-            code = static_cast<float>(kQMax);
+        if (code < static_cast<float>(qmin)) {
+            code = static_cast<float>(qmin);
+        } else if (code > static_cast<float>(qmax)) {
+            code = static_cast<float>(qmax);
         }
         const float error = weight - code * scale;
         sum += error * error;
@@ -63,15 +64,16 @@ __global__ void candidate_mse_kernel(
     }
 }
 
-}  // namespace
-
-extern "C" PF_EXPORT int potatoforge_w4a4_mse_candidate(
+int launch_candidate(
     const float* weights,
     const float* scales,
     float* output,
     int rows,
     int columns,
-    void* stream) {
+    void* stream,
+    float scale_floor,
+    int qmin,
+    int qmax) {
     if (weights == nullptr || scales == nullptr || output == nullptr ||
         rows <= 0 || columns <= 0) {
         return 1;
@@ -83,11 +85,92 @@ extern "C" PF_EXPORT int potatoforge_w4a4_mse_candidate(
         scales,
         output,
         rows,
-        columns);
+        columns,
+        scale_floor,
+        qmin,
+        qmax);
 
     const cudaError_t launch_error = cudaGetLastError();
     if (launch_error != cudaSuccess) {
         return 1000 + static_cast<int>(launch_error);
     }
     return 0;
+}
+
+}  // namespace
+
+extern "C" PF_EXPORT int potatoforge_w4a4_mse_candidate(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_candidate(
+        weights,
+        scales,
+        output,
+        rows,
+        columns,
+        stream,
+        kScaleFloor,
+        -7,
+        7);
+}
+
+extern "C" PF_EXPORT int potatoforge_int5_convrot_mse_candidate(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_candidate(
+        weights,
+        scales,
+        output,
+        rows,
+        columns,
+        stream,
+        0.0f,
+        -15,
+        15);
+}
+
+extern "C" PF_EXPORT int potatoforge_int6_convrot_mse_candidate(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_candidate(
+        weights,
+        scales,
+        output,
+        rows,
+        columns,
+        stream,
+        0.0f,
+        -31,
+        31);
+}
+
+extern "C" PF_EXPORT int potatoforge_int7_convrot_mse_candidate(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_candidate(
+        weights,
+        scales,
+        output,
+        rows,
+        columns,
+        stream,
+        0.0f,
+        -63,
+        63);
 }

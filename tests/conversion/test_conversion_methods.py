@@ -16,8 +16,13 @@ class TestConversionMethods(unittest.TestCase):
             {
                 "int8",
                 "int6_rowwise",
+                "int7_rowwise",
                 "int5_convrot",
+                "int5_convrot_mse",
                 "int6_convrot",
+                "int6_convrot_mse",
+                "int7_convrot",
+                "int7_convrot_mse",
                 "int8_convrot",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
@@ -30,7 +35,11 @@ class TestConversionMethods(unittest.TestCase):
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
                 "int5_convrot",
+                "int5_convrot_mse",
                 "int6_convrot",
+                "int6_convrot_mse",
+                "int7_convrot",
+                "int7_convrot_mse",
             ),
         )
 
@@ -42,6 +51,38 @@ class TestConversionMethods(unittest.TestCase):
                     "Unsupported quantization action",
                 ):
                     get_conversion_method(action)
+
+    def test_mse_methods_reuse_their_ordinary_plan_and_marker(self) -> None:
+        for ordinary, mse, label in (
+            ("int5_convrot", "int5_convrot_mse", "INT5 ConvRot MSE"),
+            ("int6_convrot", "int6_convrot_mse", "INT6 ConvRot MSE"),
+            ("int7_convrot", "int7_convrot_mse", "INT7 ConvRot MSE"),
+        ):
+            with self.subTest(mse=mse):
+                ordinary_method = get_conversion_method(ordinary)
+                mse_method = get_conversion_method(mse)
+
+                self.assertEqual(mse_method.label, label)
+                self.assertTrue(mse_method.is_convrot)
+                self.assertIs(mse_method.plan, ordinary_method.plan)
+                self.assertEqual(
+                    mse_method.marker_payload,
+                    ordinary_method.marker_payload,
+                )
+                self.assertEqual(
+                    mse_method.internal_stages,
+                    (
+                        "prepare",
+                        "rotation",
+                        "scale_init",
+                        "zero_row_check",
+                        "coarse_search",
+                        "fine_search",
+                        "final_quantize",
+                        "pack",
+                        "finalize",
+                    ),
+                )
 
     def test_encoders_match_their_planned_cpu_payloads(self) -> None:
         weights = torch.zeros((2, 256), dtype=torch.bfloat16)
