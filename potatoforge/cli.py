@@ -441,7 +441,8 @@ def audit(
         "--device",
         help=(
             "Audit reconstruction device; CUDA is used for ConvRot INT8, "
-            "W4A4, and packed ConvRot INT6; plain INT8/INT6 stay on CPU."
+            "W4A4, and packed ConvRot INT6/INT7; plain INT8/INT6/INT7 "
+            "stay on CPU."
         ),
     ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
@@ -485,7 +486,8 @@ def activation_audit(
         "--device",
         help=(
             "Candidate quantization device; CUDA accelerates ConvRot INT8, "
-            "W4A4, and packed ConvRot INT6; plain INT8/INT6 stay on CPU."
+            "W4A4, and packed ConvRot INT6/INT7; plain INT8/INT6/INT7 "
+            "stay on CPU."
         ),
     ),
     activation_calibration: Path = typer.Option(
@@ -1164,7 +1166,7 @@ def quantize(
         "--device",
         help=(
             "Quantization device; CUDA is used for ConvRot INT8, W4A4, "
-            "and INT6."
+            "and packed INT5/INT6/INT7."
         ),
     ),
     adapter_path: list[Path] = typer.Option(

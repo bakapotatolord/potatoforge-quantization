@@ -66,6 +66,15 @@ uv run potatoforge inspect model path\to\quantized.safetensors --quantization
 Do not treat a profile as a generic match: use it only when its source and
 loader compatibility applies to the checkpoint.
 
+The opt-in `int5_convrot_mse`, `int6_convrot_mse`, and `int7_convrot_mse`
+actions keep ordinary ConvRot storage and loader markers while searching lower
+row scales. This can lower average reconstruction error but can increase
+maximum error by clipping outliers; each nonzero row evaluates 34 candidates.
+These actions are not a promise of faster conversion or better generated
+images. MSE actions require a runtime compatible with their ordinary format;
+INT7 actions require the matching external INT7-capable
+`ComfyUI-PotatoForge-INTx` release.
+
 ### Create a weight-only profile
 
 Create an audit, optimize a target-size profile, then run the normal
@@ -149,4 +158,4 @@ start with `blocks`.
 
 - [Advanced CLI reference](ADVANCED_CLI.md)
 - [ComfyUI-PotatoForge](https://github.com/bakapotatolord/ComfyUI-PotatoForge) for activation calibration and quantization patches
-- [ComfyUI-PotatoForge-INTx](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INTx) for INT5/INT6 and ConvRot loading
+- [ComfyUI-PotatoForge-INTx](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INTx) for INT5/INT6 and ConvRot loading; INT7 artifacts require the corresponding INT7-capable custom-node release

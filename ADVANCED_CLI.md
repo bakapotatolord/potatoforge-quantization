@@ -84,7 +84,7 @@ The estimate prints `estimated_output_bytes`, `estimated_output_mib`, and
 metadata.
 
 Use `--device cuda` for supported ConvRot paths when CUDA is available. Plain
-`int8` and `int6_rowwise` remain CPU paths; CPU is the default.
+`int8`, `int6_rowwise`, and `int7_rowwise` remain CPU paths; CPU is the default.
 
 ```powershell
 uv run potatoforge quantize `
@@ -156,9 +156,18 @@ uv run potatoforge profile audit `
 ```
 
 The default candidates are ConvRot W4A4, MSE-optimized ConvRot W4A4, packed
-ConvRot INT6, and ConvRot INT8. Use `--device cuda` for supported ConvRot
+ConvRot INT5 and INT6 (including their MSE scale-search variants), INT7 and
+INT7 MSE, and INT8. Use `--device cuda` for supported ConvRot
 candidates. Plain INT8 and plain INT6 can be requested explicitly through the
-audit implementation, but are not part of the default audit.
+audit implementation, as can plain INT7; they are not part of the default audit.
+
+`int5_convrot_mse`, `int6_convrot_mse`, and `int7_convrot_mse` search lower
+per-row scales to reduce average reconstruction error. They keep the ordinary
+bit-width ConvRot storage and runtime markers, but may increase the maximum
+individual error by clipping outliers. Each nonzero row evaluates 34 candidates.
+They do not promise faster conversion or better images. MSE actions require a
+runtime compatible with their ordinary format; INT7 actions require the matching
+INT7-capable `ComfyUI-PotatoForge-INTx` release.
 
 Generate a target-size profile directly:
 
@@ -168,7 +177,7 @@ uv run potatoforge profile optimize `
     profiles\generated\model.json `
     --profile-id model-target `
     --target-size-gib 8.5 `
-    --method int8_convrot,convrot_w4a4_mse `
+    --method int8_convrot,int5_convrot_mse,int6_convrot_mse,convrot_w4a4_mse `
     --exclude-prefix blocks.0.,blocks.1.
 ```
 
@@ -225,13 +234,14 @@ uv run potatoforge activation audit `
     path\to\source.safetensors `
     --activation-calibration calibration\session.json `
     --output reports\activation-audit.json `
-    --method convrot_w4a4,convrot_w4a4_mse,int6_convrot,int8_convrot `
+    --method convrot_w4a4,convrot_w4a4_mse,int5_convrot_mse,int6_convrot_mse,int7_convrot,int8_convrot `
     --device cuda `
     --timing
 ```
 
 The default candidates are `convrot_w4a4`, `convrot_w4a4_mse`,
-`int6_convrot`, and `int8_convrot`. Use `--tensor` for a comma-separated
+`int5_convrot`, `int5_convrot_mse`, `int6_convrot`, `int6_convrot_mse`,
+`int8_convrot`, `int7_convrot`, and `int7_convrot_mse`. Use `--tensor` for a comma-separated
 subset of calibration tensors, `--calibration-stats` to select a separate
 statistics file, and `--overwrite` to replace the cache pair.
 
@@ -267,7 +277,7 @@ uv run potatoforge activation optimize `
     --audit-cache reports\activation-audit.json `
     --activation-calibration calibration\session.json `
     --target-size-gib 8.5 `
-    --method convrot_w4a4,convrot_w4a4_mse,int6_convrot,int8_convrot `
+    --method convrot_w4a4,convrot_w4a4_mse,int6_convrot,int7_convrot,int8_convrot `
     --baseline-method convrot_w4a4 `
     --output profiles\generated\activation.json `
     --summary-output reports\activation-optimize-summary.json
@@ -337,12 +347,17 @@ uv run potatoforge extract `
 ## Formats and output safety
 
 Profiles can select `keep`, `int8`, `int8_convrot`, `int6_rowwise`,
-`int5_convrot`, `int6_convrot`, `convrot_w4a4`, or `convrot_w4a4_mse` per
+`int5_convrot`, `int5_convrot_mse`, `int6_convrot`, `int6_convrot_mse`,
+`int7_rowwise`, `int7_convrot`, `int7_convrot_mse`, `convrot_w4a4`, or `convrot_w4a4_mse` per
 tensor. ConvRot formats use the runtime-specific group size and storage layout
 defined by their format markers. `int5_convrot` requires input widths divisible
 by 256 and writes the `int5_rowwise` marker; loading it requires the
-INT5-capable `ComfyUI-PotatoForge-INT6` runtime. This does not add a plain
-`int5_rowwise` PotatoForge action. Rules are validated before conversion and
+INT5-capable `ComfyUI-PotatoForge-INTx` runtime. This does not add a plain
+`int5_rowwise` PotatoForge action. The MSE variants use the same marker and
+storage as their ordinary bit-width action. INT7 actions write `int7_rowwise`
+markers and require the corresponding INT7-capable
+`ComfyUI-PotatoForge-INTx` release at runtime. Rules are validated before
+conversion and
 applied in order by prefix and suffix, with an explicit default action.
 
 Conversion, LoRA merging, patching, and extraction refuse source/output
