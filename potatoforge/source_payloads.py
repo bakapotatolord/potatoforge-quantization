@@ -149,8 +149,12 @@ def stream_bf16_source_tensors(
     source_path: str | Path,
     descriptors: Sequence[Bf16TensorDescriptor],
     on_tensor_started: Bf16TensorProgressReporter | None = None,
+    *,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     with open(str(source_path), "rb") as source_file:
+        if check_cancelled is not None:
+            check_cancelled()
         raw_data_start = read_raw_data_start(
             source_file,
             file_label="Source file",
@@ -161,6 +165,8 @@ def stream_bf16_source_tensors(
             descriptors,
             start=1,
         ):
+            if check_cancelled is not None:
+                check_cancelled()
             if descriptor["dtype"] not in QUANTIZATION_SOURCE_DTYPES:
                 raise ValueError(
                     f"Profile-free audit received unsupported dtype "

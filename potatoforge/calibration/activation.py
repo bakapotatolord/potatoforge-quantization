@@ -3,7 +3,7 @@
 import json
 import hashlib
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from numbers import Real
 from pathlib import Path
@@ -39,15 +39,22 @@ class EvaluationMetadata:
 
 
 class _CalibrationTensorStore:
-    def __init__(self, tensors_path: Path) -> None:
+    def __init__(
+        self,
+        tensors_path: Path,
+        check_cancelled: Callable[[], None] | None = None,
+    ) -> None:
         self._handle = safe_open(
             str(tensors_path),
             framework="pt",
             device="cpu",
         )
         self.keys = frozenset(self._handle.keys())
+        self._check_cancelled = check_cancelled
 
     def get(self, key: str) -> torch.Tensor:
+        if self._check_cancelled is not None:
+            self._check_cancelled()
         return self._handle.get_tensor(key)
 
 
@@ -194,6 +201,8 @@ class ActivationCalibration:
         cls,
         metadata_path: str | Path,
         tensors_path: str | Path | None = None,
+        *,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> "ActivationCalibration":
         metadata_file = Path(metadata_path)
         tensors_file = (
@@ -215,7 +224,11 @@ class ActivationCalibration:
             raise ValueError(
                 f"Unsupported activation calibration version: {version!r}"
             )
-        return _load_activation_calibration(tensors_file, document)
+        return _load_activation_calibration(
+            tensors_file,
+            document,
+            check_cancelled=check_cancelled,
+        )
 
     def get(self, tensor_name: str) -> LayerCalibration | None:
         return self._stats.get(tensor_name)
@@ -243,9 +256,15 @@ class ActivationCalibration:
 def load_activation_calibration(
     metadata_path: str | Path,
     stats_path: str | Path | None = None,
+    *,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> ActivationCalibration:
     """Load an activation calibration pair with strict schema validation."""
-    return ActivationCalibration.load(metadata_path, stats_path)
+    return ActivationCalibration.load(
+        metadata_path,
+        stats_path,
+        check_cancelled=check_cancelled,
+    )
 
 
 def merge_activation_calibrations(
@@ -583,11 +602,15 @@ class _LayerDefinition:
 def _load_activation_calibration(
     tensors_file: Path,
     document: dict[str, Any],
+    *,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> ActivationCalibration:
     _validate_activation_metadata_header(document)
     evaluation_count = document["evaluation_count"]
     evaluations = _parse_evaluations(document["evaluations"])
-    tensor_store = _CalibrationTensorStore(tensors_file)
+    if check_cancelled is not None:
+        check_cancelled()
+    tensor_store = _CalibrationTensorStore(tensors_file, check_cancelled)
 
     layer_definitions: list[_LayerDefinition] = []
     expected_keys: set[str] = set()

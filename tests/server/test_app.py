@@ -242,8 +242,14 @@ class ServerAppTests(TestCase):
             [
                 {"value": "int8", "label": "INT8"},
                 {"value": "int6", "label": "INT6 Rowwise"},
+                {"value": "int7", "label": "INT7 Rowwise"},
                 {"value": "int8_convrot", "label": "INT8 ConvRot"},
+                {"value": "int5_convrot", "label": "INT5 ConvRot"},
+                {"value": "int5_convrot_mse", "label": "INT5 ConvRot MSE"},
                 {"value": "int6_convrot", "label": "INT6 ConvRot"},
+                {"value": "int6_convrot_mse", "label": "INT6 ConvRot MSE"},
+                {"value": "int7_convrot", "label": "INT7 ConvRot"},
+                {"value": "int7_convrot_mse", "label": "INT7 ConvRot MSE"},
                 {"value": "convrot_w4a4", "label": "W4A4 ConvRot"},
                 {"value": "convrot_w4a4_mse", "label": "W4A4 ConvRot MSE"},
             ],
@@ -335,7 +341,12 @@ class ServerAppTests(TestCase):
                     "overwrite": True,
                     "methods": [
                         "int8_convrot",
+                        "int5_convrot",
+                        "int5_convrot_mse",
                         "int6_convrot",
+                        "int6_convrot_mse",
+                        "int7_convrot",
+                        "int7_convrot_mse",
                         "convrot_w4a4",
                         "convrot_w4a4_mse",
                     ],
@@ -419,7 +430,12 @@ class ServerAppTests(TestCase):
                     "overwrite": True,
                     "methods": [
                         "int8_convrot",
+                        "int5_convrot",
+                        "int5_convrot_mse",
                         "int6_convrot",
+                        "int6_convrot_mse",
+                        "int7_convrot",
+                        "int7_convrot_mse",
                         "convrot_w4a4",
                         "convrot_w4a4_mse",
                     ],
@@ -919,7 +935,7 @@ class ServerAppTests(TestCase):
             client.post("/api/profile-folders", json={"path": str(profiles)})
             with patch(
                 "potatoforge.server.app.optimize_profile",
-                side_effect=ValueError("Weight audit format_version 5 is required; regenerate the audit."),
+                side_effect=ValueError("Profile optimization requires a format_version 8 audit. Regenerate the weight audit to include tensor L2 energy."),
             ):
                 response = client.post(
                     "/api/optimize",
@@ -934,7 +950,7 @@ class ServerAppTests(TestCase):
             self.assertEqual(response.status_code, 422)
             self.assertEqual(
                 response.json(),
-                {"detail": "Weight audit format_version 5 is required; regenerate the audit."},
+                {"detail": "Profile optimization requires a format_version 8 audit. Regenerate the weight audit to include tensor L2 energy."},
             )
 
     def test_optimize_dry_run_returns_no_profile_path(self) -> None:

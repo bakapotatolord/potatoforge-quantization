@@ -9,6 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ..audits.activation_audit import (
+    ACTIVATION_AUDIT_METRICS,
+    activation_audit_pair_paths,
+    inspect_activation_audit,
+    run_activation_audit,
+    score_activation_audit,
+)
+from ..audits.activation_measurements import MEASUREMENT_METHODS
+from ..audits.activation_profiles import generate_activation_cache_profile
 from ..audits.profile_optimizer import (
     SUPPORTED_METHODS,
     audited_global_relative_l2,
@@ -17,6 +26,7 @@ from ..audits.profile_optimizer import (
     write_profile,
 )
 from ..audits.weight_audit import audit_bf16_source
+from ..calibration import ActivationCalibration
 from ..config import load_optimize_config, load_quantize_config
 from ..converter import convert_model_from_profile, estimate_output_bytes
 from ..headers.header_reader import read_header_from_safetensors
@@ -47,6 +57,15 @@ def gib_to_bytes(value: float) -> int:
         raise ValueError("must be a finite positive number")
     byte_count = int(value * (1024**3))
     if byte_count <= 0:
+        raise ValueError("must represent at least one byte")
+    return byte_count
+
+
+def mib_to_bytes(value: float, *, allow_zero: bool = False) -> int:
+    if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+        raise ValueError("must be a finite positive number")
+    byte_count = int(value * (1024**2))
+    if byte_count <= 0 and not allow_zero:
         raise ValueError("must represent at least one byte")
     return byte_count
 
@@ -134,6 +153,173 @@ class AuditResult:
     document: dict[str, Any]
     source_path: Path
     output: Path
+
+
+@dataclass(frozen=True)
+class ActivationAuditResult:
+    source_path: Path
+    activation_calibration: Path
+    cache_metadata_path: Path
+    cache_tensors_path: Path
+    method_count: int
+    layer_count: int
+
+
+def activation_audit_model(
+    source_path: Path,
+    activation_calibration: Path,
+    output: Path,
+    *,
+    device: str = "cpu",
+    methods: Iterable[str] | None = None,
+    overwrite: bool = False,
+    on_tensor_started: Callable[[int, int, str], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> ActivationAuditResult:
+    requested_methods = tuple(MEASUREMENT_METHODS if methods is None else methods)
+    metadata_path, tensors_path = activation_audit_pair_paths(output)
+    if not overwrite:
+        preflight_output(metadata_path, False)
+        preflight_output(tensors_path, False)
+    if check_cancelled is not None:
+        check_cancelled()
+    calibration = ActivationCalibration.load(
+        activation_calibration,
+        check_cancelled=check_cancelled,
+    )
+    actual_metadata_path, actual_tensors_path = run_activation_audit(
+        source_path,
+        calibration,
+        output,
+        calibration_metadata_path=activation_calibration,
+        calibration_stats_path=None,
+        requested_methods=requested_methods,
+        on_tensor_started=on_tensor_started,
+        check_cancelled=check_cancelled,
+        device=device,
+        overwrite=overwrite,
+    )
+    return ActivationAuditResult(
+        source_path=source_path,
+        activation_calibration=activation_calibration,
+        cache_metadata_path=actual_metadata_path,
+        cache_tensors_path=actual_tensors_path,
+        method_count=len(requested_methods),
+        layer_count=len(calibration.tensor_names()),
+    )
+
+
+def score_activation_cache(
+    audit_cache: Path,
+    activation_calibration: Path,
+    *,
+    metric: str = ACTIVATION_AUDIT_METRICS[0],
+) -> dict[str, object]:
+    return score_activation_audit(
+        audit_cache,
+        activation_calibration,
+        metric=metric,
+    )
+
+
+def inspect_activation_cache(
+    audit_cache: Path,
+    activation_calibration: Path,
+    *,
+    tensor_name: str | None = None,
+    top_n: int = 5,
+) -> dict[str, object]:
+    return inspect_activation_audit(
+        audit_cache,
+        activation_calibration,
+        tensor_name=tensor_name,
+        top_n=top_n,
+    )
+
+
+@dataclass(frozen=True)
+class ActivationOptimizeResult:
+    audit_cache: Path
+    profile_path: Path | None
+    summary_path: Path | None
+    profile_id: str
+    metric: str
+    target_bytes: int | None
+    promotion_budget_bytes: int | None
+    estimated_output_bytes: int
+    dry_run: bool
+
+
+def optimize_activation_profile(
+    audit_cache: Path,
+    activation_calibration: Path,
+    output_path: Path,
+    *,
+    summary_output: Path | None = None,
+    source_path: Path | None = None,
+    target_size_gib: float | None = None,
+    promotion_budget_mib: float | None = None,
+    metric: str = ACTIVATION_AUDIT_METRICS[0],
+    methods: Iterable[str] | None = None,
+    baseline_method: str = "bf16",
+    exclude_prefixes: Iterable[str] = (),
+    exclude_suffixes: Iterable[str] = (),
+    profile_id: str = "activation-audit",
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> ActivationOptimizeResult:
+    if (target_size_gib is None) == (promotion_budget_mib is None):
+        raise ValueError("Provide exactly one target-size or promotion-budget option.")
+    target_bytes = (
+        gib_to_bytes(target_size_gib) if target_size_gib is not None else None
+    )
+    promotion_budget_bytes = (
+        mib_to_bytes(promotion_budget_mib, allow_zero=True)
+        if promotion_budget_mib is not None
+        else None
+    )
+    effective_summary_output = summary_output or output_path.with_name(
+        f"{output_path.stem}-summary.json"
+    )
+    if output_path.resolve() == effective_summary_output.resolve():
+        raise ValueError("Profile and summary output paths must be different.")
+    if not overwrite:
+        preflight_output(output_path, False)
+        preflight_output(effective_summary_output, False)
+
+    generated = generate_activation_cache_profile(
+        audit_cache,
+        activation_calibration,
+        source_path=source_path,
+        target_bytes=target_bytes,
+        promotion_budget_bytes=promotion_budget_bytes,
+        profile_id=profile_id,
+        metric=metric,
+        allowed_methods=(
+            None if methods is None else frozenset(methods)
+        ),
+        baseline_method=baseline_method,
+        excluded_prefixes=tuple(
+            value.strip() for value in exclude_prefixes if value.strip()
+        ),
+        excluded_suffixes=tuple(
+            value.strip() for value in exclude_suffixes if value.strip()
+        ),
+    )
+    if not dry_run:
+        write_profile(output_path, generated.optimized.profile, overwrite=overwrite)
+        write_json(effective_summary_output, generated.summary, overwrite)
+    return ActivationOptimizeResult(
+        audit_cache=audit_cache,
+        profile_path=None if dry_run else output_path,
+        summary_path=None if dry_run else effective_summary_output,
+        profile_id=profile_id,
+        metric=metric,
+        target_bytes=target_bytes,
+        promotion_budget_bytes=promotion_budget_bytes,
+        estimated_output_bytes=generated.optimized.output_bytes,
+        dry_run=dry_run,
+    )
 
 
 def audit_model(

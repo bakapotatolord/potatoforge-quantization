@@ -12,6 +12,8 @@ from potatoforge.planning import (
     INT5_CONVROT_MARKER_PAYLOAD,
     INT6_CONVROT_MARKER_PAYLOAD,
     INT6_ROWWISE_MARKER_PAYLOAD,
+    INT7_CONVROT_MARKER_PAYLOAD,
+    INT7_ROWWISE_MARKER_PAYLOAD,
     INT8_CONVROT_MARKER_PAYLOAD,
     INT8_MARKER_PAYLOAD,
     build_plan,
@@ -26,9 +28,16 @@ from potatoforge.quantization import (
 )
 from potatoforge.quantization.int6_rowwise import (
     quantize_int6_convrot,
+    quantize_int6_convrot_mse,
     quantize_int6_rowwise,
 )
 from potatoforge.quantization.int6_packing import pack_int6_row_major
+from potatoforge.quantization.int7_rowwise import (
+    quantize_int7_convrot,
+    quantize_int7_convrot_mse,
+    quantize_int7_rowwise,
+)
+from potatoforge.quantization.int7_packing import pack_int7_row_major
 from potatoforge.quantization.int5_packing import (
     Int5PackedResult,
     pack_int5_row_major,
@@ -38,6 +47,7 @@ from potatoforge.quantization.int5_rowwise import (
     Int5RowwiseResult,
     dequantize_int5_convrot,
     quantize_int5_convrot,
+    quantize_int5_convrot_mse,
 )
 from potatoforge.quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
@@ -427,6 +437,70 @@ class TestSourcePayloads(unittest.TestCase):
         self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
         self.assertEqual(payloads[2][1], INT6_CONVROT_MARKER_PAYLOAD)
 
+    def test_stream_source_payload_int7_rowwise_packs_codes(self) -> None:
+        tensor = torch.tensor(
+            [[1.0, 0.25, -1.0, 0.0, 0.5, -0.5, 0.125, -0.125]],
+            dtype=torch.bfloat16,
+        )
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int7_rowwise",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            payloads = list(
+                stream_output_payloads(
+                    source_path,
+                    build_plan(header.tensors, profile),
+                )
+            )
+
+        result = quantize_int7_rowwise(tensor)
+        packed = pack_int7_row_major(result.codes)
+        self.assertEqual(payloads[0][1], tensor_to_raw_bytes(packed.packed_codes))
+        self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
+        self.assertEqual(payloads[2][1], INT7_ROWWISE_MARKER_PAYLOAD)
+
+    def test_stream_source_payload_int7_convrot_packs_rotated_codes(self) -> None:
+        tensor = torch.zeros((1, 256), dtype=torch.bfloat16)
+        tensor[0, 0] = 70.0
+        profile: QuantizationProfile = {
+            "default": "keep",
+            "rules": (
+                {
+                    "action": "int7_convrot",
+                    "prefix": "blocks.",
+                    "suffixes": (".attn.wq.weight",),
+                },
+            ),
+        }
+
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "test_tensor.safetensors"
+            save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+            header = read_source_model_header(source_path)
+            payloads = list(
+                stream_output_payloads(
+                    source_path,
+                    build_plan(header.tensors, profile),
+                )
+            )
+
+        result = quantize_int7_convrot(tensor)
+        packed = pack_int7_row_major(result.codes)
+        self.assertEqual(payloads[0][1], tensor_to_raw_bytes(packed.packed_codes))
+        self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
+        self.assertEqual(payloads[2][1], INT7_CONVROT_MARKER_PAYLOAD)
+
     def test_stream_source_payload_int5_convrot_matches_runtime_contract(self) -> None:
         tensor = torch.zeros((2, 256), dtype=torch.bfloat16)
         tensor[0, 0] = 70.0
@@ -495,6 +569,59 @@ class TestSourcePayloads(unittest.TestCase):
         self.assertEqual(marker["format"], "int5_rowwise")
         self.assertIs(marker["convrot"], True)
         self.assertEqual(marker["convrot_groupsize"], 256)
+
+    def test_stream_source_payloads_for_mse_keep_the_ordinary_runtime_contract(
+        self,
+    ) -> None:
+        tensor = torch.zeros((2, 256), dtype=torch.bfloat16)
+        tensor[0, 0] = 70.0
+        tensor[1, 1] = -12.0
+        for action, quantize, pack, marker in (
+            (
+                "int5_convrot_mse",
+                quantize_int5_convrot_mse,
+                pack_int5_row_major,
+                INT5_CONVROT_MARKER_PAYLOAD,
+            ),
+            (
+                "int6_convrot_mse",
+                quantize_int6_convrot_mse,
+                pack_int6_row_major,
+                INT6_CONVROT_MARKER_PAYLOAD,
+            ),
+            (
+                "int7_convrot_mse",
+                quantize_int7_convrot_mse,
+                pack_int7_row_major,
+                INT7_CONVROT_MARKER_PAYLOAD,
+            ),
+        ):
+            with self.subTest(action=action):
+                profile: QuantizationProfile = {
+                    "default": "keep",
+                    "rules": (
+                        {
+                            "action": action,
+                            "prefix": "blocks.",
+                            "suffixes": (".attn.wq.weight",),
+                        },
+                    ),
+                }
+                with TemporaryDirectory() as directory:
+                    source_path = Path(directory) / "test_tensor.safetensors"
+                    save_file({"blocks.0.attn.wq.weight": tensor}, str(source_path))
+                    header = read_source_model_header(source_path)
+                    entries = build_plan(header.tensors, profile)
+                    payloads = list(stream_output_payloads(source_path, entries))
+
+                result = quantize(tensor)
+                packed = pack(result.codes)
+                self.assertEqual(
+                    payloads[0][1],
+                    tensor_to_raw_bytes(packed.packed_codes),
+                )
+                self.assertEqual(payloads[1][1], tensor_to_raw_bytes(result.scales))
+                self.assertEqual(payloads[2][1], marker)
 
     def test_stream_source_payload_convrot_w4a4(self) -> None:
         tensor = torch.zeros(
