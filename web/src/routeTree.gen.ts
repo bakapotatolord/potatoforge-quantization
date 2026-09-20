@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ActivationRouteImport } from './routes/activation'
 import { Route as AuditRouteImport } from './routes/audit'
 import { Route as InspectRouteImport } from './routes/inspect'
 import { Route as OptimizeRouteImport } from './routes/optimize'
@@ -19,6 +20,11 @@ import { Route as SettingsRouteImport } from './routes/settings'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ActivationRoute = ActivationRouteImport.update({
+  id: '/activation',
+  path: '/activation',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuditRoute = AuditRouteImport.update({
@@ -49,6 +55,7 @@ const SettingsRoute = SettingsRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
@@ -57,6 +64,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
@@ -66,6 +74,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
@@ -75,12 +84,26 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/audit' | '/inspect' | '/optimize' | '/quantize' | '/settings'
+    | '/'
+    | '/activation'
+    | '/audit'
+    | '/inspect'
+    | '/optimize'
+    | '/quantize'
+    | '/settings'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/audit' | '/inspect' | '/optimize' | '/quantize' | '/settings'
+  to:
+    | '/'
+    | '/activation'
+    | '/audit'
+    | '/inspect'
+    | '/optimize'
+    | '/quantize'
+    | '/settings'
   id:
     | '__root__'
     | '/'
+    | '/activation'
     | '/audit'
     | '/inspect'
     | '/optimize'
@@ -90,6 +113,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ActivationRoute: typeof ActivationRoute
   AuditRoute: typeof AuditRoute
   InspectRoute: typeof InspectRoute
   OptimizeRoute: typeof OptimizeRoute
@@ -104,6 +128,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/activation': {
+      id: '/activation'
+      path: '/activation'
+      fullPath: '/activation'
+      preLoaderRoute: typeof ActivationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/audit': {
@@ -146,6 +177,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ActivationRoute: ActivationRoute,
   AuditRoute: AuditRoute,
   InspectRoute: InspectRoute,
   OptimizeRoute: OptimizeRoute,

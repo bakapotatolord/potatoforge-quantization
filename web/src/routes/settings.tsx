@@ -141,6 +141,7 @@ function SettingsPage() {
   const [loraFolderPath, setLoraFolderPath] = useState('')
   const [profileFolderPath, setProfileFolderPath] = useState('')
   const [outputFolderPath, setOutputFolderPath] = useState('')
+  const [activationFolderPath, setActivationFolderPath] = useState('')
   const queryClient = useQueryClient()
 
   const modelFoldersQuery = useQuery({
@@ -158,6 +159,10 @@ function SettingsPage() {
   const outputFoldersQuery = useQuery({
     queryKey: ['output-folders'],
     queryFn: () => getJson<FoldersResponse>('/api/output-folders'),
+  })
+  const activationFoldersQuery = useQuery({
+    queryKey: ['activation-folders'],
+    queryFn: () => getJson<FoldersResponse>('/api/activation-folders'),
   })
   const addModelFolderMutation = useMutation({
     mutationFn: (path: string) => postJson<FoldersResponse>('/api/model-folders', { path }),
@@ -235,12 +240,33 @@ function SettingsPage() {
       ])
     },
   })
+  const addActivationFolderMutation = useMutation({
+    mutationFn: (path: string) => postJson<FoldersResponse>('/api/activation-folders', { path }),
+    onSuccess: async () => {
+      setActivationFolderPath('')
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['activation-folders'] }),
+        queryClient.invalidateQueries({ queryKey: ['activation-calibrations'] }),
+        queryClient.invalidateQueries({ queryKey: ['activation-audit-caches'] }),
+      ])
+    },
+  })
+  const removeActivationFolderMutation = useMutation({
+    mutationFn: (path: string) => deleteJson<FoldersResponse>('/api/activation-folders', { path }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['activation-folders'] }),
+        queryClient.invalidateQueries({ queryKey: ['activation-calibrations'] }),
+        queryClient.invalidateQueries({ queryKey: ['activation-audit-caches'] }),
+      ])
+    },
+  })
 
   return (
     <Stack gap="xl">
       <PageHeader
         title="Settings"
-        description="Configure the local folders used for checkpoints, LoRAs, profiles, and outputs."
+        description="Configure the local folders used for checkpoints, LoRAs, profiles, outputs, and activation artifacts."
       />
 
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg" verticalSpacing="lg">
@@ -326,6 +352,27 @@ function SettingsPage() {
           onPathChange={setOutputFolderPath}
           onAdd={() => addOutputFolderMutation.mutate(outputFolderPath.trim())}
           onRemove={(path) => removeOutputFolderMutation.mutate(path)}
+        />
+
+        <FolderLibrary
+          title="Activation artifacts"
+          description="Add folders containing paired activation calibration and audit-cache JSON/Safetensors files."
+          label="Activation folder"
+          placeholder="C:\activations"
+          emptyMessage="Add a folder to make activation calibrations and caches available in Activation."
+          loadingMessage="Loading activation artifacts…"
+          folders={activationFoldersQuery.data?.folders ?? []}
+          path={activationFolderPath}
+          isLoading={activationFoldersQuery.isPending}
+          isAdding={addActivationFolderMutation.isPending}
+          error={
+            activationFoldersQuery.error ??
+            addActivationFolderMutation.error ??
+            removeActivationFolderMutation.error
+          }
+          onPathChange={setActivationFolderPath}
+          onAdd={() => addActivationFolderMutation.mutate(activationFolderPath.trim())}
+          onRemove={(path) => removeActivationFolderMutation.mutate(path)}
         />
       </SimpleGrid>
     </Stack>

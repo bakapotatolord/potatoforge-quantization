@@ -1,4 +1,4 @@
-import { ChartBar, Cube, Gear, MagnifyingGlass, SlidersHorizontal } from '@phosphor-icons/react'
+import { ChartBar, Cube, Gear, MagnifyingGlass, Pulse, SlidersHorizontal } from '@phosphor-icons/react'
 import { AppShell, Burger, Container, Group, NavLink, Title } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-router'
@@ -46,6 +46,13 @@ function RootLayout() {
           label="Optimize"
           leftSection={<SlidersHorizontal size={18} />}
           active={pathname === '/optimize'}
+        />
+        <NavLink
+          component={Link}
+          to="/activation"
+          label="Activation"
+          leftSection={<Pulse size={18} />}
+          active={pathname === '/activation'}
         />
         <NavLink
           component={Link}
