@@ -19,13 +19,33 @@ from ..quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
 )
+from ..quantization.int5_rowwise import (
+    dequantize_int5_convrot,
+    dequantize_int5_convrot_packed,
+    quantize_int5_convrot,
+    quantize_int5_convrot_mse,
+    quantize_int5_convrot_mse_packed,
+    quantize_int5_convrot_packed,
+)
 from ..quantization.int6_rowwise import (
     dequantize_int6_convrot,
     dequantize_int6_convrot_packed,
     dequantize_int6_rowwise,
     quantize_int6_convrot,
+    quantize_int6_convrot_mse,
+    quantize_int6_convrot_mse_packed,
     quantize_int6_convrot_packed,
     quantize_int6_rowwise,
+)
+from ..quantization.int7_rowwise import (
+    dequantize_int7_convrot,
+    dequantize_int7_convrot_packed,
+    dequantize_int7_rowwise,
+    quantize_int7_convrot,
+    quantize_int7_convrot_mse,
+    quantize_int7_convrot_mse_packed,
+    quantize_int7_convrot_packed,
+    quantize_int7_rowwise,
 )
 from ..quantization.int8_tensorwise import (
     Int8TensorwiseResult,
@@ -47,16 +67,27 @@ METHOD_ACTIONS: Final[dict[str, QuantizationAction]] = {
     "bf16": "keep",
     "int8": "int8",
     "int6": "int6_rowwise",
+    "int7": "int7_rowwise",
+    "int5_convrot": "int5_convrot",
+    "int5_convrot_mse": "int5_convrot_mse",
     "int8_convrot": "int8_convrot",
     "int6_convrot": "int6_convrot",
+    "int6_convrot_mse": "int6_convrot_mse",
+    "int7_convrot": "int7_convrot",
+    "int7_convrot_mse": "int7_convrot_mse",
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
 }
 MEASUREMENT_METHODS: Final[tuple[str, ...]] = (
     "convrot_w4a4",
     "convrot_w4a4_mse",
+    "int5_convrot",
+    "int5_convrot_mse",
     "int6_convrot",
+    "int6_convrot_mse",
     "int8_convrot",
+    "int7_convrot",
+    "int7_convrot_mse",
 )
 
 
@@ -243,6 +274,20 @@ def _reconstruct_candidate(
         return dequantize_int8_tensorwise(quantize_int8_tensorwise(weights))
     if method == "int6":
         return dequantize_int6_rowwise(quantize_int6_rowwise(weights))
+    if method == "int7":
+        return dequantize_int7_rowwise(quantize_int7_rowwise(weights))
+    if method == "int5_convrot":
+        if torch.device(device).type != "cuda":
+            return dequantize_int5_convrot(quantize_int5_convrot(weights))
+        return dequantize_int5_convrot_packed(
+            quantize_int5_convrot_packed(weights, device=device)
+        )
+    if method == "int5_convrot_mse":
+        if torch.device(device).type != "cuda":
+            return dequantize_int5_convrot(quantize_int5_convrot_mse(weights))
+        return dequantize_int5_convrot_packed(
+            quantize_int5_convrot_mse_packed(weights, device=device)
+        )
     if method == "int8_convrot":
         result = quantize_int8_convrot(weights, device=device)
         if torch.device(device).type == "cuda":
@@ -256,6 +301,23 @@ def _reconstruct_candidate(
             return dequantize_int6_convrot(quantize_int6_convrot(weights))
         packed = quantize_int6_convrot_packed(weights, device=device)
         return dequantize_int6_convrot_packed(packed, device=device)
+    if method == "int6_convrot_mse":
+        if torch.device(device).type != "cuda":
+            return dequantize_int6_convrot(quantize_int6_convrot_mse(weights))
+        packed = quantize_int6_convrot_mse_packed(weights, device=device)
+        return dequantize_int6_convrot_packed(packed, device=device)
+    if method == "int7_convrot":
+        if torch.device(device).type != "cuda":
+            return dequantize_int7_convrot(quantize_int7_convrot(weights))
+        packed = quantize_int7_convrot_packed(weights, device=device)
+        return dequantize_int7_convrot_packed(packed, device=device)
+    if method == "int7_convrot_mse":
+        if torch.device(device).type != "cuda":
+            return dequantize_int7_convrot(
+                quantize_int7_convrot_mse(weights)
+            )
+        packed = quantize_int7_convrot_mse_packed(weights, device=device)
+        return dequantize_int7_convrot_packed(packed, device=device)
     if method == "convrot_w4a4":
         result = quantize_convrot_w4a4(weights, device=device)
         if torch.device(device).type == "cuda":

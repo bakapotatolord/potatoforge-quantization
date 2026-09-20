@@ -189,7 +189,7 @@ class TestActivationAudit(unittest.TestCase):
                 [[-1.0, 0.5, 1.0, 2.0], [3.0, -2.0, 0.25, 1.5]],
                 dtype=torch.bfloat16,
             )
-            methods = ("bf16", "int8", "int8_convrot")
+            methods = ("bf16", "int8", "int8_convrot", "int7_convrot_mse")
             candidates = measure_activation_candidates(
                 "blocks.0.attn.wq.weight",
                 descriptor,

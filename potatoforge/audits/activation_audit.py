@@ -285,12 +285,15 @@ def run_activation_audit(
     requested_methods: Sequence[str] | None = None,
     tensor_names: Sequence[str] | None = None,
     on_tensor_started: Callable[[int, int, str], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
     device: str = "cpu",
     method_timings: dict[str, float] | None = None,
     overwrite: bool = False,
 ) -> tuple[Path, Path]:
     """Measure every selected activation calibration layer and write its cache."""
     _validate_activation_audit_device(device)
+    if check_cancelled is not None:
+        check_cancelled()
     if calibration.version != 1:
         raise ValueError("Activation audit requires the current calibration format.")
     source_header = calibration.validate_against_source(source_path)
@@ -371,6 +374,7 @@ def run_activation_audit(
             source_path,
             descriptor_items,
             on_tensor_started,
+            check_cancelled=check_cancelled,
         ):
             layer = calibration.get(tensor_name)
             if not isinstance(layer, LayerCalibration):
@@ -385,6 +389,7 @@ def run_activation_audit(
                 bias_reader = stream_bf16_source_tensors(
                     source_path,
                     ((bias_name, descriptor),),
+                    check_cancelled=check_cancelled,
                 )
                 try:
                     _, bias_value = next(bias_reader)

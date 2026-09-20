@@ -154,6 +154,30 @@ class TestProfiles(unittest.TestCase):
             "keep",
         )
 
+    def test_loads_int7_convrot_mse_rule(self) -> None:
+        document = self._base_document()
+        document["rules"] = [
+            {
+                "action": "keep",
+                "prefix": "blocks.1.",
+                "suffixes": [".weight"],
+            },
+            {
+                "action": "int7_convrot_mse",
+                "prefix": "blocks.",
+                "suffixes": [".weight"],
+            },
+        ]
+
+        with TemporaryDirectory() as directory:
+            profile = load_profile(self._write_document(directory, document))
+
+        self.assertEqual(resolve_profile(profile, "blocks.1.attn.wq.weight"), "keep")
+        self.assertEqual(
+            resolve_profile(profile, "blocks.2.attn.wq.weight"),
+            "int7_convrot_mse",
+        )
+
     def test_matches_fused_qkv_suffix_without_broadening_weight_matching(self) -> None:
         document = self._base_document()
         document["rules"] = [
@@ -361,6 +385,25 @@ class TestProfiles(unittest.TestCase):
             resolve_profile(profile, "blocks.0.attn.wq.weight"),
             "int5_convrot",
         )
+
+    def test_loads_krea_int5_and_int6_convrot_mse_profiles(self) -> None:
+        for filename, action in (
+            (
+                "profiles/krea2turbo/krea2turbo-int5-convrot-mse.json",
+                "int5_convrot_mse",
+            ),
+            (
+                "profiles/krea2turbo/krea2turbo-int6-convrot-mse.json",
+                "int6_convrot_mse",
+            ),
+        ):
+            with self.subTest(filename=filename):
+                profile = load_profile(filename)
+
+                self.assertEqual(
+                    resolve_profile(profile, "blocks.0.attn.wq.weight"),
+                    action,
+                )
 
     def test_loads_w4a4_mse_action(self) -> None:
         document = self._base_document()

@@ -697,7 +697,7 @@ class TestProfileOptimizer(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "format_version 5.*Regenerate the weight audit",
+                "format_version 8.*Regenerate the weight audit",
             ):
                 load_weight_audit(audit_path)
 
@@ -900,6 +900,35 @@ class TestProfileOptimizer(unittest.TestCase):
         self.assertEqual(
             optimized.profile["rules"][0]["action"],
             "int6_rowwise",
+        )
+
+    def test_preserves_int7_convrot_mse_as_a_generated_profile_action(self) -> None:
+        with TemporaryDirectory() as directory:
+            source_path = self._write_source(directory)
+            audit = audit_bf16_source(source_path)
+            source_header = read_source_model_header(source_path)
+            profile = {
+                "profile_id": "int7-mse",
+                "default": "keep",
+                "rules": (
+                    {
+                        "action": "int7_convrot_mse",
+                        "prefix": "blocks.0.attn.wq.weight",
+                        "suffixes": ("",),
+                    },
+                ),
+            }
+
+            optimized = optimize_target_size(
+                audit,
+                "int7-mse",
+                estimate_profile_bytes(source_header, profile),
+                frozenset(("int7_convrot", "int7_convrot_mse")),
+            )
+
+        self.assertEqual(
+            optimized.profile["rules"][0]["action"],
+            "int7_convrot_mse",
         )
 
 

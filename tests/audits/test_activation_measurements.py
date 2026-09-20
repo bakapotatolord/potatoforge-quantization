@@ -116,8 +116,13 @@ class TestActivationMeasurements(unittest.TestCase):
             (
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
+                "int5_convrot",
+                "int5_convrot_mse",
                 "int6_convrot",
+                "int6_convrot_mse",
                 "int8_convrot",
+                "int7_convrot",
+                "int7_convrot_mse",
             ),
         )
         self.assertEqual(

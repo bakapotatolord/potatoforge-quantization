@@ -41,8 +41,14 @@ class TestWeightAudit(unittest.TestCase):
                 "bf16",
                 "int8",
                 "int6",
+                "int7",
                 "int8_convrot",
+                "int5_convrot",
+                "int5_convrot_mse",
                 "int6_convrot",
+                "int6_convrot_mse",
+                "int7_convrot",
+                "int7_convrot_mse",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
             },
@@ -50,6 +56,30 @@ class TestWeightAudit(unittest.TestCase):
         self.assertEqual(
             methods["convrot_w4a4_mse"]["storage_bytes"],
             methods["convrot_w4a4"]["storage_bytes"],
+        )
+        self.assertEqual(
+            methods["int5_convrot_mse"]["storage_bytes"],
+            methods["int5_convrot"]["storage_bytes"],
+        )
+        self.assertEqual(
+            methods["int6_convrot_mse"]["storage_bytes"],
+            methods["int6_convrot"]["storage_bytes"],
+        )
+        self.assertEqual(
+            methods["int7_convrot_mse"]["storage_bytes"],
+            methods["int7_convrot"]["storage_bytes"],
+        )
+        self.assertLessEqual(
+            methods["int5_convrot_mse"]["relative_l2_error"],
+            methods["int5_convrot"]["relative_l2_error"] + 1e-7,
+        )
+        self.assertLessEqual(
+            methods["int6_convrot_mse"]["relative_l2_error"],
+            methods["int6_convrot"]["relative_l2_error"] + 1e-7,
+        )
+        self.assertLessEqual(
+            methods["int7_convrot_mse"]["relative_l2_error"],
+            methods["int7_convrot"]["relative_l2_error"] + 1e-7,
         )
         self.assertLessEqual(
             methods["convrot_w4a4_mse"]["relative_l2_error"],
@@ -76,11 +106,15 @@ class TestWeightAudit(unittest.TestCase):
 
         self.assertIsNone(methods["int8"]["relative_l2_error"])
         self.assertIsNone(methods["int6"]["relative_l2_error"])
+        self.assertIsNone(methods["int7"]["relative_l2_error"])
         self.assertIsNotNone(
             methods["int8_convrot"]["relative_l2_error"]
         )
         self.assertIsNotNone(
             methods["int6_convrot"]["relative_l2_error"]
+        )
+        self.assertIsNotNone(
+            methods["int7_convrot"]["relative_l2_error"]
         )
         self.assertIsNotNone(
             methods["convrot_w4a4"]["relative_l2_error"]
@@ -143,7 +177,7 @@ class TestWeightAudit(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(document["summary"]["audited_layer_count"], 2)
         self.assertEqual(document["summary"]["skipped_tensor_count"], 2)
-        self.assertEqual(document["format_version"], 5)
+        self.assertEqual(document["format_version"], 8)
 
         wide_result = results[0]
         self.assertEqual(
@@ -162,21 +196,40 @@ class TestWeightAudit(unittest.TestCase):
             wide_result["methods"]["int6"]["storage_bytes"],
             wide_result["methods"]["int8"]["storage_bytes"],
         )
+        self.assertLess(
+            wide_result["methods"]["int7"]["storage_bytes"],
+            wide_result["methods"]["int8"]["storage_bytes"],
+        )
         self.assertIsNotNone(
             wide_result["error_deltas"]["int8_convrot_vs_int8"]
         )
         self.assertIsNotNone(
             wide_result["methods"]["int6_convrot"]["relative_l2_error"]
         )
+        self.assertIsNotNone(
+            wide_result["methods"]["int7_convrot"]["relative_l2_error"]
+        )
+        self.assertIsNotNone(
+            wide_result["methods"]["int7_convrot_mse"]["relative_l2_error"]
+        )
         narrow_result = results[1]
         self.assertIsNotNone(
             narrow_result["methods"]["int6"]["relative_l2_error"]
+        )
+        self.assertIsNotNone(
+            narrow_result["methods"]["int7"]["relative_l2_error"]
         )
         self.assertIsNone(
             narrow_result["methods"]["int8_convrot"]["relative_l2_error"]
         )
         self.assertIsNone(
             narrow_result["methods"]["int6_convrot"]["relative_l2_error"]
+        )
+        self.assertIsNone(
+            narrow_result["methods"]["int7_convrot"]["relative_l2_error"]
+        )
+        self.assertIsNone(
+            narrow_result["methods"]["int7_convrot_mse"]["relative_l2_error"]
         )
         self.assertIsNone(
             narrow_result["methods"]["convrot_w4a4"]["storage_bytes"]
@@ -335,7 +388,7 @@ class TestWeightAudit(unittest.TestCase):
 
     def test_writes_a_report_without_overwriting(self) -> None:
         document = {
-            "format_version": 5,
+            "format_version": 8,
             "source_path": "source.safetensors",
             "selection": {
                 "dtype": "BF16",
@@ -350,8 +403,14 @@ class TestWeightAudit(unittest.TestCase):
                     "bf16": 0,
                     "int8": 0,
                     "int6": 0,
+                    "int7": 0,
                     "int8_convrot": 0,
+                    "int5_convrot": 0,
+                    "int5_convrot_mse": 0,
                     "int6_convrot": 0,
+                    "int6_convrot_mse": 0,
+                    "int7_convrot": 0,
+                    "int7_convrot_mse": 0,
                     "convrot_w4a4": 0,
                     "convrot_w4a4_mse": 0,
                 },
@@ -370,7 +429,7 @@ class TestWeightAudit(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 write_weight_audit_report(output_path, document)
 
-        self.assertEqual(saved_document["format_version"], 5)
+        self.assertEqual(saved_document["format_version"], 8)
         self.assertEqual(saved_document["results"], [])
 
     def test_records_known_tensor_energy(self) -> None:

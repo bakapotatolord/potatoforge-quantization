@@ -32,8 +32,14 @@ _METHOD_ACTIONS: Final[dict[QuantizationMethod, QuantizationAction]] = {
     "bf16": "keep",
     "int8": "int8",
     "int6": "int6_rowwise",
+    "int7": "int7_rowwise",
     "int8_convrot": "int8_convrot",
+    "int5_convrot": "int5_convrot",
+    "int5_convrot_mse": "int5_convrot_mse",
     "int6_convrot": "int6_convrot",
+    "int6_convrot_mse": "int6_convrot_mse",
+    "int7_convrot": "int7_convrot",
+    "int7_convrot_mse": "int7_convrot_mse",
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
 }
@@ -45,13 +51,20 @@ SUPPORTED_METHODS: Final[frozenset[QuantizationMethod]] = frozenset(
     (
         "bf16",
         "int8",
+        "int7",
         "int8_convrot",
+        "int5_convrot",
+        "int5_convrot_mse",
+        "int6_convrot",
+        "int6_convrot_mse",
+        "int7_convrot",
+        "int7_convrot_mse",
         "convrot_w4a4",
         "convrot_w4a4_mse",
     ),
 )
 
-_AUDIT_FORMAT_VERSION: Final[int] = 5
+_AUDIT_FORMAT_VERSION: Final[int] = 8
 _KNAPSACK_BUDGET_UNIT_BYTES: Final[int] = 1 << 20
 
 
@@ -78,7 +91,7 @@ class _KnapsackFrontier(NamedTuple):
 
 def _audit_version_error() -> ValueError:
     return ValueError(
-        "Profile optimization requires a format_version 5 audit. "
+        "Profile optimization requires a format_version 8 audit. "
         "Regenerate the weight audit to include tensor L2 energy."
     )
 

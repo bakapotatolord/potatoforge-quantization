@@ -9,8 +9,11 @@ from ..planning import (
     QUANTIZATION_SOURCE_DTYPES,
     TensorDescriptor,
     plan_convrot_w4a4,
+    plan_int5_convrot,
     plan_int6_convrot,
     plan_int6_rowwise,
+    plan_int7_convrot,
+    plan_int7_rowwise,
     plan_int8_convrot,
     plan_int8_tensorwise,
     source_bytes,
@@ -28,8 +31,14 @@ QuantizationMethod = Literal[
     "bf16",
     "int8",
     "int6",
+    "int7",
     "int8_convrot",
+    "int5_convrot",
+    "int5_convrot_mse",
     "int6_convrot",
+    "int6_convrot_mse",
+    "int7_convrot",
+    "int7_convrot_mse",
     "convrot_w4a4",
     "convrot_w4a4_mse",
 ]
@@ -37,8 +46,14 @@ QuantizationMethod = Literal[
 _AUDIT_METHOD_ACTIONS: dict[QuantizationMethod, str] = {
     "int8": "int8",
     "int6": "int6_rowwise",
+    "int7": "int7_rowwise",
     "int8_convrot": "int8_convrot",
+    "int5_convrot": "int5_convrot",
+    "int5_convrot_mse": "int5_convrot_mse",
     "int6_convrot": "int6_convrot",
+    "int6_convrot_mse": "int6_convrot_mse",
+    "int7_convrot": "int7_convrot",
+    "int7_convrot_mse": "int7_convrot_mse",
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
 }
@@ -98,8 +113,14 @@ class MethodAudits(NamedTuple):
     bf16: MethodAudit
     int8: MethodAudit
     int6: MethodAudit
+    int7: MethodAudit
     int8_convrot: MethodAudit
+    int5_convrot: MethodAudit
+    int5_convrot_mse: MethodAudit
     int6_convrot: MethodAudit
+    int6_convrot_mse: MethodAudit
+    int7_convrot: MethodAudit
+    int7_convrot_mse: MethodAudit
     convrot_w4a4: MethodAudit
     convrot_w4a4_mse: MethodAudit
 
@@ -107,9 +128,15 @@ class MethodAudits(NamedTuple):
 class ErrorDeltas(NamedTuple):
     int8_vs_bf16: float | None
     int6_vs_int8: float | None
+    int7_vs_int8: float | None
     int8_convrot_vs_int8: float | None
+    int5_convrot_mse_vs_int5_convrot: float | None
     int6_convrot_vs_int6: float | None
+    int6_convrot_mse_vs_int6_convrot: float | None
     int6_convrot_vs_int8_convrot: float | None
+    int7_convrot_vs_int7: float | None
+    int7_convrot_mse_vs_int7_convrot: float | None
+    int7_convrot_vs_int8_convrot: float | None
     convrot_w4a4_vs_int8: float | None
     convrot_w4a4_vs_int8_convrot: float | None
 
@@ -133,8 +160,14 @@ class MethodAuditsRecord(TypedDict):
     bf16: MethodAuditRecord
     int8: MethodAuditRecord
     int6: MethodAuditRecord
+    int7: MethodAuditRecord
     int8_convrot: MethodAuditRecord
+    int5_convrot: MethodAuditRecord
+    int5_convrot_mse: MethodAuditRecord
     int6_convrot: MethodAuditRecord
+    int6_convrot_mse: MethodAuditRecord
+    int7_convrot: MethodAuditRecord
+    int7_convrot_mse: MethodAuditRecord
     convrot_w4a4: MethodAuditRecord
     convrot_w4a4_mse: MethodAuditRecord
 
@@ -142,9 +175,15 @@ class MethodAuditsRecord(TypedDict):
 class ErrorDeltasRecord(TypedDict):
     int8_vs_bf16: float | None
     int6_vs_int8: float | None
+    int7_vs_int8: float | None
     int8_convrot_vs_int8: float | None
+    int5_convrot_mse_vs_int5_convrot: float | None
     int6_convrot_vs_int6: float | None
+    int6_convrot_mse_vs_int6_convrot: float | None
     int6_convrot_vs_int8_convrot: float | None
+    int7_convrot_vs_int7: float | None
+    int7_convrot_mse_vs_int7_convrot: float | None
+    int7_convrot_vs_int8_convrot: float | None
     convrot_w4a4_vs_int8: float | None
     convrot_w4a4_vs_int8_convrot: float | None
 
@@ -237,8 +276,14 @@ def _audit_weight(
         else plan_int8_tensorwise(tensor_name, descriptor)
     )
     int6_plan = None
+    int7_plan = None
     int8_convrot_plan = None
+    int5_convrot_plan = None
+    int5_convrot_mse_plan = None
     int6_convrot_plan = None
+    int6_convrot_mse_plan = None
+    int7_convrot_plan = None
+    int7_convrot_mse_plan = None
     w4a4_plan = None
 
     if (
@@ -246,11 +291,24 @@ def _audit_weight(
     ):
         int6_plan = plan_int6_rowwise(tensor_name, descriptor)
 
+    if "int7" in methods and weights.shape[1] % 8 == 0:
+        int7_plan = plan_int7_rowwise(tensor_name, descriptor)
+
     if weights.shape[1] % CONVROT_GROUP_SIZE == 0:
         if "int8_convrot" in methods:
             int8_convrot_plan = plan_int8_convrot(tensor_name, descriptor)
+        if "int5_convrot" in methods:
+            int5_convrot_plan = plan_int5_convrot(tensor_name, descriptor)
+        if "int5_convrot_mse" in methods:
+            int5_convrot_mse_plan = plan_int5_convrot(tensor_name, descriptor)
         if "int6_convrot" in methods:
             int6_convrot_plan = plan_int6_convrot(tensor_name, descriptor)
+        if "int6_convrot_mse" in methods:
+            int6_convrot_mse_plan = plan_int6_convrot(tensor_name, descriptor)
+        if "int7_convrot" in methods:
+            int7_convrot_plan = plan_int7_convrot(tensor_name, descriptor)
+        if "int7_convrot_mse" in methods:
+            int7_convrot_mse_plan = plan_int7_convrot(tensor_name, descriptor)
         if "convrot_w4a4" in methods or "convrot_w4a4_mse" in methods:
             w4a4_plan = plan_convrot_w4a4(tensor_name, descriptor)
 
@@ -266,6 +324,11 @@ def _audit_weight(
             None if int6_plan is None else int6_plan.estimated_bytes,
             bf16_bytes,
         ),
+        int7=_method_audit(
+            comparison.int7_relative_l2_error,
+            None if int7_plan is None else int7_plan.estimated_bytes,
+            bf16_bytes,
+        ),
         int8_convrot=_method_audit(
             comparison.int8_convrot_relative_l2_error,
             None
@@ -273,11 +336,46 @@ def _audit_weight(
             else int8_convrot_plan.estimated_bytes,
             bf16_bytes,
         ),
+        int5_convrot=_method_audit(
+            comparison.int5_convrot_relative_l2_error,
+            None
+            if int5_convrot_plan is None
+            else int5_convrot_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        int5_convrot_mse=_method_audit(
+            comparison.int5_convrot_mse_relative_l2_error,
+            None
+            if int5_convrot_mse_plan is None
+            else int5_convrot_mse_plan.estimated_bytes,
+            bf16_bytes,
+        ),
         int6_convrot=_method_audit(
             comparison.int6_convrot_relative_l2_error,
             None
             if int6_convrot_plan is None
             else int6_convrot_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        int6_convrot_mse=_method_audit(
+            comparison.int6_convrot_mse_relative_l2_error,
+            None
+            if int6_convrot_mse_plan is None
+            else int6_convrot_mse_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        int7_convrot=_method_audit(
+            comparison.int7_convrot_relative_l2_error,
+            None
+            if int7_convrot_plan is None
+            else int7_convrot_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        int7_convrot_mse=_method_audit(
+            comparison.int7_convrot_mse_relative_l2_error,
+            None
+            if int7_convrot_mse_plan is None
+            else int7_convrot_mse_plan.estimated_bytes,
             bf16_bytes,
         ),
         convrot_w4a4=_method_audit(
@@ -302,6 +400,15 @@ def _audit_weight(
             else comparison.int6_relative_l2_error
             - comparison.int8_relative_l2_error
         ),
+        int7_vs_int8=(
+            None
+            if (
+                comparison.int7_relative_l2_error is None
+                or comparison.int8_relative_l2_error is None
+            )
+            else comparison.int7_relative_l2_error
+            - comparison.int8_relative_l2_error
+        ),
         int8_convrot_vs_int8=(
             None
             if (
@@ -310,6 +417,15 @@ def _audit_weight(
             )
             else comparison.int8_convrot_relative_l2_error
             - comparison.int8_relative_l2_error
+        ),
+        int5_convrot_mse_vs_int5_convrot=(
+            None
+            if (
+                comparison.int5_convrot_mse_relative_l2_error is None
+                or comparison.int5_convrot_relative_l2_error is None
+            )
+            else comparison.int5_convrot_mse_relative_l2_error
+            - comparison.int5_convrot_relative_l2_error
         ),
         int6_convrot_vs_int6=(
             None
@@ -320,6 +436,15 @@ def _audit_weight(
             else comparison.int6_convrot_relative_l2_error
             - comparison.int6_relative_l2_error
         ),
+        int6_convrot_mse_vs_int6_convrot=(
+            None
+            if (
+                comparison.int6_convrot_mse_relative_l2_error is None
+                or comparison.int6_convrot_relative_l2_error is None
+            )
+            else comparison.int6_convrot_mse_relative_l2_error
+            - comparison.int6_convrot_relative_l2_error
+        ),
         int6_convrot_vs_int8_convrot=(
             None
             if (
@@ -328,6 +453,33 @@ def _audit_weight(
             )
             else comparison.int6_convrot_relative_l2_error
             - comparison.int8_convrot_relative_l2_error
+        ),
+        int7_convrot_vs_int7=(
+            None
+            if (
+                comparison.int7_convrot_relative_l2_error is None
+                or comparison.int7_relative_l2_error is None
+            )
+            else comparison.int7_convrot_relative_l2_error
+            - comparison.int7_relative_l2_error
+        ),
+        int7_convrot_vs_int8_convrot=(
+            None
+            if (
+                comparison.int7_convrot_relative_l2_error is None
+                or comparison.int8_convrot_relative_l2_error is None
+            )
+            else comparison.int7_convrot_relative_l2_error
+            - comparison.int8_convrot_relative_l2_error
+        ),
+        int7_convrot_mse_vs_int7_convrot=(
+            None
+            if (
+                comparison.int7_convrot_mse_relative_l2_error is None
+                or comparison.int7_convrot_relative_l2_error is None
+            )
+            else comparison.int7_convrot_mse_relative_l2_error
+            - comparison.int7_convrot_relative_l2_error
         ),
         convrot_w4a4_vs_int8=(
             None
@@ -472,7 +624,7 @@ def audit_bf16_source(
     selection_dtype = " or ".join(sorted(source_dtypes)) or "BF16"
 
     return {
-        "format_version": 5,
+        "format_version": 8,
         "source_path": str(Path(source_path).resolve()),
         "selection": {
             "dtype": selection_dtype,
@@ -522,21 +674,39 @@ def print_weight_audit_table(
         f"{source_dtype} KiB",
         "INT8 KiB",
         "INT6 KiB",
+        "INT7 KiB",
         "C-INT8 KiB",
+        "C-INT5 KiB",
+        "C-INT5 MSE KiB",
         "C-INT6 KiB",
+        "C-INT6 MSE KiB",
+        "C-INT7 KiB",
+        "C-INT7 MSE KiB",
         "W4A4 KiB",
         "W4A4 MSE KiB",
         f"{source_dtype} err",
         "INT8 err",
         "INT6 err",
+        "INT7 err",
         "C-INT8 err",
+        "C-INT5 err",
+        "C-INT5 MSE err",
         "C-INT6 err",
+        "C-INT6 MSE err",
+        "C-INT7 err",
+        "C-INT7 MSE err",
         "W4A4 err",
         "W4A4 MSE err",
         "d6-I",
+        "d7-I",
         "dC-I",
+        "dC5-MSE",
         "dC6-6",
+        "dC6-MSE",
         "dC6-C",
+        "dC7-7",
+        "dC7-MSE",
+        "dC7-C",
         "dW-I",
         "dW-C",
     ]
@@ -552,18 +722,38 @@ def print_weight_audit_table(
                 _format_kib(methods["bf16"]["storage_bytes"]),
                 _format_kib(methods["int8"]["storage_bytes"]),
                 _format_kib(methods["int6"]["storage_bytes"]),
+                _format_kib(methods["int7"]["storage_bytes"]),
                 _format_kib(methods["int8_convrot"]["storage_bytes"]),
+                _format_kib(methods["int5_convrot"]["storage_bytes"]),
+                _format_kib(methods["int5_convrot_mse"]["storage_bytes"]),
                 _format_kib(methods["int6_convrot"]["storage_bytes"]),
+                _format_kib(methods["int6_convrot_mse"]["storage_bytes"]),
+                _format_kib(methods["int7_convrot"]["storage_bytes"]),
+                _format_kib(methods["int7_convrot_mse"]["storage_bytes"]),
                 _format_kib(methods["convrot_w4a4"]["storage_bytes"]),
                 _format_kib(methods["convrot_w4a4_mse"]["storage_bytes"]),
                 _format_error(methods["bf16"]["relative_l2_error"]),
                 _format_error(methods["int8"]["relative_l2_error"]),
                 _format_error(methods["int6"]["relative_l2_error"]),
+                _format_error(methods["int7"]["relative_l2_error"]),
                 _format_error(
                     methods["int8_convrot"]["relative_l2_error"]
                 ),
+                _format_error(methods["int5_convrot"]["relative_l2_error"]),
+                _format_error(
+                    methods["int5_convrot_mse"]["relative_l2_error"]
+                ),
                 _format_error(
                     methods["int6_convrot"]["relative_l2_error"]
+                ),
+                _format_error(
+                    methods["int6_convrot_mse"]["relative_l2_error"]
+                ),
+                _format_error(
+                    methods["int7_convrot"]["relative_l2_error"]
+                ),
+                _format_error(
+                    methods["int7_convrot_mse"]["relative_l2_error"]
                 ),
                 _format_error(
                     methods["convrot_w4a4"]["relative_l2_error"]
@@ -576,7 +766,15 @@ def print_weight_audit_table(
                     signed=True,
                 ),
                 _format_error(
+                    deltas["int7_vs_int8"],
+                    signed=True,
+                ),
+                _format_error(
                     deltas["int8_convrot_vs_int8"],
+                    signed=True,
+                ),
+                _format_error(
+                    deltas["int5_convrot_mse_vs_int5_convrot"],
                     signed=True,
                 ),
                 _format_error(
@@ -584,7 +782,23 @@ def print_weight_audit_table(
                     signed=True,
                 ),
                 _format_error(
+                    deltas["int6_convrot_mse_vs_int6_convrot"],
+                    signed=True,
+                ),
+                _format_error(
                     deltas["int6_convrot_vs_int8_convrot"],
+                    signed=True,
+                ),
+                _format_error(
+                    deltas["int7_convrot_vs_int7"],
+                    signed=True,
+                ),
+                _format_error(
+                    deltas["int7_convrot_mse_vs_int7_convrot"],
+                    signed=True,
+                ),
+                _format_error(
+                    deltas["int7_convrot_vs_int8_convrot"],
                     signed=True,
                 ),
                 _format_error(
@@ -605,8 +819,10 @@ def print_weight_audit_table(
     print(
         "Errors are relative L2 reconstruction error against "
         f"{source_dtype}; "
-        "d6-I=INT6-INT8, dC-I=ConvRot INT8-INT8, "
-        "dC6-6=ConvRot INT6-INT6, dC6-C=ConvRot INT6-ConvRot INT8."
+        "d6-I=INT6-INT8, d7-I=INT7-INT8, dC-I=ConvRot INT8-INT8, "
+        "dC6-6=ConvRot INT6-INT6, dC6-C=ConvRot INT6-ConvRot INT8, "
+        "dC7-7=ConvRot INT7-INT7, dC7-MSE=ConvRot INT7 MSE-ConvRot INT7, "
+        "dC7-C=ConvRot INT7-ConvRot INT8."
     )
     print(" | ".join(value.ljust(widths[index]) for index, value in enumerate(headers)))
     print("-+-".join("-" * width for width in widths))

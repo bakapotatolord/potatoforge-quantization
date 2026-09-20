@@ -33,8 +33,14 @@ from .weight_audit import (
 ANALYSIS_METHODS: Final[tuple[tuple[QuantizationMethod, str], ...]] = (
     ("convrot_w4a4", "W4A4 ConvRot"),
     ("convrot_w4a4_mse", "W4A4 ConvRot + MSE"),
+    ("int5_convrot", "INT5 ConvRot"),
+    ("int5_convrot_mse", "INT5 ConvRot + MSE"),
     ("int6", "INT6"),
     ("int6_convrot", "INT6 ConvRot"),
+    ("int6_convrot_mse", "INT6 ConvRot + MSE"),
+    ("int7", "INT7"),
+    ("int7_convrot", "INT7 ConvRot"),
+    ("int7_convrot_mse", "INT7 ConvRot + MSE"),
     ("int8", "INT8"),
     ("int8_convrot", "INT8 ConvRot"),
 )

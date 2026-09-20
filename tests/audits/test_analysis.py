@@ -82,7 +82,7 @@ class TestAnalysis(unittest.TestCase):
             )
 
             self.assertEqual(errors["A2"].value, first_name)
-            self.assertEqual(errors["G1"].value, "INT8 ConvRot")
+            self.assertEqual(errors["M1"].value, "INT8 ConvRot")
             self.assertEqual(
                 errors["C1"].value,
                 "W4A4 ConvRot + MSE",
@@ -99,34 +99,71 @@ class TestAnalysis(unittest.TestCase):
             )
             self.assertEqual(
                 errors["D2"].value,
-                first_result["methods"]["int6"]["relative_l2_error"],
+                first_result["methods"]["int5_convrot"]["relative_l2_error"],
             )
             self.assertEqual(
                 errors["E2"].value,
-                first_result["methods"]["int6_convrot"][
+                first_result["methods"]["int5_convrot_mse"][
                     "relative_l2_error"
                 ],
             )
             self.assertEqual(
                 errors["F2"].value,
-                first_result["methods"]["int8"]["relative_l2_error"],
+                first_result["methods"]["int6"]["relative_l2_error"],
             )
             self.assertEqual(
                 errors["G2"].value,
+                first_result["methods"]["int6_convrot"][
+                    "relative_l2_error"
+                ],
+            )
+            self.assertEqual(
+                errors["H2"].value,
+                first_result["methods"]["int6_convrot_mse"][
+                    "relative_l2_error"
+                ],
+            )
+            self.assertEqual(
+                errors["I2"].value,
+                first_result["methods"]["int7"]["relative_l2_error"],
+            )
+            self.assertEqual(
+                errors["J2"].value,
+                first_result["methods"]["int7_convrot"][
+                    "relative_l2_error"
+                ],
+            )
+            self.assertEqual(
+                errors["K2"].value,
+                first_result["methods"]["int7_convrot_mse"][
+                    "relative_l2_error"
+                ],
+            )
+            self.assertEqual(
+                errors["L2"].value,
+                first_result["methods"]["int8"]["relative_l2_error"],
+            )
+            self.assertEqual(
+                errors["M2"].value,
                 first_result["methods"]["int8_convrot"]["relative_l2_error"],
             )
-            self.assertEqual(errors.max_column, 7)
+            self.assertEqual(errors.max_column, 13)
             self.assertIsNone(errors["B3"].value)
             self.assertIsNone(errors["C3"].value)
+            self.assertIsNone(errors["D3"].value)
             self.assertIsNone(errors["E3"].value)
             self.assertIsNone(errors["G3"].value)
+            self.assertIsNone(errors["H3"].value)
+            self.assertIsNone(errors["J3"].value)
+            self.assertIsNone(errors["K3"].value)
+            self.assertIsNone(errors["M3"].value)
             for row in range(2, 4):
                 values = [
                     errors.cell(row, column).value
-                    for column in range(2, 8)
+                    for column in range(2, 14)
                 ]
                 least_error = min(value for value in values if value is not None)
-                for column, value in zip(range(2, 8), values):
+                for column, value in zip(range(2, 14), values):
                     self.assertEqual(
                         errors.cell(row, column).font.bold,
                         value == least_error,
