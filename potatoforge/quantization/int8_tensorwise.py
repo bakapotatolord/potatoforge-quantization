@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import NamedTuple
-
 import torch
 
 from .hadamard import (
@@ -10,105 +8,10 @@ from .hadamard import (
     cached_cuda_hadamard_matrix,
 )
 from ..timing import timed_internal_stage
+from .rowwise import RowwiseQuantizationResult, quantize_symmetric_rows
 
 
-class Int8TensorwiseResult(NamedTuple):
-    codes: torch.Tensor
-    scales: torch.Tensor
-
-
-def quantize_int8_rows(
-    values: torch.Tensor,
-    *,
-    qmin: int = -128,
-    qmax: int = 127,
-    use_float32_math: bool = False,
-    zero_scale: float | None = None,
-    internal_timings: dict[str, float] | None = None,
-    _timing_device: torch.device | None = None,
-) -> Int8TensorwiseResult:
-    """Quantize rows while allowing callers to state their INT8 contract."""
-
-    if qmin >= qmax:
-        raise ValueError("qmin must be smaller than qmax.")
-
-    if use_float32_math:
-        with timed_internal_stage(
-            internal_timings,
-            "prepare",
-            _timing_device,
-        ):
-            math_values = values.float()
-
-        with timed_internal_stage(
-            internal_timings,
-            "scale",
-            _timing_device,
-        ):
-            max_abs = math_values.abs().amax(dim=1, keepdim=True)
-            scales = max_abs / qmax
-            if zero_scale is None:
-                scales = scales.clamp_min(1e-30)
-            else:
-                scales = torch.where(
-                    max_abs == 0,
-                    torch.full_like(max_abs, zero_scale),
-                    scales,
-                )
-
-        with timed_internal_stage(
-            internal_timings,
-            "quantize_values",
-            _timing_device,
-        ):
-            codes = torch.round(math_values / scales).clamp(qmin, qmax)
-    else:
-        if values.dtype == torch.float16:
-            with timed_internal_stage(
-                internal_timings,
-                "prepare",
-                _timing_device,
-            ):
-                math_values = values.float()
-        else:
-            math_values = values
-
-        with timed_internal_stage(
-            internal_timings,
-            "scale",
-            _timing_device,
-        ):
-            scales = (
-                math_values.abs()
-                .amax(dim=1, keepdim=True)
-                .float()
-                .div(qmax)
-                .clamp_min(1e-30)
-            )
-
-        with timed_internal_stage(
-            internal_timings,
-            "quantize_values",
-            _timing_device,
-        ):
-            scale_math = scales.to(math_values.dtype)
-            tiny = torch.finfo(math_values.dtype).tiny
-            scale_math = torch.where(
-                scale_math == 0,
-                torch.full_like(scale_math, tiny),
-                scale_math,
-            )
-            codes = torch.round(math_values / scale_math).clamp(qmin, qmax)
-
-    with timed_internal_stage(
-        internal_timings,
-        "finalize",
-        _timing_device,
-    ):
-        return Int8TensorwiseResult(
-            codes=codes.to(torch.int8),
-            scales=scales.float(),
-        )
+Int8TensorwiseResult = RowwiseQuantizationResult
 
 
 def _validate_int8_tensorwise_weights(weights: torch.Tensor) -> None:
@@ -132,7 +35,7 @@ def _validate_int8_tensorwise_weights(weights: torch.Tensor) -> None:
 def quantize_int8_tensorwise(weights: torch.Tensor) -> Int8TensorwiseResult:
     _validate_int8_tensorwise_weights(weights)
 
-    return quantize_int8_rows(weights)
+    return quantize_symmetric_rows(weights)
 
 
 def dequantize_int8_tensorwise(result: Int8TensorwiseResult) -> torch.Tensor:
@@ -189,7 +92,7 @@ def quantize_int8_convrot(
                 else torch.bfloat16
             ),
         )
-    return quantize_int8_rows(
+    return quantize_symmetric_rows(
         rotated_weights,
         internal_timings=internal_timings,
     )
@@ -228,7 +131,7 @@ def _quantize_int8_convrot_cuda(
             output_dtype=output_dtype,
             hadamard=hadamard,
         )
-    result = quantize_int8_rows(
+    result = quantize_symmetric_rows(
         rotated_weights,
         internal_timings=internal_timings,
         _timing_device=device,

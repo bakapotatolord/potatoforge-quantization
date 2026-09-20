@@ -10,12 +10,14 @@ from .hadamard import (
     apply_hadamard_rotation,
     cached_cuda_hadamard_matrix,
 )
+from .rowwise import resolve_convrot_device
 from ..timing import timed_internal_stage
 from .w4a4_mse_native import load_w4a4_mse_candidate
 
 
 _W4_QMIN: Final[int] = -7
 _W4_QMAX: Final[int] = 7
+_W4A4_FORMAT_NAME: Final[str] = "W4A4"
 _W4_SCALE_FLOOR: Final[float] = 1e-10
 _W4A4_MSE_COARSE_MULTIPLIERS: Final[tuple[float, ...]] = tuple(
     index / 20 for index in range(2, 21)
@@ -298,25 +300,6 @@ def dequantize_w4_rowwise(result: W4RowwiseResult) -> torch.Tensor:
     return codes.float() * result.scales
 
 
-def _resolve_device(device: str | torch.device) -> torch.device:
-    try:
-        target_device = torch.device(device)
-    except (RuntimeError, TypeError) as error:
-        raise ValueError("W4A4 ConvRot device must be cpu or cuda.") from error
-
-    if target_device.type not in ("cpu", "cuda"):
-        raise ValueError("W4A4 ConvRot device must be cpu or cuda.")
-    if target_device.type == "cuda":
-        if not torch.cuda.is_available():
-            raise ValueError("CUDA device requested but CUDA is unavailable.")
-        if target_device.index is None:
-            target_device = torch.device(
-                "cuda",
-                torch.cuda.current_device(),
-            )
-    return target_device
-
-
 def _quantize_convrot_w4a4_cuda(
     weights: torch.Tensor,
     device: torch.device,
@@ -498,7 +481,10 @@ def quantize_convrot_w4a4(
     device: str | torch.device = "cpu",
     internal_timings: dict[str, float] | None = None,
 ) -> ConvRotW4A4Result:
-    target_device = _resolve_device(device)
+    target_device = resolve_convrot_device(
+        device,
+        format_name=_W4A4_FORMAT_NAME,
+    )
     if target_device.type == "cuda":
         return _quantize_convrot_w4a4_cuda(
             weights,
@@ -524,7 +510,10 @@ def quantize_convrot_w4a4_mse(
     device: str | torch.device = "cpu",
     internal_timings: dict[str, float] | None = None,
 ) -> ConvRotW4A4Result:
-    target_device = _resolve_device(device)
+    target_device = resolve_convrot_device(
+        device,
+        format_name=_W4A4_FORMAT_NAME,
+    )
     if target_device.type == "cuda":
         return _quantize_convrot_w4a4_mse_cuda(
             weights,
