@@ -26,6 +26,7 @@ class TestConversionMethods(unittest.TestCase):
                 "int8_convrot",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
+                "convrot_w4a4_mse_gptq",
             },
         )
         self.assertEqual(
@@ -34,6 +35,7 @@ class TestConversionMethods(unittest.TestCase):
                 "int8_convrot",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
+                "convrot_w4a4_mse_gptq",
                 "int5_convrot",
                 "int5_convrot_mse",
                 "int6_convrot",
@@ -101,6 +103,11 @@ class TestConversionMethods(unittest.TestCase):
             with self.subTest(action=action):
                 method = get_conversion_method(action)
                 plan = method.plan("blocks.0.weight", descriptor)
+                if action == "convrot_w4a4_mse_gptq":
+                    with self.assertRaisesRegex(ValueError, "requires a calibration"):
+                        method.encode(weights, "cpu", None)
+                    self.assertEqual(method.marker_payload, get_conversion_method("convrot_w4a4_mse").marker_payload)
+                    continue
                 encoded = method.encode(weights, "cpu", None)
                 code_spec, scale_spec, _ = plan.output_tensors
 

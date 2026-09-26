@@ -8,6 +8,8 @@ from .conversion_method_types import (
     QuantizationAction,
 )
 from .conversion_methods import get_conversion_method
+from .calibration.gptq import GPTQCalibration
+from .quantization.convrot_w4a4_gptq import quantize_convrot_w4a4_mse_gptq
 from .planning import (
     OutputTensorSpec,
     PlanEntry,
@@ -236,6 +238,7 @@ def _stream_entry_payloads(
     timing: TimingCollector | None = None,
     record: TensorTiming | None = None,
     device: str = "cpu",
+    gptq_calibration: GPTQCalibration | None = None,
 ) -> Iterator[TensorPayload]:
     action = entry["action"]
 
@@ -285,7 +288,16 @@ def _stream_entry_payloads(
     )
 
     method = get_conversion_method(action)
-    encoded = method.encode(weights, device, record)
+    if action == "convrot_w4a4_mse_gptq":
+        if gptq_calibration is None:
+            raise ValueError(f"GPTQ calibration is required for '{entry['tensor_name']}'.")
+        internal = record.internal_stages if record is not None else None
+        with timed_stage(record, "quantize"):
+            factors = gptq_calibration.factors_for_weight(entry["tensor_name"], internal, device)
+            result = quantize_convrot_w4a4_mse_gptq(weights, factors, device=device, timings=internal)
+        encoded = EncodedQuantizedPayload(result.packed_codes, result.scales)
+    else:
+        encoded = method.encode(weights, device, record)
 
     _validate_encoded_payload(action, entry, encoded)
 
@@ -343,6 +355,7 @@ def stream_output_payloads(
     source_payload_transform: SourcePayloadTransform | None = None,
     timing: TimingCollector | None = None,
     device: str = "cpu",
+    gptq_calibration: GPTQCalibration | None = None,
 ) -> Iterator[TensorPayload]:
     with open(str(source_path), "rb") as f:
         raw_data_start = read_raw_data_start(
@@ -391,4 +404,5 @@ def stream_output_payloads(
                 timing=timing,
                 record=record,
                 device=device,
+                gptq_calibration=gptq_calibration,
             )

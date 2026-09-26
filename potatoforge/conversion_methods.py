@@ -74,6 +74,12 @@ from .timing import (
 )
 
 
+GPTQ_INTERNAL_STAGES = (
+    "gram_load", "gram_transform", "hessian_factor", "hessian_transfer", "prepare", "rotation",
+    "mse_scale", "gptq_solve", "pack", "finalize",
+)
+
+
 def _run_quantize(
     record: TensorTiming | None,
     operation: Callable[[], Any],
@@ -378,6 +384,14 @@ def _encode_convrot_w4a4_mse(
     return EncodedQuantizedPayload(result.packed_codes, result.scales)
 
 
+def _encode_convrot_w4a4_mse_gptq(
+    weights: torch.Tensor,
+    device: str | torch.device,
+    record: TensorTiming | None,
+) -> EncodedQuantizedPayload:
+    raise ValueError("GPTQ encoding requires a calibration artifact and weight name.")
+
+
 _METHODS: tuple[ConversionMethodDefinition, ...] = (
     ConversionMethodDefinition(
         action="int8",
@@ -432,6 +446,15 @@ _METHODS: tuple[ConversionMethodDefinition, ...] = (
         plan=plan_convrot_w4a4,
         marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
         encode=_encode_convrot_w4a4_mse,
+    ),
+    ConversionMethodDefinition(
+        action="convrot_w4a4_mse_gptq",
+        label="W4A4 ConvRot MSE GPTQ",
+        is_convrot=True,
+        internal_stages=GPTQ_INTERNAL_STAGES,
+        plan=plan_convrot_w4a4,
+        marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
+        encode=_encode_convrot_w4a4_mse_gptq,
     ),
     ConversionMethodDefinition(
         action="int5_convrot",

@@ -159,3 +159,36 @@ start with `blocks`.
 - [Advanced CLI reference](ADVANCED_CLI.md)
 - [ComfyUI-PotatoForge](https://github.com/bakapotatolord/ComfyUI-PotatoForge) for activation calibration and quantization patches
 - [ComfyUI-PotatoForge-INTx](https://github.com/bakapotatolord/ComfyUI-PotatoForge-INTx) for INT5/INT6 and ConvRot loading; INT7 artifacts require the corresponding INT7-capable custom-node release
+
+## Kroma GPTQ v1
+
+`convrot_w4a4_mse_gptq` uses model-wide logical-input Gram statistics to
+compensate W4A4 rounding errors within each Gram block. Collect and finalize a
+BD512 JSON/Safetensors calibration pair with the ComfyUI PotatoForge GPTQ
+calibration nodes. Supply the JSON path with `--gptq-calibration`; the
+Safetensors file must have the same stem in the same directory. For example:
+
+```text
+potatoforge quantize SOURCE.safetensors OUTPUT.safetensors --profile GPTQ_PROFILE.json --gptq-calibration CALIBRATION.json --device cuda --timing
+```
+
+Set the profile's action to `convrot_w4a4_mse_gptq` for the desired weights.
+
+The calibration must match the unquantized source model's logical weight names
+and shapes. The method shares source Gram preparation across sibling projections,
+but optimizes each weight independently. It emits the existing `convrot_w4a4`
+runtime payload. Use `--device cuda` to run MSE preparation and the GPTQ solve
+on CUDA; prepared factors are reused for sibling weights on the selected device.
+The existing W4A4 MSE search selects fixed row scales first; GPTQ then adjusts
+the codes using those scales. A valid artifact may declare another block size
+that is a multiple of 256. No full Gram is materialized.
+
+With `--config`, add `gptq_calibration = "path/to/calibration.json"` under
+`[paths]`; `--gptq-calibration` overrides that value. Calibration is checked
+against the source model before checkpoint writing begins. The output keeps
+the same packed weights, FP32 scales, `convrot_w4a4` marker, and runtime
+metadata as ordinary ConvRot W4A4; load it with the existing W4A4 loader.
+The working set includes the current source's Gram and up to two cached factor
+sets (each roughly 32 MiB for a 16384-wide source with BD512), rotated
+weights, and the existing MSE search and GPTQ solve buffers. The exact peak
+depends on the largest output width and PyTorch's temporary allocations.

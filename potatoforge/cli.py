@@ -1161,6 +1161,11 @@ def quantize(
         None,
         help="JSON quantization profile; required without --config.",
     ),
+    gptq_calibration: Path | None = typer.Option(
+        None,
+        "--gptq-calibration",
+        help="Versioned GPTQ calibration JSON; matching Safetensors must be beside it.",
+    ),
     device: Literal["cpu", "cuda"] = typer.Option(
         "cpu",
         "--device",
@@ -1201,6 +1206,7 @@ def quantize(
             source_path,
             output_path,
             profile=profile,
+            gptq_calibration=gptq_calibration,
             device=device,
             adapter_path=adapter_path,
             adapter_strength=adapter_strength,

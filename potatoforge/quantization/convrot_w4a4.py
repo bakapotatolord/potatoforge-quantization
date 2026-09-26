@@ -360,34 +360,11 @@ def _quantize_convrot_w4a4_cuda(
         )
 
 
-def _quantize_convrot_w4a4_mse_cuda(
-    weights: torch.Tensor,
+def select_w4a4_mse_scale_cuda(
+    rotated_weights: torch.Tensor,
     device: torch.device,
-    internal_timings: dict[str, float] | None,
-) -> ConvRotW4A4Result:
-    with timed_internal_stage(
-        internal_timings,
-        "prepare",
-        device,
-    ):
-        device_weights = weights.to(device=device)
-
-    with timed_internal_stage(
-        internal_timings,
-        "rotation",
-        device,
-    ):
-        rotated_weights = apply_hadamard_rotation(
-            device_weights,
-            group_size=CONVROT_GROUP_SIZE,
-            output_dtype=torch.float32,
-            hadamard=cached_cuda_hadamard_matrix(
-                CONVROT_GROUP_SIZE,
-                device,
-                torch.float32,
-            ),
-        )
-
+    internal_timings: dict[str, float] | None = None,
+) -> torch.Tensor:
     with timed_internal_stage(
         internal_timings,
         "scale_init",
@@ -437,25 +414,32 @@ def _quantize_convrot_w4a4_mse_cuda(
                 candidate_mse,
             )
 
-    def final_quantize() -> tuple[torch.Tensor, torch.Tensor]:
-        if all_zero:
-            scales = base_scale
-        else:
-            scales = torch.where(
-                zero_rows,
-                base_scale,
-                (base_scale * best_multiplier).clamp_min(
-                    _W4_SCALE_FLOOR,
-                ),
-            )
-        return _quantize_w4_codes(rotated_weights, scales)
+    if all_zero:
+        return base_scale
+    return torch.where(
+        zero_rows,
+        base_scale,
+        (base_scale * best_multiplier).clamp_min(_W4_SCALE_FLOOR),
+    )
 
-    with timed_internal_stage(
-        internal_timings,
-        "final_quantize",
-        device,
-    ):
-        codes_and_scales = final_quantize()
+
+def _quantize_convrot_w4a4_mse_cuda(
+    weights: torch.Tensor,
+    device: torch.device,
+    internal_timings: dict[str, float] | None,
+) -> ConvRotW4A4Result:
+    with timed_internal_stage(internal_timings, "prepare", device):
+        device_weights = weights.to(device=device)
+    with timed_internal_stage(internal_timings, "rotation", device):
+        rotated_weights = apply_hadamard_rotation(
+            device_weights,
+            group_size=CONVROT_GROUP_SIZE,
+            output_dtype=torch.float32,
+            hadamard=cached_cuda_hadamard_matrix(CONVROT_GROUP_SIZE, device, torch.float32),
+        )
+    scales = select_w4a4_mse_scale_cuda(rotated_weights, device, internal_timings)
+    with timed_internal_stage(internal_timings, "final_quantize", device):
+        codes_and_scales = _quantize_w4_codes(rotated_weights, scales)
 
     with timed_internal_stage(
         internal_timings,

@@ -17,7 +17,7 @@ _TOP_LEVEL_FIELDS = frozenset(
     ("format_version", "paths", "optimize", "quantize")
 )
 _PATH_FIELDS = frozenset(
-    ("source", "audit_report", "profile", "quantized_output")
+    ("source", "audit_report", "profile", "quantized_output", "gptq_calibration")
 )
 @dataclass(frozen=True)
 class ConfigPaths:
@@ -25,6 +25,7 @@ class ConfigPaths:
     audit_report: Path | None = None
     profile: Path | None = None
     quantized_output: Path | None = None
+    gptq_calibration: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ def _load_paths(raw: object, project_root: Path) -> ConfigPaths:
         audit_report=values.get("audit_report"),
         profile=values.get("profile"),
         quantized_output=values.get("quantized_output"),
+        gptq_calibration=values.get("gptq_calibration"),
     )
 
 

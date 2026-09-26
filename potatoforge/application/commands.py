@@ -441,6 +441,7 @@ def quantize_model(
     *,
     profile: Path | None,
     device: str = "cpu",
+    gptq_calibration: Path | None = None,
     adapter_path: Iterable[Path] = (),
     adapter_strength: Iterable[float] = (),
     config: Path | None = None,
@@ -460,6 +461,7 @@ def quantize_model(
         source_path = command_config.paths.source
         output_path = command_config.paths.quantized_output
         profile = profile or command_config.paths.profile
+        gptq_calibration = gptq_calibration or command_config.paths.gptq_calibration
         adapters = adapters or command_config.adapters
     elif source_path is None or (output_path is None and not dry_run) or profile is None:
         raise ValueError(
@@ -481,5 +483,6 @@ def quantize_model(
         adapters=adapters,
         timing=timing_collector,
         device=device,
+        **({"gptq_calibration": gptq_calibration} if gptq_calibration is not None else {}),
     )
     return QuantizeResult(source_path, output_path, profile, len(adapters), timing=timing_collector)

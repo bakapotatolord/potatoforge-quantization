@@ -21,6 +21,7 @@ from .source_payloads import (
     stream_output_payloads,
 )
 from .timing import TimingCollector
+from .calibration.gptq import GPTQCalibration
 
 
 class ConversionCancelled(Exception):
@@ -79,6 +80,7 @@ def convert_model(
     adapters: Sequence[AdapterMergeInput] = (),
     timing: TimingCollector | None = None,
     device: str = "cpu",
+    gptq_calibration: str | Path | None = None,
 ) -> None:
     source = Path(source_path)
     output = Path(output_path)
@@ -102,6 +104,21 @@ def convert_model(
     model = read_source_model_header(source)
 
     plan_entries = build_plan(model.tensors, profile)
+    gptq_entries = [entry for entry in plan_entries if entry["action"] == "convrot_w4a4_mse_gptq"]
+    calibration = None
+    if gptq_entries:
+        if gptq_calibration is None:
+            raise ValueError("GPTQ profile requires --gptq-calibration JSON artifact.")
+        calibration = GPTQCalibration(gptq_calibration)
+        calibration.validate_model(model.tensors, model.metadata)
+        for entry in gptq_entries:
+            source_stat = calibration.source_for_weight(entry["tensor_name"])
+            if source_stat.in_features != entry["shape"][1]:
+                raise ValueError(
+                    f"GPTQ calibration {calibration.metadata_path} source '{source_stat.source_id}' "
+                    f"for '{entry['tensor_name']}' expected in_features {source_stat.in_features}, "
+                    f"got {entry['shape'][1]}."
+                )
     layout = build_output_layout(plan_entries)
     source_payload_transform = build_adapter_merger(model, adapters)
     payloads = stream_output_payloads(
@@ -111,6 +128,7 @@ def convert_model(
         source_payload_transform=source_payload_transform,
         timing=timing,
         device=device,
+        gptq_calibration=calibration,
     )
 
     try:
@@ -142,6 +160,7 @@ def convert_model_from_profile(
     adapters: Sequence[AdapterMergeInput] = (),
     timing: TimingCollector | None = None,
     device: str = "cpu",
+    gptq_calibration: str | Path | None = None,
 ) -> None:
     profile = load_profile(profile_path)
     return convert_model(
@@ -152,4 +171,5 @@ def convert_model_from_profile(
         adapters=adapters,
         timing=timing,
         device=device,
+        gptq_calibration=gptq_calibration,
     )
