@@ -74,11 +74,6 @@ class TestActivationCli(unittest.TestCase):
                     "comparison.xlsx",
                 ],
             ),
-            "calibration-merge": (
-                "merge",
-                "calibration_merge",
-                ["first.json", "second.json", "--output", "merged"],
-            ),
         }
         root_commands = {
             command.name: command for command in cli.app.registered_commands
@@ -338,31 +333,9 @@ class TestActivationCli(unittest.TestCase):
             excluded_suffixes=(),
         )
 
-    def test_calibration_merge_passes_all_input_paths(self) -> None:
-        with (
-            patch(
-                "potatoforge.cli.merge_activation_calibrations",
-                return_value=(Path("merged.json"), Path("merged.safetensors")),
-            ) as merge_mock,
-        ):
-            result = CliRunner().invoke(
-                app,
-                [
-                    "activation",
-                    "merge",
-                    "first.json",
-                    "second.json",
-                    "--output",
-                    "merged",
-                ],
-            )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        merge_mock.assert_called_once_with(
-            [Path("first.json"), Path("second.json")],
-            Path("merged"),
-            overwrite=False,
-        )
+    def test_calibration_merge_is_not_a_cli_command(self) -> None:
+        self.assertNotIn("merge", [command.name for command in cli.activation_app.registered_commands])
+        self.assertNotIn("calibration-merge", [command.name for command in cli.app.registered_commands])
 
     def test_activation_compare_passes_all_profile_options(self) -> None:
         summary = {"workbook_path": "comparison.xlsx", "metric_count": 14}

@@ -226,6 +226,46 @@ mode requires `--tensor` or `--tensors` and does not create a workbook.
 Activation commands use a calibration pair: JSON metadata plus its adjacent
 `.safetensors` statistics file. The cache is reusable and avoids loading the
 complete model for later inspection, scoring, comparison, or optimization.
+The Comfy activation-calibration node accumulates dataset prompts in one
+disk-backed session and finalizes one pair. Use that pair directly with the
+commands below; there is no activation calibration merge command.
+V1 pairs remain supported. V2 `cvar` pairs compactly store input energy and
+total output energy for observed-relative-SSE metrics. V2 `full` pairs also
+store per-output moments and sampled activations for bias-free and sampled
+research metrics; full collection is larger and slower.
+
+For normal profile optimization, collect `cvar` data, then audit and optimize
+with the observed CVaR20 objective:
+
+```powershell
+uv run potatoforge activation audit path\to\source.safetensors `
+    --activation-calibration calibration\cvar.json `
+    --output reports\activation-cvar-audit.json
+
+uv run potatoforge activation optimize `
+    --audit-cache reports\activation-cvar-audit.json `
+    --activation-calibration calibration\cvar.json `
+    --metric eval_cvar20_observed_relative_sse `
+    --target-size-gib 8.5 `
+    --output profiles\generated\activation-cvar.json
+```
+
+For an activation study, collect `full` data with the companion calibration
+node, then audit and compare metrics:
+
+```powershell
+uv run potatoforge activation audit path\to\source.safetensors `
+    --activation-calibration calibration\full.json `
+    --output reports\activation-full-audit.json
+
+uv run potatoforge activation compare `
+    --audit-cache reports\activation-full-audit.json `
+    --activation-calibration calibration\full.json `
+    --output reports\activation-full-comparison.xlsx
+```
+
+The compare workbook reports full-only metrics as unavailable with a reason
+when used with `cvar` data.
 
 ### Build a candidate cache
 
@@ -306,18 +346,6 @@ The generated profile still requires the normal `quantize` command. Activation
 metrics are calibration and reconstruction proxies, not runtime or image-
 quality validation.
 
-### Merge calibration pairs
-
-```powershell
-uv run potatoforge activation merge `
-    calibration\first.json `
-    calibration\second.json `
-    --output calibration\merged
-```
-
-Only compatible calibration pairs can be merged; use `--overwrite` to replace
-the output pair.
-
 ## Patches and extraction
 
 Write one quantization patch for an exact tensor or a prefix:
@@ -392,4 +420,3 @@ deprecation warnings. New scripts should use the canonical paths above.
 | `activation-score` | `activation score` |
 | `activation-optimize` | `activation optimize` |
 | `activation-compare` | `activation compare` |
-| `calibration-merge` | `activation merge` |

@@ -39,6 +39,8 @@ type ArtifactOption = {
   folder: string
   name: string
   path: string
+  version?: number
+  collection_mode?: 'cvar' | 'full' | null
 }
 
 type ArtifactsResponse = {
@@ -175,7 +177,11 @@ function groupedArtifactOptions(items: ArtifactOption[]) {
   const groups = new Map<string, { label: string; value: string }[]>()
   for (const item of items) {
     const group = groups.get(item.folder) ?? []
-    group.push({ label: item.name, value: item.path })
+    const calibrationVersion =
+      item.version === undefined
+        ? ''
+        : ` (v${item.version}${item.collection_mode ? ` ${item.collection_mode}` : ''})`
+    group.push({ label: `${item.name}${calibrationVersion}`, value: item.path })
     groups.set(item.folder, group)
   }
   return Array.from(groups, ([group, options]) => ({ group, items: options }))

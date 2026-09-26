@@ -150,7 +150,9 @@ start with `blocks`.
 | Inspect headers | `inspect model`, `inspect lora` | Header summaries or JSON reports |
 | Merge LoRA files | `lora merge` | Unquantized merged checkpoint |
 | Build weight profiles | `profile audit`, `profile optimize`, `profile analyze` | Audit JSON, profile JSON, or analysis workbook |
-| Analyze activations | `activation audit`, `activation inspect`, `activation score`, `activation optimize`, `activation compare`, `activation merge` | Caches, reports, workbook, or profile |
+| Analyze activations | `activation audit`, `activation inspect`, `activation score`, `activation optimize`, `activation compare` | Caches, reports, workbook, or profile |
+| Experimental Krea2/Kroma MLP pruning | `prune krea2-mlp weight-stats`, `select`, `audit-summary`, `apply-plan` | Weight stats, cumulative plan, audit summary, or pruned checkpoint |
+| Experimental Krea2/Kroma block pruning | `prune krea2-block rank`, `audit-summary`, `plan-add` | Candidate ranking, audit summary, or bypass plan |
 | Convert | `quantize` | Profile-driven safetensors checkpoint |
 | Patch or extract | `patch`, `extract` | Patch or tensor-family safetensors file |
 

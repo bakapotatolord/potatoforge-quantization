@@ -18,6 +18,8 @@ from ..headers.source_header import SourceModelHeader, read_source_model_header
 
 _FORMAT = "potatoforge_activation_calibration"
 _ACTIVATION_VERSION = 1
+_ACTIVATION_V2_VERSION = 2
+ACTIVATION_CALIBRATION_VERSIONS = (_ACTIVATION_VERSION, _ACTIVATION_V2_VERSION)
 _ACTIVATION_BASIS = "logical_linear_input"
 _ACTIVATION_AXIS = "last_dimension"
 _ROOT_INPUT_SUM_X2_KEY = "__pf__.root_input_sum_x2"
@@ -67,9 +69,10 @@ class LayerCalibration:
         tensor_name: str,
         input_features: int,
         output_features: int,
-        sample_count: int,
-        invocation_count: int,
+        sample_count: int | None,
+        invocation_count: int | None,
         evaluation_count: int,
+        collection_mode: str | None,
         tensor_keys: Mapping[str, str],
         tensor_store: _CalibrationTensorStore,
     ) -> None:
@@ -79,6 +82,7 @@ class LayerCalibration:
         self.sample_count = sample_count
         self.invocation_count = invocation_count
         self.evaluation_count = evaluation_count
+        self.collection_mode = collection_mode
         self._tensor_keys = dict(tensor_keys)
         self._tensor_store = tensor_store
         self._cache: dict[str, torch.Tensor] = {}
@@ -94,35 +98,84 @@ class LayerCalibration:
 
     @property
     def aggregate_sum_x2(self) -> torch.Tensor:
-        return self._tensor("aggregate_sum_x2")
+        if "aggregate_sum_x2" in self._tensor_keys:
+            return self._tensor("aggregate_sum_x2")
+        cached = self._cache.get("aggregate_sum_x2")
+        if cached is None:
+            cached = self.eval_sum_x2.sum(dim=0)
+            self._cache["aggregate_sum_x2"] = cached
+        return cached
 
     @property
-    def eval_sum_x(self) -> torch.Tensor:
-        return self._tensor("eval_sum_x")
+    def eval_sum_x(self) -> torch.Tensor | None:
+        return None if "eval_sum_x" not in self._tensor_keys else self._tensor("eval_sum_x")
 
     @property
     def eval_sum_x2(self) -> torch.Tensor:
         return self._tensor("eval_sum_x2")
 
     @property
-    def eval_max_abs_x(self) -> torch.Tensor:
-        return self._tensor("eval_max_abs_x")
+    def eval_max_abs_x(self) -> torch.Tensor | None:
+        return None if "eval_max_abs_x" not in self._tensor_keys else self._tensor("eval_max_abs_x")
 
     @property
-    def eval_sum_y(self) -> torch.Tensor:
-        return self._tensor("eval_sum_y")
+    def eval_sum_y(self) -> torch.Tensor | None:
+        return None if "eval_sum_y" not in self._tensor_keys else self._tensor("eval_sum_y")
 
     @property
-    def eval_sum_y2(self) -> torch.Tensor:
-        return self._tensor("eval_sum_y2")
+    def eval_sum_y2(self) -> torch.Tensor | None:
+        return None if "eval_sum_y2" not in self._tensor_keys else self._tensor("eval_sum_y2")
 
     @property
-    def eval_sample_counts(self) -> torch.Tensor:
-        return self._tensor("eval_sample_count").to(dtype=torch.int64)
+    def eval_output_energy(self) -> torch.Tensor:
+        cached = self._cache.get("eval_output_energy")
+        if cached is not None:
+            return cached
+        if "eval_output_energy" in self._tensor_keys:
+            energy = self._tensor("eval_output_energy")
+            if bool((energy < 0).any().item()):
+                energy = energy.clamp_min(0)
+        else:
+            eval_sum_y2 = self.eval_sum_y2
+            if eval_sum_y2 is None:
+                raise ValueError("Calibration does not contain output energy.")
+            energy = eval_sum_y2.sum(dim=-1)
+        self._cache["eval_output_energy"] = energy
+        return energy
 
     @property
-    def eval_invocation_counts(self) -> torch.Tensor:
-        return self._tensor("eval_invocation_count").to(dtype=torch.int64)
+    def eval_sample_counts(self) -> torch.Tensor | None:
+        return (
+            None
+            if "eval_sample_count" not in self._tensor_keys
+            else self._tensor("eval_sample_count").to(dtype=torch.int64)
+        )
+
+    @property
+    def eval_invocation_counts(self) -> torch.Tensor | None:
+        return (
+            None
+            if "eval_invocation_count" not in self._tensor_keys
+            else self._tensor("eval_invocation_count").to(dtype=torch.int64)
+        )
+
+    @property
+    def supports_bias_free_metrics(self) -> bool:
+        return all(
+            key in self._tensor_keys
+            for key in ("eval_sum_y", "eval_sum_y2", "eval_sample_count")
+        )
+
+    @property
+    def supports_sampled_metrics(self) -> bool:
+        return "sample_x" in self._tensor_keys
+
+    @property
+    def supports_input_distribution_diagnostics(self) -> bool:
+        return all(
+            key in self._tensor_keys
+            for key in ("eval_sum_x", "eval_max_abs_x")
+        )
 
     @property
     def sample_x(self) -> torch.Tensor | None:
@@ -181,6 +234,7 @@ class ActivationCalibration:
         activation_basis: str,
         activation_axis: str,
         stats: Mapping[str, LayerCalibration],
+        collection_mode: str | None = None,
         diffusion_model_class: str | None = None,
         version: int = _ACTIVATION_VERSION,
         evaluations: tuple[EvaluationMetadata, ...] = (),
@@ -192,9 +246,51 @@ class ActivationCalibration:
         self.activation_basis = activation_basis
         self.activation_axis = activation_axis
         self.version = version
+        self.collection_mode = collection_mode
         self.evaluations = evaluations
         self.evaluation_count = len(evaluations)
         self._stats = dict(stats)
+
+    @property
+    def supports_bias_free_metrics(self) -> bool:
+        return bool(self._stats) and all(
+            layer.supports_bias_free_metrics for layer in self._stats.values()
+        )
+
+    @property
+    def supports_sampled_metrics(self) -> bool:
+        return bool(self._stats) and all(
+            layer.supports_sampled_metrics for layer in self._stats.values()
+        )
+
+    @property
+    def supports_input_distribution_diagnostics(self) -> bool:
+        return bool(self._stats) and all(
+            layer.supports_input_distribution_diagnostics
+            for layer in self._stats.values()
+        )
+
+    def metric_unavailability_reason(self, metric: str) -> str | None:
+        if "bias_free" in metric and not self.supports_bias_free_metrics:
+            if self.collection_mode == "cvar":
+                return (
+                    "This calibration was collected in 'cvar' mode and does not "
+                    "contain per-output first moments. Bias-free metrics require "
+                    "'full' calibration. Recollect with collection_mode='full'."
+                )
+            return (
+                "Bias-free metrics require eval_sum_y, eval_sum_y2, and "
+                "eval_sample_count for every layer."
+            )
+        if metric.startswith("sampled_") and not self.supports_sampled_metrics:
+            if self.collection_mode == "cvar":
+                return (
+                    "This calibration was collected in 'cvar' mode and does not "
+                    "contain sampled activations. Recollect with "
+                    "collection_mode='full' to use sampled metrics."
+                )
+            return "Sampled metrics require sample_x and sample_x_valid for every layer."
+        return None
 
     @classmethod
     def load(
@@ -220,13 +316,26 @@ class ActivationCalibration:
         if not isinstance(document, dict):
             raise ValueError("Activation calibration metadata must be an object.")
         version = document.get("version")
-        if type(version) is not int or version != _ACTIVATION_VERSION:
+        if type(version) is not int or version not in ACTIVATION_CALIBRATION_VERSIONS:
             raise ValueError(
                 f"Unsupported activation calibration version: {version!r}"
             )
+        collection_mode = None
+        if version == _ACTIVATION_V2_VERSION:
+            collection_mode = document.get("collection_mode")
+            if type(collection_mode) is not str or collection_mode not in (
+                "cvar",
+                "full",
+            ):
+                raise ValueError(
+                    "Activation calibration version 2 requires "
+                    "collection_mode='cvar' or 'full'."
+                )
         return _load_activation_calibration(
             tensors_file,
             document,
+            version=version,
+            collection_mode=collection_mode,
             check_cancelled=check_cancelled,
         )
 
@@ -282,11 +391,18 @@ def merge_activation_calibrations(
         else ActivationCalibration.load(calibration)
         for calibration in calibrations
     )
-    if any(calibration.version != _ACTIVATION_VERSION for calibration in loaded):
-        raise ValueError("Activation calibration merge requires current pairs.")
-
     first = loaded[0]
     for index, calibration in enumerate(loaded[1:], start=2):
+        if calibration.version != first.version:
+            raise ValueError(
+                "Cannot merge activation calibration versions "
+                f"{first.version} and {calibration.version}."
+            )
+        if calibration.collection_mode != first.collection_mode:
+            raise ValueError(
+                "Cannot merge calibration modes "
+                f"'{first.collection_mode}' and '{calibration.collection_mode}'."
+            )
         for field in (
             "baseline_label",
             "activation_basis",
@@ -299,6 +415,13 @@ def merge_activation_calibrations(
             raise ValueError(
                 f"Calibration {index} has different canonical tensor names."
             )
+
+    if first.version == _ACTIVATION_V2_VERSION:
+        return _merge_v2_activation_calibrations(
+            loaded,
+            output_path,
+            overwrite=overwrite,
+        )
 
     evaluations: list[EvaluationMetadata] = []
     for calibration in loaded:
@@ -522,6 +645,198 @@ def merge_activation_calibrations(
     return metadata_file, tensors_file
 
 
+def _merge_v2_activation_calibrations(
+    calibrations: Sequence[ActivationCalibration],
+    output_path: str | Path,
+    *,
+    overwrite: bool,
+) -> tuple[Path, Path]:
+    first = calibrations[0]
+    assert first.collection_mode in ("cvar", "full")
+    evaluations: list[EvaluationMetadata] = []
+    for calibration in calibrations:
+        offset = len(evaluations)
+        evaluations.extend(
+            replace(evaluation, index=evaluation.index + offset)
+            for evaluation in calibration.evaluations
+        )
+
+    tensor_payloads: dict[str, torch.Tensor] = {}
+    layers: dict[str, dict[str, object]] = {}
+    for tensor_name in sorted(first.tensor_names()):
+        source_layers = [calibration.get(tensor_name) for calibration in calibrations]
+        if any(not isinstance(layer, LayerCalibration) for layer in source_layers):
+            raise ValueError(f"Calibration layer is not valid: {tensor_name}")
+        typed_layers = tuple(
+            layer for layer in source_layers if isinstance(layer, LayerCalibration)
+        )
+        first_layer = typed_layers[0]
+        for index, layer in enumerate(typed_layers[1:], start=2):
+            if (
+                layer.input_features != first_layer.input_features
+                or layer.output_features != first_layer.output_features
+            ):
+                raise ValueError(
+                    f"Calibration {index} disagrees on shape for {tensor_name}."
+                )
+
+        prefix = tensor_name
+        eval_sum_x2 = torch.cat(
+            [layer.eval_sum_x2 for layer in typed_layers],
+            dim=0,
+        ).to(dtype=torch.float32).contiguous()
+        tensor_payloads[f"{prefix}.eval_sum_x2"] = eval_sum_x2
+        layer_document: dict[str, object] = {
+            "input_features": first_layer.input_features,
+            "output_features": first_layer.output_features,
+            "eval_sum_x2_key": f"{prefix}.eval_sum_x2",
+        }
+
+        if first.collection_mode == "cvar":
+            eval_output_energy = torch.cat(
+                [layer.eval_output_energy for layer in typed_layers],
+                dim=0,
+            ).to(dtype=torch.float32).contiguous()
+            tensor_payloads[f"{prefix}.eval_output_energy"] = eval_output_energy
+            layer_document["eval_output_energy_key"] = (
+                f"{prefix}.eval_output_energy"
+            )
+        else:
+            full_fields = (
+                ("eval_sum_x", "eval_sum_x"),
+                ("eval_max_abs_x", "eval_max_abs_x"),
+                ("eval_sum_y", "eval_sum_y"),
+                ("eval_sum_y2", "eval_sum_y2"),
+                ("eval_sample_count", "eval_sample_counts"),
+                ("eval_invocation_count", "eval_invocation_counts"),
+            )
+            for tensor_suffix, property_name in full_fields:
+                values = [getattr(layer, property_name) for layer in typed_layers]
+                if any(value is None for value in values):
+                    raise ValueError(
+                        f"Full calibration is missing {property_name}: {tensor_name}"
+                    )
+                merged = torch.cat(
+                    [value for value in values if value is not None],
+                    dim=0,
+                )
+                if tensor_suffix in ("eval_sample_count", "eval_invocation_count"):
+                    merged = merged.to(dtype=torch.int64)
+                else:
+                    merged = merged.to(dtype=torch.float32)
+                merged = merged.contiguous()
+                tensor_payloads[f"{prefix}.{tensor_suffix}"] = merged
+                layer_document[f"{tensor_suffix}_key"] = f"{prefix}.{tensor_suffix}"
+
+            sample_x_key, sample_x_valid_key = _merge_v2_sample_arrays(
+                typed_layers,
+                tensor_payloads,
+                prefix,
+                first_layer.input_features,
+            )
+            layer_document["sample_x_key"] = sample_x_key
+            layer_document["sample_x_valid_key"] = sample_x_valid_key
+
+        sample_count = [layer.sample_count for layer in typed_layers]
+        invocation_count = [layer.invocation_count for layer in typed_layers]
+        if all(count is not None for count in sample_count):
+            layer_document["sample_count"] = sum(
+                count for count in sample_count if count is not None
+            )
+        if all(count is not None for count in invocation_count):
+            layer_document["invocation_count"] = sum(
+                count for count in invocation_count if count is not None
+            )
+        layers[tensor_name] = layer_document
+
+    session_ids = [calibration.session_id for calibration in calibrations]
+    session_digest = hashlib.sha256(
+        "\n".join(session_ids).encode("utf-8")
+    ).hexdigest()[:16]
+    metadata: dict[str, object] = {
+        "format": _FORMAT,
+        "version": _ACTIVATION_V2_VERSION,
+        "collection_mode": first.collection_mode,
+        "session_id": f"merged-{session_digest}",
+        "session_name": "merged",
+        "baseline_label": first.baseline_label,
+        "activation_basis": first.activation_basis,
+        "activation_axis": first.activation_axis,
+        "layer_count": len(layers),
+        "evaluation_count": len(evaluations),
+        "evaluations": [_evaluation_document(evaluation) for evaluation in evaluations],
+        "layers": layers,
+        "merged_session_ids": session_ids,
+    }
+    if first.diffusion_model_class is not None:
+        metadata["diffusion_model_class"] = first.diffusion_model_class
+    sample_rows = [
+        int(tensor.shape[1])
+        for key, tensor in tensor_payloads.items()
+        if key.endswith(".sample_x")
+    ]
+    if sample_rows:
+        metadata["sample_rows_per_evaluation"] = max(sample_rows)
+
+    metadata_file, tensors_file = _activation_pair_paths(output_path)
+    if not overwrite and (metadata_file.exists() or tensors_file.exists()):
+        raise FileExistsError(
+            f"Merged activation calibration already exists: {metadata_file}"
+        )
+    metadata_file.parent.mkdir(parents=True, exist_ok=True)
+    save_file(tensor_payloads, str(tensors_file))
+    metadata_file.write_text(
+        json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata_file, tensors_file
+
+
+def _merge_v2_sample_arrays(
+    layers: Sequence[LayerCalibration],
+    tensor_payloads: dict[str, torch.Tensor],
+    prefix: str,
+    input_features: int,
+) -> tuple[str | None, str | None]:
+    samples = [layer.sample_x for layer in layers]
+    if not any(sample is not None for sample in samples):
+        return None, None
+
+    rows_by_evaluation: list[torch.Tensor] = []
+    max_rows = 0
+    for layer, sample in zip(layers, samples, strict=True):
+        indices = layer.sample_evaluation_indices
+        if sample is None or indices is None:
+            rows = [
+                torch.zeros((0, input_features), dtype=torch.float32)
+                for _ in range(layer.evaluation_count)
+            ]
+        else:
+            rows = [
+                sample[indices == evaluation_index]
+                for evaluation_index in range(layer.evaluation_count)
+            ]
+        rows_by_evaluation.extend(rows)
+        if rows:
+            max_rows = max(max_rows, *(row.shape[0] for row in rows))
+    if max_rows == 0:
+        return None, None
+
+    padded = torch.zeros(
+        (len(rows_by_evaluation), max_rows, input_features),
+        dtype=torch.float32,
+    )
+    valid = torch.zeros(len(rows_by_evaluation), dtype=torch.int64)
+    for evaluation_index, rows in enumerate(rows_by_evaluation):
+        count = rows.shape[0]
+        if count:
+            padded[evaluation_index, :count] = rows
+            valid[evaluation_index] = count
+    tensor_payloads[f"{prefix}.sample_x"] = padded.contiguous()
+    tensor_payloads[f"{prefix}.sample_x_valid"] = valid
+    return f"{prefix}.sample_x", f"{prefix}.sample_x_valid"
+
+
 def _activation_pair_paths(output_path: str | Path) -> tuple[Path, Path]:
     path = Path(output_path)
     if path.suffix.lower() == ".json":
@@ -559,9 +874,9 @@ def validate_activation_calibration_against_source(
         if isinstance(calibration, ActivationCalibration)
         else load_activation_calibration(calibration)
     )
-    if loaded.version != _ACTIVATION_VERSION:
+    if loaded.version not in ACTIVATION_CALIBRATION_VERSIONS:
         raise ValueError(
-            "Source shape validation requires the current activation calibration."
+            "Source shape validation requires a supported activation calibration."
         )
 
     source_header = read_source_model_header(source_path)
@@ -594,8 +909,8 @@ class _LayerDefinition:
     tensor_name: str
     input_features: int
     output_features: int
-    sample_count: int
-    invocation_count: int
+    sample_count: int | None
+    invocation_count: int | None
     tensor_keys: dict[str, str]
 
 
@@ -603,9 +918,11 @@ def _load_activation_calibration(
     tensors_file: Path,
     document: dict[str, Any],
     *,
+    version: int,
+    collection_mode: str | None,
     check_cancelled: Callable[[], None] | None = None,
 ) -> ActivationCalibration:
-    _validate_activation_metadata_header(document)
+    _validate_activation_metadata_header(document, version, collection_mode)
     evaluation_count = document["evaluation_count"]
     evaluations = _parse_evaluations(document["evaluations"])
     if check_cancelled is not None:
@@ -620,6 +937,8 @@ def _load_activation_calibration(
             tensor_name,
             layer_document,
             evaluation_count,
+            version=version,
+            collection_mode=collection_mode,
         )
         layer_definitions.append(definition)
         for field_name, key in definition.tensor_keys.items():
@@ -633,7 +952,11 @@ def _load_activation_calibration(
             claimed_keys[key] = owner
             expected_keys.add(key)
 
-    root_keys = _validate_root_tensor_keys(tensor_store.keys)
+    root_keys = (
+        _validate_root_tensor_keys(tensor_store.keys)
+        if version == _ACTIVATION_VERSION
+        else set()
+    )
     expected_keys.update(root_keys)
     missing_keys = sorted(expected_keys - tensor_store.keys)
     extra_keys = sorted(tensor_store.keys - expected_keys)
@@ -672,18 +995,21 @@ def _load_activation_calibration(
 
     layers: dict[str, LayerCalibration] = {}
     for definition in layer_definitions:
-        _validate_activation_layer_tensors(
+        sample_count, invocation_count = _validate_activation_layer_tensors(
             definition,
             tensor_store,
             evaluation_count,
+            version=version,
+            collection_mode=collection_mode,
         )
         layers[definition.tensor_name] = LayerCalibration(
             tensor_name=definition.tensor_name,
             input_features=definition.input_features,
             output_features=definition.output_features,
-            sample_count=definition.sample_count,
-            invocation_count=definition.invocation_count,
+            sample_count=sample_count,
+            invocation_count=invocation_count,
             evaluation_count=evaluation_count,
+            collection_mode=collection_mode,
             tensor_keys=definition.tensor_keys,
             tensor_store=tensor_store,
         )
@@ -699,24 +1025,34 @@ def _load_activation_calibration(
         activation_basis=document["activation_basis"],
         activation_axis=document["activation_axis"],
         stats=layers,
-        version=_ACTIVATION_VERSION,
+        collection_mode=collection_mode,
+        version=version,
         evaluations=evaluations,
     )
 
 
-def _validate_activation_metadata_header(document: dict[str, Any]) -> None:
+def _validate_activation_metadata_header(
+    document: dict[str, Any],
+    version: int,
+    collection_mode: str | None,
+) -> None:
     if document.get("format") != _FORMAT:
         raise ValueError(
             "Unsupported activation calibration format: "
             f"{document.get('format')!r}"
         )
-    if (
-        type(document.get("version")) is not int
-        or document["version"] != _ACTIVATION_VERSION
-    ):
+    if type(document.get("version")) is not int or document["version"] != version:
         raise ValueError(
             f"Unsupported activation calibration version: {document.get('version')!r}"
         )
+    if version == _ACTIVATION_V2_VERSION:
+        if type(collection_mode) is not str or collection_mode not in ("cvar", "full"):
+            raise ValueError(
+                "Activation calibration version 2 requires "
+                "collection_mode='cvar' or 'full'."
+            )
+        if document.get("collection_mode") != collection_mode:
+            raise ValueError("Activation calibration collection_mode changed while loading.")
     if document.get("activation_basis") != _ACTIVATION_BASIS:
         raise ValueError(
             "Unsupported activation calibration basis: "
@@ -862,6 +1198,9 @@ def _parse_activation_layer_definition(
     tensor_name: Any,
     layer_document: Any,
     evaluation_count: int,
+    *,
+    version: int,
+    collection_mode: str | None,
 ) -> _LayerDefinition:
     if not isinstance(tensor_name, str) or not tensor_name:
         raise ValueError(
@@ -879,27 +1218,56 @@ def _parse_activation_layer_definition(
         f"{tensor_name}.output_features",
         minimum=1,
     )
-    sample_count = _require_integer(
-        layer_document.get("sample_count"),
-        f"{tensor_name}.sample_count",
-        minimum=0,
-    )
-    invocation_count = _require_integer(
-        layer_document.get("invocation_count"),
-        f"{tensor_name}.invocation_count",
-        minimum=0,
-    )
     tensor_keys: dict[str, str] = {}
-    for metadata_name, internal_name in (
-        ("stats_key", "aggregate_sum_x2"),
-        ("eval_sum_x_key", "eval_sum_x"),
-        ("eval_sum_x2_key", "eval_sum_x2"),
-        ("eval_max_abs_x_key", "eval_max_abs_x"),
-        ("eval_sum_y_key", "eval_sum_y"),
-        ("eval_sum_y2_key", "eval_sum_y2"),
-        ("eval_sample_count_key", "eval_sample_count"),
-        ("eval_invocation_count_key", "eval_invocation_count"),
-    ):
+    if version == _ACTIVATION_VERSION:
+        key_fields = (
+            ("stats_key", "aggregate_sum_x2"),
+            ("eval_sum_x_key", "eval_sum_x"),
+            ("eval_sum_x2_key", "eval_sum_x2"),
+            ("eval_max_abs_x_key", "eval_max_abs_x"),
+            ("eval_sum_y_key", "eval_sum_y"),
+            ("eval_sum_y2_key", "eval_sum_y2"),
+            ("eval_sample_count_key", "eval_sample_count"),
+            ("eval_invocation_count_key", "eval_invocation_count"),
+        )
+    elif collection_mode == "cvar":
+        if any(
+            key in layer_document
+            for key in (
+                "stats_key",
+                "eval_sum_x_key",
+                "eval_max_abs_x_key",
+                "eval_sum_y_key",
+                "eval_sum_y2_key",
+                "eval_sample_count_key",
+                "eval_invocation_count_key",
+                "sample_x_key",
+                "sample_x_valid_key",
+            )
+        ):
+            raise ValueError(
+                f"{tensor_name} cvar metadata references full-only statistics."
+            )
+        key_fields = (
+            ("eval_sum_x2_key", "eval_sum_x2"),
+            ("eval_output_energy_key", "eval_output_energy"),
+        )
+    else:
+        if "stats_key" in layer_document or "eval_output_energy_key" in layer_document:
+            raise ValueError(
+                f"{tensor_name} full metadata must not reference aggregate or "
+                "compact output-energy tensors."
+            )
+        key_fields = (
+            ("eval_sum_x_key", "eval_sum_x"),
+            ("eval_sum_x2_key", "eval_sum_x2"),
+            ("eval_max_abs_x_key", "eval_max_abs_x"),
+            ("eval_sum_y_key", "eval_sum_y"),
+            ("eval_sum_y2_key", "eval_sum_y2"),
+            ("eval_sample_count_key", "eval_sample_count"),
+            ("eval_invocation_count_key", "eval_invocation_count"),
+        )
+    for metadata_name, internal_name in key_fields:
         key = layer_document.get(metadata_name)
         if not isinstance(key, str) or not key:
             raise ValueError(
@@ -914,6 +1282,10 @@ def _parse_activation_layer_definition(
             f"{tensor_name}.sample_x_key and sample_x_valid_key must be provided together."
         )
     if sample_x_key is not None:
+        if version == _ACTIVATION_V2_VERSION and collection_mode != "full":
+            raise ValueError(
+                f"{tensor_name} sample activations require full calibration data."
+            )
         if not isinstance(sample_x_key, str) or not sample_x_key:
             raise ValueError(f"{tensor_name}.sample_x_key must be a non-empty string.")
         if not isinstance(sample_x_valid_key, str) or not sample_x_valid_key:
@@ -923,6 +1295,27 @@ def _parse_activation_layer_definition(
         tensor_keys["sample_x"] = sample_x_key
         tensor_keys["sample_x_valid"] = sample_x_valid_key
 
+    if version == _ACTIVATION_VERSION:
+        sample_count = _require_integer(
+            layer_document.get("sample_count"),
+            f"{tensor_name}.sample_count",
+            minimum=0,
+        )
+        invocation_count = _require_integer(
+            layer_document.get("invocation_count"),
+            f"{tensor_name}.invocation_count",
+            minimum=0,
+        )
+    else:
+        sample_count = _optional_count(
+            layer_document.get("sample_count"),
+            f"{tensor_name}.sample_count",
+        )
+        invocation_count = _optional_count(
+            layer_document.get("invocation_count"),
+            f"{tensor_name}.invocation_count",
+        )
+
     return _LayerDefinition(
         tensor_name=tensor_name,
         input_features=input_features,
@@ -931,6 +1324,12 @@ def _parse_activation_layer_definition(
         invocation_count=invocation_count,
         tensor_keys=tensor_keys,
     )
+
+
+def _optional_count(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    return _require_integer(value, name, minimum=0)
 
 
 def _validate_root_tensor_keys(available_keys: frozenset[str]) -> set[str]:
@@ -994,96 +1393,160 @@ def _validate_activation_layer_tensors(
     definition: _LayerDefinition,
     tensor_store: _CalibrationTensorStore,
     evaluation_count: int,
-) -> None:
+    *,
+    version: int,
+    collection_mode: str | None,
+) -> tuple[int | None, int | None]:
     name = definition.tensor_name
-    aggregate_sum_x2 = _validate_float_tensor(
-        tensor_store.get(definition.tensor_keys["aggregate_sum_x2"]),
-        f"{name}.sum_x2",
-        shape=(definition.input_features,),
-        nonnegative=True,
-    )
     eval_input_shape = (evaluation_count, definition.input_features)
     eval_output_shape = (evaluation_count, definition.output_features)
-    eval_sum_x = _validate_float_tensor(
-        tensor_store.get(definition.tensor_keys["eval_sum_x"]),
-        f"{name}.eval_sum_x",
-        shape=eval_input_shape,
-    )
     eval_sum_x2 = _validate_float_tensor(
         tensor_store.get(definition.tensor_keys["eval_sum_x2"]),
         f"{name}.eval_sum_x2",
         shape=eval_input_shape,
         nonnegative=True,
     )
-    _validate_float_tensor(
-        tensor_store.get(definition.tensor_keys["eval_max_abs_x"]),
-        f"{name}.eval_max_abs_x",
-        shape=eval_input_shape,
-        nonnegative=True,
-    )
-    _validate_float_tensor(
-        tensor_store.get(definition.tensor_keys["eval_sum_y"]),
-        f"{name}.eval_sum_y",
-        shape=eval_output_shape,
-    )
-    _validate_float_tensor(
-        tensor_store.get(definition.tensor_keys["eval_sum_y2"]),
-        f"{name}.eval_sum_y2",
-        shape=eval_output_shape,
-        nonnegative=True,
-    )
-    eval_sample_count = _validate_count_tensor(
-        tensor_store.get(definition.tensor_keys["eval_sample_count"]),
-        f"{name}.eval_sample_count",
-        evaluation_count,
-    )
-    eval_invocation_count = _validate_count_tensor(
-        tensor_store.get(definition.tensor_keys["eval_invocation_count"]),
-        f"{name}.eval_invocation_count",
-        evaluation_count,
-    )
-    if int(eval_sample_count.sum().item()) != definition.sample_count:
-        raise ValueError(
-            f"{name}.sample_count does not match eval_sample_count."
+    if version == _ACTIVATION_VERSION:
+        aggregate_sum_x2 = _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["aggregate_sum_x2"]),
+            f"{name}.sum_x2",
+            shape=(definition.input_features,),
+            nonnegative=True,
         )
-    if int(eval_invocation_count.sum().item()) != definition.invocation_count:
-        raise ValueError(
-            f"{name}.invocation_count does not match eval_invocation_count."
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_x"]),
+            f"{name}.eval_sum_x",
+            shape=eval_input_shape,
         )
-    if not torch.allclose(
-        eval_sum_x2.sum(dim=0),
-        aggregate_sum_x2,
-        rtol=1e-5,
-        atol=1e-5,
-    ):
-        raise ValueError(
-            f"{name}.sum_x2 does not match the sum of eval_sum_x2."
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_max_abs_x"]),
+            f"{name}.eval_max_abs_x",
+            shape=eval_input_shape,
+            nonnegative=True,
         )
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_y"]),
+            f"{name}.eval_sum_y",
+            shape=eval_output_shape,
+        )
+        eval_sum_y2 = _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_y2"]),
+            f"{name}.eval_sum_y2",
+            shape=eval_output_shape,
+            nonnegative=True,
+        )
+        eval_sample_count = _validate_count_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sample_count"]),
+            f"{name}.eval_sample_count",
+            evaluation_count,
+        )
+        eval_invocation_count = _validate_count_tensor(
+            tensor_store.get(definition.tensor_keys["eval_invocation_count"]),
+            f"{name}.eval_invocation_count",
+            evaluation_count,
+        )
+        assert definition.sample_count is not None
+        assert definition.invocation_count is not None
+        if int(eval_sample_count.sum().item()) != definition.sample_count:
+            raise ValueError(f"{name}.sample_count does not match eval_sample_count.")
+        if int(eval_invocation_count.sum().item()) != definition.invocation_count:
+            raise ValueError(
+                f"{name}.invocation_count does not match eval_invocation_count."
+            )
+        if not torch.allclose(
+            eval_sum_x2.sum(dim=0),
+            aggregate_sum_x2,
+            rtol=1e-5,
+            atol=1e-5,
+        ):
+            raise ValueError(
+                f"{name}.sum_x2 does not match the sum of eval_sum_x2."
+            )
+        sample_count = definition.sample_count
+        invocation_count = definition.invocation_count
+    elif collection_mode == "cvar":
+        energy = _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_output_energy"]),
+            f"{name}.eval_output_energy",
+            shape=(evaluation_count,),
+        )
+        if energy.numel():
+            tolerance = 1e-5 * max(1.0, float(energy.abs().max().item()))
+            if bool((energy < -tolerance).any().item()):
+                raise ValueError(
+                    f"Activation calibration {name}.eval_output_energy must be "
+                    "non-negative within floating-point tolerance."
+                )
+        sample_count = definition.sample_count
+        invocation_count = definition.invocation_count
+    else:
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_x"]),
+            f"{name}.eval_sum_x",
+            shape=eval_input_shape,
+        )
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_max_abs_x"]),
+            f"{name}.eval_max_abs_x",
+            shape=eval_input_shape,
+            nonnegative=True,
+        )
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_y"]),
+            f"{name}.eval_sum_y",
+            shape=eval_output_shape,
+        )
+        _validate_float_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sum_y2"]),
+            f"{name}.eval_sum_y2",
+            shape=eval_output_shape,
+            nonnegative=True,
+        )
+        eval_sample_count = _validate_count_tensor(
+            tensor_store.get(definition.tensor_keys["eval_sample_count"]),
+            f"{name}.eval_sample_count",
+            evaluation_count,
+        )
+        eval_invocation_count = _validate_count_tensor(
+            tensor_store.get(definition.tensor_keys["eval_invocation_count"]),
+            f"{name}.eval_invocation_count",
+            evaluation_count,
+        )
+        sample_count = int(eval_sample_count.sum().item())
+        invocation_count = int(eval_invocation_count.sum().item())
+        if definition.sample_count is not None and sample_count != definition.sample_count:
+            raise ValueError(f"{name}.sample_count does not match eval_sample_count.")
+        if (
+            definition.invocation_count is not None
+            and invocation_count != definition.invocation_count
+        ):
+            raise ValueError(
+                f"{name}.invocation_count does not match eval_invocation_count."
+            )
 
-    if "sample_x" not in definition.tensor_keys:
-        return
-    sample_x = tensor_store.get(definition.tensor_keys["sample_x"])
-    if sample_x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise ValueError(
-            f"{name}.sample_x must use BF16, F16, or F32 data."
+    if "sample_x" in definition.tensor_keys:
+        sample_x = tensor_store.get(definition.tensor_keys["sample_x"])
+        if sample_x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError(f"{name}.sample_x must use BF16, F16, or F32 data.")
+        if sample_x.ndim != 3 or tuple(sample_x.shape[:1]) != (evaluation_count,):
+            raise ValueError(
+                f"{name}.sample_x must have shape [evaluation_count, rows, input_features]."
+            )
+        if sample_x.shape[2] != definition.input_features:
+            raise ValueError(f"{name}.sample_x width does not match input_features.")
+        if not bool(torch.isfinite(sample_x).all().item()):
+            raise ValueError(f"{name}.sample_x must be finite.")
+        sample_x_valid = _validate_count_tensor(
+            tensor_store.get(definition.tensor_keys["sample_x_valid"]),
+            f"{name}.sample_x_valid",
+            evaluation_count,
         )
-    if sample_x.ndim != 3 or tuple(sample_x.shape[:1]) != (evaluation_count,):
-        raise ValueError(
-            f"{name}.sample_x must have shape [evaluation_count, rows, input_features]."
-        )
-    if sample_x.shape[2] != definition.input_features:
-        raise ValueError(f"{name}.sample_x width does not match input_features.")
-    if not bool(torch.isfinite(sample_x).all().item()):
-        raise ValueError(f"{name}.sample_x must be finite.")
-    sample_x_valid = _validate_count_tensor(
-        tensor_store.get(definition.tensor_keys["sample_x_valid"]),
-        f"{name}.sample_x_valid",
-        evaluation_count,
-    )
-    if bool((sample_x_valid > sample_x.shape[1]).any().item()):
-        raise ValueError(
-            f"{name}.sample_x_valid cannot exceed the padded sample row count."
-        )
+        if bool((sample_x_valid > sample_x.shape[1]).any().item()):
+            raise ValueError(
+                f"{name}.sample_x_valid cannot exceed the padded sample row count."
+            )
+
+    return sample_count, invocation_count
 
 
 def _validate_float_tensor(

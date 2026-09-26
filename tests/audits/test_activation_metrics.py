@@ -9,6 +9,7 @@ from potatoforge.audits.activation_metrics import (
     diagonal_reference_output_energy,
     evaluation_relative_sse,
     global_channel_contribution,
+    observed_metric_components_from_marginals,
     row_relative_channel_sse,
     reduce_evaluation_scores,
     sampled_diagonal_approximation_ratio,
@@ -21,6 +22,44 @@ from potatoforge.audits.activation_metrics import (
 
 
 class TestActivationMetrics(unittest.TestCase):
+    def test_observed_metrics_match_error_marginals(self) -> None:
+        error_matrix = torch.tensor(
+            [[0.5, 1.0, 3.0], [4.0, 2.0, 0.25], [1.5, 5.0, 2.0]]
+        )
+        output_energy = torch.tensor(
+            [[4.0, 2.0, 8.0], [3.0, 5.0, 1.0], [2.0, 4.0, 6.0]]
+        )
+        expected_evaluations = evaluation_relative_sse(
+            error_matrix,
+            output_energy,
+        )
+        expected_channels = global_channel_contribution(
+            error_matrix,
+            output_energy,
+        )
+        aggregate, evaluations, channels = observed_metric_components_from_marginals(
+            error_matrix.sum(dim=1),
+            error_matrix.sum(dim=0),
+            output_energy.sum(dim=1),
+        )
+
+        self.assertAlmostEqual(
+            aggregate,
+            aggregate_observed_relative_sse(error_matrix, output_energy),
+        )
+        torch.testing.assert_close(evaluations, expected_evaluations)
+        torch.testing.assert_close(channels, expected_channels)
+        for reducer in ("p95", "cvar20"):
+            with self.subTest(reducer=reducer):
+                self.assertAlmostEqual(
+                    reduce_evaluation_scores(evaluations, reducer),
+                    reduce_evaluation_scores(expected_evaluations, reducer),
+                )
+                self.assertAlmostEqual(
+                    reduce_evaluation_scores(channels, reducer),
+                    reduce_evaluation_scores(expected_channels, reducer),
+                )
+
     def test_bias_free_output_energy_removes_matched_bias(self) -> None:
         torch.testing.assert_close(
             bias_free_output_energy(

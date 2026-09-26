@@ -17,7 +17,11 @@ from typing import Any, Callable, Final
 import torch
 from safetensors.torch import load_file
 
-from ..calibration import ActivationCalibration, LayerCalibration
+from ..calibration import (
+    ACTIVATION_CALIBRATION_VERSIONS,
+    ActivationCalibration,
+    LayerCalibration,
+)
 from ..planning import (
     QUANTIZATION_SOURCE_DTYPES,
     is_supported_weight_key,
@@ -28,6 +32,7 @@ from .activation_metrics import (
     bias_free_output_energy,
     evaluation_relative_sse,
     global_channel_contribution,
+    observed_metric_components_from_marginals,
     reduce_evaluation_scores,
 )
 from .activation_measurements import (
@@ -40,6 +45,8 @@ from .activation_measurements import (
 
 ACTIVATION_AUDIT_FORMAT: Final[str] = "potatoforge_activation_quant_audit"
 ACTIVATION_AUDIT_VERSION: Final[int] = 1
+_ERROR_OUTPUT_MATRIX: Final[str] = "eval_output_matrix"
+_ERROR_MARGINALS: Final[str] = "eval_output_marginals"
 ACTIVATION_AUDIT_METRICS: Final[tuple[str, ...]] = (
     "aggregate_observed_relative_sse",
     "eval_mean_observed_relative_sse",
@@ -56,6 +63,10 @@ ACTIVATION_AUDIT_METRICS: Final[tuple[str, ...]] = (
     "channel_p95_bias_free_global_contribution",
     "channel_cvar20_bias_free_global_contribution",
 )
+
+
+class ActivationMetricCapabilityError(ValueError):
+    """Raised when calibration data cannot support a selected metric."""
 
 
 def _validate_activation_audit_device(device: str) -> None:
@@ -140,6 +151,8 @@ class ActivationAuditCache:
     requested_methods: tuple[str, ...]
     measurements: Mapping[str, Mapping[str, CandidateMeasurement]]
     layer_shapes: Mapping[str, tuple[int, int, int]]
+    calibration_collection_mode: str | None = None
+    error_representation: str = _ERROR_OUTPUT_MATRIX
     bias_names: Mapping[str, str | None] = field(default_factory=dict)
     bias_free_output_energy: Mapping[str, torch.Tensor] = field(
         default_factory=dict
@@ -170,7 +183,9 @@ class ActivationAuditCache:
                 f"Invalid activation audit metadata: {metadata_file}"
             ) from exc
 
-        requested_methods, raw_layers = _validate_metadata(document)
+        requested_methods, raw_layers, error_representation = _validate_metadata(
+            document
+        )
         tensors = load_file(str(tensors_file), device="cpu")
         measurements: dict[str, dict[str, CandidateMeasurement]] = {}
         layer_shapes: dict[str, tuple[int, int, int]] = {}
@@ -191,6 +206,8 @@ class ActivationAuditCache:
                 tensor_name,
                 raw_layer,
                 requested_methods,
+                calibration_version=document["calibration_version"],
+                collection_mode=document.get("calibration_collection_mode"),
             )
             layer_shapes[tensor_name] = (
                 layer["input_features"],
@@ -221,6 +238,7 @@ class ActivationAuditCache:
                     evaluation_count=layer["evaluation_count"],
                     output_features=layer["output_features"],
                     sampled_sample_count=layer.get("sampled_sample_count"),
+                    error_representation=error_representation,
                 )
                 if tensor_keys is not None:
                     expected_keys.update(tensor_keys)
@@ -250,6 +268,8 @@ class ActivationAuditCache:
             requested_methods=requested_methods,
             measurements=measurements,
             layer_shapes=layer_shapes,
+            calibration_collection_mode=document.get("calibration_collection_mode"),
+            error_representation=error_representation,
             bias_names=bias_names,
             bias_free_output_energy=bias_energy,
             bias_unavailable_reasons=bias_reasons,
@@ -294,8 +314,8 @@ def run_activation_audit(
     _validate_activation_audit_device(device)
     if check_cancelled is not None:
         check_cancelled()
-    if calibration.version != 1:
-        raise ValueError("Activation audit requires the current calibration format.")
+    if calibration.version not in ACTIVATION_CALIBRATION_VERSIONS:
+        raise ValueError("Activation audit requires a supported calibration format.")
     source_header = calibration.validate_against_source(source_path)
     descriptors = {
         tensor_name: descriptor
@@ -335,6 +355,16 @@ def run_activation_audit(
     bias_names: dict[str, str | None] = {}
     bias_reasons: dict[str, str | None] = {}
     for tensor_name in selected_names:
+        layer = calibration.get(tensor_name)
+        if isinstance(layer, LayerCalibration) and not layer.supports_bias_free_metrics:
+            bias_names[tensor_name] = None
+            bias_reasons[tensor_name] = (
+                calibration.metric_unavailability_reason(
+                    "aggregate_bias_free_observed_relative_sse"
+                )
+                or "Bias-free output moments are unavailable."
+            )
+            continue
         bias_name = _matching_bias_name(tensor_name)
         bias_descriptor = source_header.tensors.get(bias_name)
         if bias_descriptor is None:
@@ -406,12 +436,25 @@ def run_activation_audit(
                     method_timings=method_timings,
                 )
                 bias_energy = None
-                if bias_value is not None:
+                if bias_value is not None and layer.supports_bias_free_metrics:
+                    eval_sum_y = layer.eval_sum_y
+                    eval_sum_y2 = layer.eval_sum_y2
+                    eval_sample_counts = layer.eval_sample_counts
+                    assert eval_sum_y is not None
+                    assert eval_sum_y2 is not None
+                    assert eval_sample_counts is not None
                     bias_energy = bias_free_output_energy(
-                        layer.eval_sum_y,
-                        layer.eval_sum_y2,
-                        layer.eval_sample_counts,
+                        eval_sum_y,
+                        eval_sum_y2,
+                        eval_sample_counts,
                         bias_value,
+                    )
+                elif bias_value is not None:
+                    bias_reasons[tensor_name] = (
+                        calibration.metric_unavailability_reason(
+                            "aggregate_bias_free_observed_relative_sse"
+                        )
+                        or "Bias-free output moments are unavailable."
                     )
             except ValueError as error:
                 raise ValueError(
@@ -450,6 +493,36 @@ def score_activation_audit(
     _validate_calibration_match(activation_cache, activation_calibration)
     if metric not in ACTIVATION_AUDIT_METRICS:
         raise ValueError(f"Unsupported activation audit metric: {metric!r}")
+    capability_reason = activation_calibration.metric_unavailability_reason(metric)
+    if capability_reason is not None:
+        raise ActivationMetricCapabilityError(
+            f"Metric '{metric}' is unavailable. {capability_reason}"
+        )
+    if "bias_free" in metric and any(
+        activation_cache.bias_free_output_energy.get(name) is None
+        for name in activation_cache.tensor_names()
+    ):
+        raise ActivationMetricCapabilityError(
+            f"Metric '{metric}' requires a matching checkpoint bias for every "
+            "calibration layer. Add the bias to the source checkpoint or choose "
+            "an observed-relative metric."
+        )
+    if metric.startswith("sampled_"):
+        for name in activation_cache.tensor_names():
+            for method in activation_cache.requested_methods:
+                candidate = activation_cache.get(name, method)
+                if (
+                    candidate is not None
+                    and candidate.available
+                    and candidate.sample_error_sse is None
+                ):
+                    reason = (
+                        candidate.sample_unavailable_reason
+                        or "Sampled activation rows are unavailable."
+                    )
+                    raise ActivationMetricCapabilityError(
+                        f"Metric '{metric}' is unavailable for {name}: {reason}"
+                    )
 
     results: list[dict[str, object]] = []
     available_count = 0
@@ -471,8 +544,10 @@ def score_activation_audit(
             cost: float | None = None
             status = "unavailable"
             if candidate.available:
-                error = candidate.error_by_eval_output
-                if error is None:
+                if candidate.error_by_eval_output is None and (
+                    candidate.error_by_eval is None
+                    or candidate.error_by_output is None
+                ):
                     raise ValueError(
                         f"Activation audit error is missing: "
                         f"tensor={tensor_name} method={method}"
@@ -518,7 +593,7 @@ def score_activation_audit(
                                 )
                         cost = _score_candidate(
                             metric if bias_metric is None else bias_metric,
-                            error,
+                            candidate,
                             layer,
                             absolute_floor,
                             output_energy=output_energy,
@@ -561,6 +636,8 @@ def score_activation_audit(
         "source_path": activation_cache.source_model_path,
         "calibration_metadata_path": activation_cache.calibration_metadata_path,
         "calibration_session_id": activation_cache.calibration_session_id,
+        "calibration_version": activation_calibration.version,
+        "calibration_collection_mode": activation_calibration.collection_mode,
         "activation_audit_format": ACTIVATION_AUDIT_FORMAT,
         "objective": objective,
         "requested_methods": list(activation_cache.requested_methods),
@@ -624,12 +701,23 @@ def inspect_activation_audit(
             "evaluation_count": evaluation_count,
             "sample_count": layer.sample_count,
             "invocation_count": layer.invocation_count,
+            "calibration_collection_mode": activation_calibration.collection_mode,
             "input_activation_energy": float(
                 layer.aggregate_sum_x2.float().sum().item()
             ),
             "output_activation_energy": float(
-                layer.eval_sum_y2.float().sum().item()
+                layer.eval_output_energy.float().sum().item()
             ),
+            "input_distribution_diagnostics": {
+                "available": layer.supports_input_distribution_diagnostics,
+                "unavailable_reason": (
+                    None
+                    if layer.supports_input_distribution_diagnostics
+                    else "not collected in cvar mode"
+                    if activation_calibration.collection_mode == "cvar"
+                    else "input distribution statistics are unavailable"
+                ),
+            },
             "bias": {
                 "name": activation_cache.bias_names.get(selected_name),
                 "available": bias_energy is not None,
@@ -660,16 +748,18 @@ def inspect_activation_audit(
                 method_reports.append(method_report)
                 continue
 
-            error = candidate.error_by_eval_output
-            if error is None:
+            if candidate.error_by_eval_output is None and (
+                candidate.error_by_eval is None
+                or candidate.error_by_output is None
+            ):
                 raise ValueError(
                     f"Activation audit error is missing: "
                     f"tensor={selected_name} method={method}"
                 )
             try:
                 observed_components = _candidate_metric_components(
-                    error,
-                    layer.eval_sum_y2,
+                    candidate,
+                    layer.eval_output_energy,
                     0.0,
                 )
                 _, evaluation_scores, _ = observed_components
@@ -680,7 +770,7 @@ def inspect_activation_audit(
                     try:
                         bias_free_metrics = _candidate_metric_values(
                             _candidate_metric_components(
-                                error,
+                                candidate,
                                 bias_energy,
                                 0.0,
                             )
@@ -704,7 +794,10 @@ def inspect_activation_audit(
                 if layer.sample_x is None:
                     method_report["sampled"] = {
                         "available": False,
-                        "reason": "Calibration layer has no sample_x rows.",
+                        "reason": (
+                            candidate.sample_unavailable_reason
+                            or "Calibration layer has no sample_x rows."
+                        ),
                     }
                 elif candidate.sample_exact_sse is None:
                     method_report["sampled"] = {
@@ -758,7 +851,17 @@ def inspect_activation_audit(
         "calibration_metadata_path": activation_cache.calibration_metadata_path,
         "calibration_stats_path": activation_cache.calibration_stats_path,
         "calibration_session_id": activation_cache.calibration_session_id,
+        "calibration_version": activation_calibration.version,
+        "calibration_collection_mode": activation_calibration.collection_mode,
+        "optional_metric_families": _metric_family_availability(
+            activation_calibration,
+            activation_cache,
+        ),
         "baseline_label": activation_cache.baseline_label,
+        "evaluations": [
+            _evaluation_metadata_report(evaluation)
+            for evaluation in activation_calibration.evaluations
+        ],
         "requested_methods": list(activation_cache.requested_methods),
         "summary": {
             "layer_count": len(layer_reports),
@@ -914,10 +1017,22 @@ def _top_ranked(
 
 
 def _candidate_metric_components(
-    error: torch.Tensor,
+    candidate: CandidateMeasurement,
     denominator: torch.Tensor,
     absolute_floor: float,
 ) -> tuple[float, torch.Tensor, torch.Tensor]:
+    error = candidate.error_by_eval_output
+    if error is None:
+        if candidate.error_by_eval is None or candidate.error_by_output is None:
+            raise ValueError("Activation candidate error marginals are missing.")
+        return observed_metric_components_from_marginals(
+            candidate.error_by_eval,
+            candidate.error_by_output,
+            denominator,
+            absolute_floor=absolute_floor,
+        )
+    if candidate.error_by_eval is not None or candidate.error_by_output is not None:
+        raise ValueError("Activation candidate has mixed error representations.")
     return (
         aggregate_observed_relative_sse(
             error,
@@ -935,6 +1050,63 @@ def _candidate_metric_components(
             absolute_floor=absolute_floor,
         ),
     )
+
+
+def _metric_family_availability(
+    calibration: ActivationCalibration,
+    cache: ActivationAuditCache | None,
+    *,
+    bias_reasons: Mapping[str, str | None] | None = None,
+) -> dict[str, dict[str, object]]:
+    families = {
+        "bias_free_metrics": "aggregate_bias_free_observed_relative_sse",
+        "sampled_metrics": "sampled_exact_relative_sse",
+    }
+    availability: dict[str, dict[str, object]] = {}
+    for family, example_metric in families.items():
+        reason = calibration.metric_unavailability_reason(example_metric)
+        if reason is None and family == "bias_free_metrics":
+            reasons = (
+                bias_reasons.values()
+                if bias_reasons is not None
+                else cache.bias_unavailable_reasons.values()
+                if cache is not None
+                else ()
+            )
+            reason = next((value for value in reasons if value is not None), None)
+            if reason is None and cache is not None and any(
+                cache.bias_free_output_energy.get(name) is None
+                for name in cache.tensor_names()
+            ):
+                reason = (
+                    "Bias-free metrics require a matching checkpoint bias for "
+                    "every calibration layer."
+                )
+        if reason is None and family == "sampled_metrics" and cache is not None:
+            for name in cache.tensor_names():
+                layer = calibration.get(name)
+                if not isinstance(layer, LayerCalibration) or layer.sample_x is None:
+                    reason = "Sampled activations are unavailable for every layer."
+                    break
+                for method in cache.requested_methods:
+                    candidate = cache.get(name, method)
+                    if (
+                        candidate is not None
+                        and candidate.available
+                        and candidate.sample_error_sse is None
+                    ):
+                        reason = (
+                            candidate.sample_unavailable_reason
+                            or "Sampled activation rows are unavailable."
+                        )
+                        break
+                if reason is not None:
+                    break
+        availability[family] = {
+            "available": reason is None,
+            "unavailable_reason": reason,
+        }
+    return availability
 
 
 def _candidate_metric_values(
@@ -968,13 +1140,32 @@ def _candidate_metric_values(
 
 def _score_candidate(
     metric: str,
-    error: torch.Tensor,
+    candidate: CandidateMeasurement,
     layer: LayerCalibration,
     absolute_floor: float,
     *,
     output_energy: torch.Tensor | None = None,
 ) -> float:
-    denominator = layer.eval_sum_y2 if output_energy is None else output_energy
+    denominator = layer.eval_output_energy if output_energy is None else output_energy
+    error = candidate.error_by_eval_output
+    if error is None:
+        aggregate, evaluation_scores, channel_contributions = (
+            _candidate_metric_components(candidate, denominator, absolute_floor)
+        )
+        if metric == "aggregate_observed_relative_sse":
+            return aggregate
+        if metric.startswith("eval_"):
+            reducer = {
+                "eval_mean_observed_relative_sse": "mean",
+                "eval_p95_observed_relative_sse": "p95",
+                "eval_cvar20_observed_relative_sse": "cvar20",
+            }[metric]
+            return reduce_evaluation_scores(evaluation_scores, reducer)
+        reducer = {
+            "channel_p95_global_contribution": "p95",
+            "channel_cvar20_global_contribution": "cvar20",
+        }[metric]
+        return reduce_evaluation_scores(channel_contributions, reducer)
     if metric == "aggregate_observed_relative_sse":
         return aggregate_observed_relative_sse(
             error,
@@ -1132,15 +1323,20 @@ class _StreamingActivationAuditWriter:
             raise FileExistsError(
                 f"Activation audit output already exists: {self.metadata_path}"
             )
-        if calibration.version != 1:
+        if calibration.version not in ACTIVATION_CALIBRATION_VERSIONS:
             raise ValueError(
-                "Activation audit caches require the current calibration format."
+                "Activation audit caches require a supported calibration format."
             )
         session_id = calibration.session_id
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("Activation audit calibration session_id is required.")
 
         self._calibration = calibration
+        self._error_representation = (
+            _ERROR_MARGINALS
+            if calibration.version == 2 and calibration.collection_mode == "cvar"
+            else _ERROR_OUTPUT_MATRIX
+        )
         self._source_model_path = source_model_path
         self._calibration_metadata_path = calibration_metadata_path
         self._calibration_stats_path = calibration_stats_path
@@ -1257,21 +1453,19 @@ class _StreamingActivationAuditWriter:
             serialized_methods: dict[str, dict[str, object]] = {}
             for method in self._requested_methods:
                 candidate = by_method[method]
-                record, tensor_key = _serialize_candidate(
+                record, error_tensors = _serialize_candidate(
                     tensor_name,
                     method,
                     candidate,
                     layer,
                     self._next_key,
+                    self._error_representation,
                 )
                 if candidate.available:
-                    assert tensor_key is not None
-                    assert candidate.error_by_eval_output is not None
+                    assert error_tensors
                     assert self._tensor_writer is not None
-                    self._tensor_writer.add(
-                        tensor_key,
-                        candidate.error_by_eval_output,
-                    )
+                    for key, tensor in error_tensors.items():
+                        self._tensor_writer.add(key, tensor)
                     for metadata_name, field_name in (
                         ("sample_error_sse_key", "sample_error_sse"),
                         (
@@ -1344,7 +1538,14 @@ class _StreamingActivationAuditWriter:
             "calibration_stats_path": str(stats_path.resolve()),
             "calibration_session_id": self._calibration.session_id,
             "calibration_version": self._calibration.version,
+            "calibration_collection_mode": self._calibration.collection_mode,
+            "error_representation": self._error_representation,
             "baseline_label": self._calibration.baseline_label,
+            "optional_metric_families": _metric_family_availability(
+                self._calibration,
+                None,
+                bias_reasons=self._bias_reasons,
+            ),
             "requested_methods": list(self._requested_methods),
             "layer_count": len(self._serialized_layers),
             "method_availability_counts": self._availability,
@@ -1550,7 +1751,8 @@ def _serialize_candidate(
     candidate: CandidateMeasurement,
     layer: LayerCalibration,
     tensor_key_index: int,
-) -> tuple[dict[str, object], str | None]:
+    error_representation: str,
+) -> tuple[dict[str, object], dict[str, torch.Tensor]]:
     if candidate.available:
         if not isinstance(candidate.storage_bytes, int) or isinstance(
             candidate.storage_bytes,
@@ -1560,43 +1762,101 @@ def _serialize_candidate(
                 f"Activation audit storage_bytes is invalid: "
                 f"tensor={tensor_name} method={method}"
             )
-        error = candidate.error_by_eval_output
-        if not isinstance(error, torch.Tensor):
-            raise ValueError(
-                f"Activation audit error tensor is missing: "
-                f"tensor={tensor_name} method={method}"
-            )
         if candidate.unavailable_reason is not None:
             raise ValueError(
                 f"Available activation audit candidate has a reason: "
                 f"tensor={tensor_name} method={method}"
             )
-        error = error.detach().to(device="cpu", dtype=torch.float32)
-        expected_shape = (layer.evaluation_count, layer.output_features)
-        if tuple(error.shape) != expected_shape:
-            raise ValueError(
-                f"Activation audit error shape mismatch: tensor={tensor_name} "
-                f"method={method} expected={expected_shape} "
-                f"observed={tuple(error.shape)}"
+        error_tensors: dict[str, torch.Tensor]
+        if error_representation == _ERROR_OUTPUT_MATRIX:
+            error = candidate.error_by_eval_output
+            if (
+                not isinstance(error, torch.Tensor)
+                or candidate.error_by_eval is not None
+                or candidate.error_by_output is not None
+            ):
+                raise ValueError(
+                    f"Activation audit matrix error is missing or mixed: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            error = error.detach().to(device="cpu", dtype=torch.float32)
+            expected_shape = (layer.evaluation_count, layer.output_features)
+            if tuple(error.shape) != expected_shape:
+                raise ValueError(
+                    f"Activation audit error shape mismatch: tensor={tensor_name} "
+                    f"method={method} expected={expected_shape} "
+                    f"observed={tuple(error.shape)}"
+                )
+            error_tensors = {f"m{tensor_key_index:06d}": error}
+        else:
+            eval_error = candidate.error_by_eval
+            output_error = candidate.error_by_output
+            if candidate.error_by_eval_output is not None:
+                if eval_error is not None or output_error is not None:
+                    raise ValueError(
+                        f"Activation audit marginal error is mixed: "
+                        f"tensor={tensor_name} method={method}"
+                    )
+                matrix = candidate.error_by_eval_output
+                expected_shape = (layer.evaluation_count, layer.output_features)
+                if tuple(matrix.shape) != expected_shape:
+                    raise ValueError(
+                        f"Activation audit error shape mismatch: tensor={tensor_name} "
+                        f"method={method} expected={expected_shape} "
+                        f"observed={tuple(matrix.shape)}"
+                    )
+                eval_error = matrix.sum(dim=1)
+                output_error = matrix.sum(dim=0)
+            if not isinstance(eval_error, torch.Tensor) or not isinstance(
+                output_error, torch.Tensor
+            ):
+                raise ValueError(
+                    f"Activation audit error marginals are missing: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            expected_shapes = (
+                (eval_error, (layer.evaluation_count,), "evaluation"),
+                (output_error, (layer.output_features,), "output"),
             )
-        if not bool(torch.isfinite(error).all().item()):
-            raise ValueError(
-                f"Activation audit error is not finite: "
-                f"tensor={tensor_name} method={method}"
-            )
-        if bool((error < 0).any().item()):
-            raise ValueError(
-                f"Activation audit error is negative: "
-                f"tensor={tensor_name} method={method}"
-            )
+            error_tensors = {}
+            for index, (error, shape, label) in enumerate(expected_shapes):
+                value = error.detach().to(device="cpu", dtype=torch.float32)
+                if tuple(value.shape) != shape:
+                    raise ValueError(
+                        f"Activation audit {label} error shape mismatch: "
+                        f"tensor={tensor_name} method={method} expected={shape} "
+                        f"observed={tuple(value.shape)}"
+                    )
+                key = (
+                    f"e{tensor_key_index:06d}"
+                    if index == 0
+                    else f"o{tensor_key_index:06d}"
+                )
+                error_tensors[key] = value
+
+        for error in error_tensors.values():
+            if not bool(torch.isfinite(error).all().item()):
+                raise ValueError(
+                    f"Activation audit error is not finite: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            if bool((error < 0).any().item()):
+                raise ValueError(
+                    f"Activation audit error is negative: "
+                    f"tensor={tensor_name} method={method}"
+                )
         record: dict[str, object] = {
             "method": method,
             "action": candidate.action,
             "storage_bytes": candidate.storage_bytes,
             "available": True,
-            "error_tensor_key": f"m{tensor_key_index:06d}",
             "unavailable_reason": None,
         }
+        if error_representation == _ERROR_OUTPUT_MATRIX:
+            record["error_tensor_key"] = f"m{tensor_key_index:06d}"
+        else:
+            record["error_by_eval_key"] = f"e{tensor_key_index:06d}"
+            record["error_by_output_key"] = f"o{tensor_key_index:06d}"
         record.update(
             _serialize_sampled_candidate(
                 tensor_name,
@@ -1606,14 +1866,21 @@ def _serialize_candidate(
                 tensor_key_index,
             )
         )
-        return record, f"m{tensor_key_index:06d}"
+        return record, error_tensors
 
     if candidate.storage_bytes is not None:
         raise ValueError(
             f"Unavailable activation audit candidate has storage_bytes: "
             f"tensor={tensor_name} method={method}"
         )
-    if candidate.error_by_eval_output is not None:
+    if any(
+        error is not None
+        for error in (
+            candidate.error_by_eval_output,
+            candidate.error_by_eval,
+            candidate.error_by_output,
+        )
+    ):
         raise ValueError(
             f"Unavailable activation audit candidate has an error tensor: "
             f"tensor={tensor_name} method={method}"
@@ -1642,17 +1909,19 @@ def _serialize_candidate(
             f"Activation audit unavailable reason is missing: "
             f"tensor={tensor_name} method={method}"
         )
-    return (
-        {
-            "method": method,
-            "action": candidate.action,
-            "storage_bytes": None,
-            "available": False,
-            "error_tensor_key": None,
-            "unavailable_reason": candidate.unavailable_reason,
-        },
-        None,
-    )
+    record: dict[str, object] = {
+        "method": method,
+        "action": candidate.action,
+        "storage_bytes": None,
+        "available": False,
+        "unavailable_reason": candidate.unavailable_reason,
+    }
+    if error_representation == _ERROR_OUTPUT_MATRIX:
+        record["error_tensor_key"] = None
+    else:
+        record["error_by_eval_key"] = None
+        record["error_by_output_key"] = None
+    return record, {}
 
 
 def _serialize_sampled_candidate(
@@ -1673,15 +1942,22 @@ def _serialize_sampled_candidate(
         "sample_unavailable_reason",
     )
     if sample_x is None:
-        if any(
+        sampled_values_present = any(
             getattr(candidate, field_name) is not None
-            for field_name in sampled_fields
-        ):
+            for field_name in sampled_fields[:-1]
+        )
+        if sampled_values_present:
             raise ValueError(
                 f"Activation audit sampled data has no calibration samples: "
                 f"tensor={tensor_name} method={method}"
             )
-        return {}
+        reason = candidate.sample_unavailable_reason
+        if reason is not None and not reason:
+            raise ValueError(
+                f"Activation audit sampled reason is empty: "
+                f"tensor={tensor_name} method={method}"
+            )
+        return {} if reason is None else {"sample_unavailable_reason": reason}
 
     sample_count = int(sample_x.shape[0])
     if sample_count == 0:
@@ -1759,7 +2035,7 @@ def _serialize_sampled_candidate(
 
 def _validate_metadata(
     document: Any,
-) -> tuple[tuple[str, ...], Mapping[str, Any]]:
+) -> tuple[tuple[str, ...], Mapping[str, Any], str]:
     if not isinstance(document, dict):
         raise ValueError("Activation audit metadata must be an object.")
     if document.get("format") != ACTIVATION_AUDIT_FORMAT:
@@ -1782,11 +2058,38 @@ def _validate_metadata(
         "created_at",
     ):
         _require_string(document.get(key), key)
-    if type(document.get("calibration_version")) is not int or document[
-        "calibration_version"
-    ] != 1:
+    calibration_version = document.get("calibration_version")
+    if (
+        type(calibration_version) is not int
+        or calibration_version not in ACTIVATION_CALIBRATION_VERSIONS
+    ):
         raise ValueError(
-            "Activation audit calibration_version must use the current format."
+            "Activation audit calibration_version is unsupported."
+        )
+    collection_mode = document.get("calibration_collection_mode")
+    if calibration_version == 2 and (
+        type(collection_mode) is not str
+        or collection_mode not in ("cvar", "full")
+    ):
+        raise ValueError(
+            "V2 activation audit caches require calibration_collection_mode "
+            "'cvar' or 'full'."
+        )
+    if calibration_version == 1 and collection_mode is not None:
+        raise ValueError(
+            "V1 activation audit caches cannot declare a collection mode."
+        )
+    error_representation = document.get("error_representation", _ERROR_OUTPUT_MATRIX)
+    if type(error_representation) is not str or error_representation not in (
+        _ERROR_OUTPUT_MATRIX,
+        _ERROR_MARGINALS,
+    ):
+        raise ValueError("Activation audit error_representation is unsupported.")
+    if error_representation == _ERROR_MARGINALS and not (
+        calibration_version == 2 and collection_mode == "cvar"
+    ):
+        raise ValueError(
+            "Activation audit error marginals require V2 cvar calibration."
         )
 
     requested_raw = document.get("requested_methods")
@@ -1817,13 +2120,16 @@ def _validate_metadata(
     baseline_label = document.get("baseline_label")
     if baseline_label is not None:
         _require_string(baseline_label, "baseline_label")
-    return requested, raw_layers
+    return requested, raw_layers, error_representation
 
 
 def _validate_layer_metadata(
     tensor_name: str,
     raw_layer: Any,
     requested_methods: tuple[str, ...],
+    *,
+    calibration_version: int,
+    collection_mode: str | None,
 ) -> dict[str, Any]:
     if not isinstance(raw_layer, dict):
         raise ValueError(f"Activation audit layer must be an object: {tensor_name}")
@@ -1835,8 +2141,11 @@ def _validate_layer_metadata(
         raw_layer.get("output_features"),
         f"{tensor_name}.output_features",
     )
-    for key in ("sample_count", "invocation_count", "evaluation_count"):
+    for key in ("sample_count", "invocation_count"):
+        if raw_layer.get(key) is None and calibration_version == 2 and collection_mode == "cvar":
+            continue
         _require_integer(raw_layer.get(key), f"{tensor_name}.{key}")
+    _require_integer(raw_layer.get("evaluation_count"), f"{tensor_name}.evaluation_count")
     sampled_sample_count = raw_layer.get("sampled_sample_count")
     if sampled_sample_count is not None:
         _require_integer(
@@ -1885,6 +2194,7 @@ def _load_candidate(
     evaluation_count: int,
     output_features: int,
     sampled_sample_count: int | None,
+    error_representation: str,
 ) -> tuple[CandidateMeasurement, set[str] | None]:
     if not isinstance(raw_method, dict):
         raise ValueError(
@@ -1910,6 +2220,8 @@ def _load_candidate(
         )
     storage_bytes = raw_method.get("storage_bytes")
     tensor_key = raw_method.get("error_tensor_key")
+    eval_key = raw_method.get("error_by_eval_key")
+    output_key = raw_method.get("error_by_output_key")
     reason = raw_method.get("unavailable_reason")
     if available:
         if (
@@ -1921,41 +2233,70 @@ def _load_candidate(
                 f"Activation audit storage_bytes is invalid: "
                 f"tensor={tensor_name} method={method}"
             )
-        expected_key = f"m{tensor_key_index:06d}"
-        if tensor_key != expected_key:
-            raise ValueError(
-                f"Activation audit tensor key is not deterministic: "
-                f"tensor={tensor_name} method={method}"
-            )
         if reason is not None:
             raise ValueError(
                 f"Available activation audit candidate has a reason: "
                 f"tensor={tensor_name} method={method}"
             )
-        tensor = tensors.get(tensor_key)
-        if tensor is None:
-            raise ValueError(
-                f"Activation audit tensor is missing: "
-                f"tensor={tensor_name} method={method}"
-            )
-        if tensor.dtype != torch.float32 or tuple(tensor.shape) != (
-            evaluation_count,
-            output_features,
-        ):
-            raise ValueError(
-                f"Activation audit error tensor is invalid: "
-                f"tensor={tensor_name} method={method}"
-            )
-        if not bool(torch.isfinite(tensor).all().item()):
-            raise ValueError(
-                f"Activation audit error is not finite: "
-                f"tensor={tensor_name} method={method}"
-            )
-        if bool((tensor < 0).any().item()):
-            raise ValueError(
-                f"Activation audit error is negative: "
-                f"tensor={tensor_name} method={method}"
-            )
+        tensor = None
+        error_by_eval = None
+        error_by_output = None
+        if error_representation == _ERROR_OUTPUT_MATRIX:
+            expected_key = f"m{tensor_key_index:06d}"
+            if tensor_key != expected_key or eval_key is not None or output_key is not None:
+                raise ValueError(
+                    f"Activation audit matrix tensor key is invalid: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            tensor = tensors.get(expected_key)
+            if tensor is None or tensor.dtype != torch.float32 or tuple(
+                tensor.shape
+            ) != (evaluation_count, output_features):
+                raise ValueError(
+                    f"Activation audit error tensor is invalid: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            tensor_keys = {expected_key}
+            error_tensors = (tensor,)
+        else:
+            expected_eval_key = f"e{tensor_key_index:06d}"
+            expected_output_key = f"o{tensor_key_index:06d}"
+            if (
+                tensor_key is not None
+                or eval_key != expected_eval_key
+                or output_key != expected_output_key
+            ):
+                raise ValueError(
+                    f"Activation audit marginal tensor keys are invalid: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            error_by_eval = tensors.get(expected_eval_key)
+            error_by_output = tensors.get(expected_output_key)
+            if (
+                error_by_eval is None
+                or error_by_eval.dtype != torch.float32
+                or tuple(error_by_eval.shape) != (evaluation_count,)
+                or error_by_output is None
+                or error_by_output.dtype != torch.float32
+                or tuple(error_by_output.shape) != (output_features,)
+            ):
+                raise ValueError(
+                    f"Activation audit error marginals are invalid: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            tensor_keys = {expected_eval_key, expected_output_key}
+            error_tensors = (error_by_eval, error_by_output)
+        for error in error_tensors:
+            if not bool(torch.isfinite(error).all().item()):
+                raise ValueError(
+                    f"Activation audit error is not finite: "
+                    f"tensor={tensor_name} method={method}"
+                )
+            if bool((error < 0).any().item()):
+                raise ValueError(
+                    f"Activation audit error is negative: "
+                    f"tensor={tensor_name} method={method}"
+                )
         sampled_fields, sampled_keys = _load_sampled_candidate(
             tensor_name,
             method,
@@ -1971,12 +2312,16 @@ def _load_candidate(
                 available=True,
                 storage_bytes=storage_bytes,
                 error_by_eval_output=tensor,
+                error_by_eval=error_by_eval,
+                error_by_output=error_by_output,
                 **sampled_fields,
             ),
-            {tensor_key, *sampled_keys},
+            {*tensor_keys, *sampled_keys},
         )
 
-    if storage_bytes is not None or tensor_key is not None or any(
+    if storage_bytes is not None or any(
+        key is not None for key in (tensor_key, eval_key, output_key)
+    ) or any(
         raw_method.get(field) is not None
         for field in (
             "sample_error_sse_key",
@@ -2177,6 +2522,8 @@ def _validate_calibration_match(
 ) -> None:
     if calibration.version != cache.calibration_version:
         raise ValueError("Activation audit and calibration versions do not match.")
+    if calibration.collection_mode != cache.calibration_collection_mode:
+        raise ValueError("Activation audit calibration collection_mode does not match.")
     if calibration.session_id != cache.calibration_session_id:
         raise ValueError("Activation audit calibration session_id does not match.")
     if calibration.baseline_label != cache.baseline_label:

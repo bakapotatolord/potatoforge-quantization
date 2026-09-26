@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
 
+from potatoforge.audits.activation_audit import ActivationMetricCapabilityError
 from potatoforge.audits.activation_comparison import (
     generate_activation_comparison_workbook,
 )
@@ -99,6 +100,85 @@ class TestActivationComparison(unittest.TestCase):
         write_workbook.assert_called_once()
         self.assertEqual(result["metric_count"], 2)
         self.assertEqual(result["layer_count"], 1)
+
+    def test_reports_full_only_metrics_as_unavailable(self) -> None:
+        cache = Mock(
+            source_model_path="model.safetensors",
+            calibration_session_id="session",
+            measurements={"blocks.0.weight": {}},
+        )
+        calibration = Mock()
+        generated = ActivationProfileResult(
+            OptimizedProfile(
+                {"profile_id": "comparison", "default": "keep", "rules": ()},
+                100,
+                200,
+                0.0,
+            ),
+            {
+                "target_size_bytes": 200,
+                "estimated_final_size_bytes": 100,
+                "minimum_output_bytes": 100,
+                "selected_action_counts": {"keep": 1},
+                "profile_rule_count": 0,
+                "layer_count": 1,
+            },
+        )
+
+        def score(_cache, _calibration, *, metric):
+            if metric.startswith("sampled_") or "bias_free" in metric:
+                raise ActivationMetricCapabilityError("requires full calibration")
+            return {"results": [], "objective": {"metric_version": 1}}
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "comparison.xlsx"
+            with (
+                patch(
+                    "potatoforge.audits.activation_comparison.ActivationCalibration.load",
+                    return_value=calibration,
+                ),
+                patch(
+                    "potatoforge.audits.activation_comparison.ActivationAuditCache.load",
+                    return_value=cache,
+                ),
+                patch(
+                    "potatoforge.audits.activation_comparison.read_source_model_header",
+                    return_value=object(),
+                ),
+                patch(
+                    "potatoforge.audits.activation_comparison.score_activation_audit",
+                    side_effect=score,
+                ),
+                patch(
+                    "potatoforge.audits.activation_comparison.generate_activation_cache_profile",
+                    return_value=generated,
+                ),
+                patch(
+                    "potatoforge.audits.activation_comparison._write_workbook"
+                ) as write_workbook,
+            ):
+                result = generate_activation_comparison_workbook(
+                    Path("cache.json"),
+                    Path("calibration.json"),
+                    output,
+                    target_bytes=200,
+                    metrics=(
+                        "aggregate_observed_relative_sse",
+                        "sampled_exact_relative_sse",
+                        "aggregate_bias_free_observed_relative_sse",
+                    ),
+                )
+
+        self.assertEqual(result["available_metric_count"], 1)
+        self.assertEqual(result["metrics"], ["aggregate_observed_relative_sse"])
+        self.assertEqual(
+            [item["metric"] for item in result["unavailable_metrics"]],
+            ["sampled_exact_relative_sse", "aggregate_bias_free_observed_relative_sse"],
+        )
+        self.assertEqual(
+            write_workbook.call_args.kwargs["unavailable_metrics"],
+            result["unavailable_metrics"],
+        )
 
 
 if __name__ == "__main__":

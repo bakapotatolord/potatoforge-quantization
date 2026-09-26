@@ -12,7 +12,8 @@ from ..audits.activation_audit import (
     activation_audit_pair_paths,
 )
 from ..calibration.activation import (
-    _ACTIVATION_VERSION as ACTIVATION_CALIBRATION_VERSION,
+    ACTIVATION_CALIBRATION_VERSIONS,
+    _ACTIVATION_V2_VERSION,
     _FORMAT as ACTIVATION_CALIBRATION_FORMAT,
 )
 from ..headers.source_header import read_source_model_header
@@ -351,8 +352,8 @@ def _artifact_folder(root: Path, metadata_path: Path) -> str:
 
 def discover_activation_calibrations(
     config_path: Path = DEFAULT_CONFIG_PATH,
-) -> list[dict[str, str]]:
-    calibrations: dict[Path, dict[str, str]] = {}
+) -> list[dict[str, object]]:
+    calibrations: dict[Path, dict[str, object]] = {}
     for activation_folder in load_activation_folders(config_path):
         if not activation_folder.is_dir():
             continue
@@ -365,10 +366,16 @@ def discover_activation_calibrations(
                 continue
             if not isinstance(document, dict) or document.get("format") != ACTIVATION_CALIBRATION_FORMAT:
                 continue
-            if (
-                type(document.get("version")) is not int
-                or document["version"] != ACTIVATION_CALIBRATION_VERSION
+            version = document.get("version")
+            if type(version) is not int or version not in ACTIVATION_CALIBRATION_VERSIONS:
+                continue
+            collection_mode = document.get("collection_mode")
+            if version == _ACTIVATION_V2_VERSION and (
+                type(collection_mode) is not str
+                or collection_mode not in ("cvar", "full")
             ):
+                continue
+            if version == 1 and collection_mode is not None:
                 continue
             resolved = metadata.resolve()
             stats_path = resolved.with_suffix(".safetensors")
@@ -378,6 +385,8 @@ def discover_activation_calibrations(
                 "folder": _artifact_folder(activation_folder, resolved),
                 "name": resolved.name,
                 "path": str(resolved),
+                "version": version,
+                "collection_mode": collection_mode,
             }
     return sorted(
         calibrations.values(),

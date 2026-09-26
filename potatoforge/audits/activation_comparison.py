@@ -16,6 +16,7 @@ from ..planning import source_bytes
 from ..profiles import resolve_profile
 from .activation_audit import (
     ACTIVATION_AUDIT_METRICS,
+    ActivationMetricCapabilityError,
     ActivationAuditCache,
     score_activation_audit,
 )
@@ -82,8 +83,13 @@ def generate_activation_comparison_workbook(
     source_header = read_source_model_header(source)
     score_reports: dict[str, dict[str, object]] = {}
     profiles: dict[str, ActivationProfileResult] = {}
+    unavailable_metrics: list[dict[str, str]] = []
     for metric in selected_metrics:
-        report = score_activation_audit(cache, calibration, metric=metric)
+        try:
+            report = score_activation_audit(cache, calibration, metric=metric)
+        except ActivationMetricCapabilityError as error:
+            unavailable_metrics.append({"metric": metric, "reason": str(error)})
+            continue
         score_reports[metric] = report
         profiles[metric] = generate_activation_cache_profile(
             cache,
@@ -114,6 +120,7 @@ def generate_activation_comparison_workbook(
         excluded_prefixes=excluded_prefixes,
         excluded_suffixes=excluded_suffixes,
         top_n=top_n,
+        unavailable_metrics=unavailable_metrics,
     )
     return {
         "format": "potatoforge_activation_metric_comparison",
@@ -122,7 +129,9 @@ def generate_activation_comparison_workbook(
         "source_path": str(Path(source).resolve()),
         "calibration_session_id": cache.calibration_session_id,
         "metric_count": len(selected_metrics),
-        "metrics": list(selected_metrics),
+        "available_metric_count": len(score_reports),
+        "metrics": list(score_reports),
+        "unavailable_metrics": unavailable_metrics,
         "layer_count": len(cache.measurements),
         "candidate_count": sum(
             len(report["results"])
@@ -146,6 +155,7 @@ def _write_workbook(
     excluded_prefixes: tuple[str, ...],
     excluded_suffixes: tuple[str, ...],
     top_n: int,
+    unavailable_metrics: Sequence[Mapping[str, str]],
 ) -> None:
     workbook = Workbook()
     summary = workbook.active
@@ -189,6 +199,7 @@ def _write_workbook(
         allowed_methods=allowed_methods,
         excluded_prefixes=excluded_prefixes,
         excluded_suffixes=excluded_suffixes,
+        unavailable_metrics=unavailable_metrics,
     )
     _write_candidate_metrics(
         candidate_sheet,
@@ -233,6 +244,7 @@ def _write_summary(
     allowed_methods: frozenset[str] | None,
     excluded_prefixes: tuple[str, ...],
     excluded_suffixes: tuple[str, ...],
+    unavailable_metrics: Sequence[Mapping[str, str]],
 ) -> None:
     sheet.cell(1, 1, "PotatoForge activation metric comparison")
     sheet.cell(1, 1).font = Font(bold=True, size=14, color="1F4E78")
@@ -240,6 +252,10 @@ def _write_summary(
         ("Source model", str(source_path)),
         ("Calibration session", cache.calibration_session_id),
         ("Calibration version", calibration.version),
+        (
+            "Calibration collection mode",
+            calibration.collection_mode or "V1 legacy",
+        ),
         ("Source tensor count", len(source_header.tensors)),
         ("Audited layer count", len(cache.measurements)),
         ("Baseline method", baseline_method),
@@ -250,6 +266,14 @@ def _write_summary(
         ("Excluded prefixes", ", ".join(excluded_prefixes) or "(none)"),
         ("Excluded suffixes", ", ".join(excluded_suffixes) or "(none)"),
         ("Metric count", len(metrics)),
+        (
+            "Unavailable metrics",
+            "; ".join(
+                f"{item['metric']}: {item['reason']}"
+                for item in unavailable_metrics
+            )
+            or "(none)",
+        ),
         (
             "Loading note",
             "The audit cache, calibration pair, and source header are loaded once.",
@@ -294,7 +318,7 @@ def _write_summary(
         ),
         rows,
         "MetricSummaryTable",
-        start_row=16,
+        start_row=4 + len(metadata),
     )
     sheet.column_dimensions["A"].width = 28
     sheet.column_dimensions["B"].width = 72

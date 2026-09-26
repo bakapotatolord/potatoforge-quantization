@@ -106,6 +106,8 @@ class CandidateMeasurement:
     sample_diag_sse: float | None = None
     sample_cross_term_ratio: float | None = None
     sample_unavailable_reason: str | None = None
+    error_by_eval: torch.Tensor | None = None
+    error_by_output: torch.Tensor | None = None
 
 
 def measure_activation_candidates(
@@ -192,7 +194,15 @@ def measure_activation_candidate(
             unavailable_reason=str(error),
         )
 
-    if action == "keep":
+    compact = calibration.collection_mode == "cvar"
+    error_by_eval: torch.Tensor | None = None
+    error_by_output: torch.Tensor | None = None
+    if action == "keep" and compact:
+        reconstructed = weights
+        error_by_eval = torch.zeros(calibration.evaluation_count, dtype=torch.float32)
+        error_by_output = torch.zeros(calibration.output_features, dtype=torch.float32)
+        error_by_eval_output = None
+    elif action == "keep":
         reconstructed = weights
         error_by_eval_output = torch.zeros(
             (calibration.evaluation_count, calibration.output_features),
@@ -200,11 +210,19 @@ def measure_activation_candidate(
         )
     else:
         reconstructed = _reconstruct_candidate(weights, method, device=device)
-        error_by_eval_output = _measure_output_error(
-            weights,
-            reconstructed,
-            calibration,
-        )
+        if compact:
+            error_by_eval, error_by_output = _measure_output_error_marginals(
+                weights,
+                reconstructed,
+                calibration,
+            )
+            error_by_eval_output = None
+        else:
+            error_by_eval_output = _measure_output_error(
+                weights,
+                reconstructed,
+                calibration,
+            )
 
     sampled = _measure_sampled_diagnostics(
         weights,
@@ -218,6 +236,8 @@ def measure_activation_candidate(
         available=True,
         storage_bytes=storage_bytes,
         error_by_eval_output=error_by_eval_output,
+        error_by_eval=error_by_eval,
+        error_by_output=error_by_output,
         **sampled,
     )
 
@@ -366,6 +386,32 @@ def _measure_output_error(
     return error_by_eval_output
 
 
+def _measure_output_error_marginals(
+    weights: torch.Tensor,
+    reconstructed: torch.Tensor,
+    calibration: LayerCalibration,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    reference = weights.to(device=reconstructed.device, dtype=torch.float32)
+    candidate = reconstructed.float()
+    if candidate.shape != reference.shape:
+        raise ValueError("Quantizer reconstruction shape does not match source weight.")
+    delta_sq = (candidate - reference).square()
+    activation_energy = calibration.eval_sum_x2.to(
+        device=delta_sq.device,
+        dtype=torch.float32,
+    )
+    error_by_eval = torch.mv(activation_energy, delta_sq.sum(dim=0))
+    error_by_output = torch.mv(delta_sq, activation_energy.sum(dim=0))
+    error_by_eval = error_by_eval.to(device="cpu", dtype=torch.float32).contiguous()
+    error_by_output = error_by_output.to(device="cpu", dtype=torch.float32).contiguous()
+    for error in (error_by_eval, error_by_output):
+        if not bool(torch.isfinite(error).all().item()):
+            raise ValueError("Activation candidate measurement must be finite.")
+        if bool((error < 0).any().item()):
+            raise ValueError("Activation candidate measurement must be non-negative.")
+    return error_by_eval, error_by_output
+
+
 def _measure_sampled_diagnostics(
     weights: torch.Tensor,
     reconstructed: torch.Tensor,
@@ -373,7 +419,15 @@ def _measure_sampled_diagnostics(
 ) -> dict[str, object]:
     sample_x = calibration.sample_x
     if sample_x is None:
-        return {}
+        if calibration.collection_mode == "cvar":
+            reason = (
+                "This calibration was collected in 'cvar' mode and does not "
+                "contain sampled activations. Recollect with "
+                "collection_mode='full' to use sampled metrics."
+            )
+        else:
+            reason = "Calibration layer has no sample_x rows."
+        return {"sample_unavailable_reason": reason}
     if sample_x.shape[0] == 0:
         return {
             "sample_unavailable_reason": "Calibration sample_x contains no valid rows."

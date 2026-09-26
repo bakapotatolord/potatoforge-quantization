@@ -70,7 +70,6 @@ from .profiles import validate_quantization_action
 from .config import load_optimize_config, load_quantize_config
 from .calibration import (
     ActivationCalibration,
-    merge_activation_calibrations,
 )
 from .server.runner import run_ui
 
@@ -493,7 +492,10 @@ def activation_audit(
     activation_calibration: Path = typer.Option(
         ...,
         "--activation-calibration",
-        help="Activation calibration metadata JSON.",
+        help=(
+            "V1 or V2 calibration JSON; cvar stores compact observed metrics, "
+            "full also stores sampled and bias-free statistics."
+        ),
     ),
     output: Path = typer.Option(..., "--output", help="Activation audit cache."),
     calibration_stats: Path | None = typer.Option(
@@ -596,7 +598,10 @@ def activation_score(
     metric: str = typer.Option(
         "aggregate_observed_relative_sse",
         "--metric",
-        help="Cache metric when --audit-cache is used.",
+        help=(
+            "Cache metric. V2 cvar supports observed-relative metrics; "
+            "sampled and bias-free metrics require full calibration."
+        ),
     ),
     overwrite: bool = typer.Option(False, help="Replace an existing JSON report."),
 ) -> None:
@@ -707,6 +712,10 @@ def activation_optimize(
     metric: str = typer.Option(
         "aggregate_observed_relative_sse",
         "--metric",
+        help=(
+            "Optimization metric. V2 cvar supports observed-relative metrics; "
+            "sampled and bias-free metrics require full calibration."
+        ),
     ),
     method: str | None = typer.Option(
         None,
@@ -822,7 +831,10 @@ def activation_compare(
     metrics: str | None = typer.Option(
         None,
         "--metrics",
-        help="Optional comma-separated metric list; defaults to all metrics.",
+        help=(
+            "Comma-separated metrics; defaults to all, with unavailable full-only "
+            "metrics reported for cvar calibration."
+        ),
     ),
     top_n: int = typer.Option(20, "--top-n", help="Ranked rows per metric/method."),
     overwrite: bool = typer.Option(False, help="Replace an existing workbook."),
@@ -858,38 +870,6 @@ def activation_compare(
         _finish(summary)
 
     _run("activation-compare", action)
-
-
-@app.command("calibration-merge", hidden=True)
-@activation_app.command("merge")
-def calibration_merge(
-    calibration_paths: list[Path] = typer.Argument(
-        ...,
-        help="Activation calibration JSON files to merge.",
-    ),
-    output: Path = typer.Option(
-        ...,
-        "--output",
-        help="Merged calibration pair base path or JSON path.",
-    ),
-    overwrite: bool = typer.Option(False, help="Replace an existing calibration pair."),
-) -> None:
-    """Merge additive activation calibration statistics."""
-    def action() -> None:
-        metadata_path, tensors_path = merge_activation_calibrations(
-            calibration_paths,
-            output,
-            overwrite=overwrite,
-        )
-        _finish(
-            {
-                "input_calibration_count": len(calibration_paths),
-                "metadata_path": str(metadata_path),
-                "tensors_path": str(tensors_path),
-            }
-        )
-
-    _run("calibration-merge", action)
 
 
 @app.command("analyze", hidden=True)

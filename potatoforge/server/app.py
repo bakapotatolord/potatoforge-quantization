@@ -566,7 +566,7 @@ def create_app(
         }
 
     @app.get("/api/activation-calibrations")
-    def activation_calibrations() -> dict[str, list[dict[str, str]]]:
+    def activation_calibrations() -> dict[str, list[dict[str, object]]]:
         return {"calibrations": discover_activation_calibrations(config_path)}
 
     @app.get("/api/activation-audit-caches")

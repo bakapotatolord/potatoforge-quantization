@@ -24,6 +24,57 @@ from potatoforge.quantization.int8_tensorwise import (
 
 
 class TestActivationMeasurements(unittest.TestCase):
+    def test_cvar_measurement_stores_exact_error_marginals_without_matrix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, full_layer = self._write_calibration(root / "full", 4)
+            _, cvar_layer = self._write_cvar_calibration(root / "cvar", 4)
+            descriptor = self._descriptor(2, 4)
+            weights = torch.tensor(
+                [[-1.0, 0.5, 1.0, 2.0], [3.0, -2.0, 0.25, 1.5]],
+                dtype=torch.bfloat16,
+            )
+
+            full = measure_activation_candidate(
+                "blocks.0.attn.wq.weight",
+                descriptor,
+                weights,
+                full_layer,
+                "int8",
+            )
+            compact = measure_activation_candidate(
+                "blocks.0.attn.wq.weight",
+                descriptor,
+                weights,
+                cvar_layer,
+                "int8",
+            )
+            keep = measure_activation_candidate(
+                "blocks.0.attn.wq.weight",
+                descriptor,
+                weights,
+                cvar_layer,
+                "bf16",
+            )
+
+        self.assertIsNone(compact.error_by_eval_output)
+        assert full.error_by_eval_output is not None
+        assert compact.error_by_eval is not None
+        assert compact.error_by_output is not None
+        torch.testing.assert_close(
+            compact.error_by_eval,
+            full.error_by_eval_output.sum(dim=1),
+        )
+        torch.testing.assert_close(
+            compact.error_by_output,
+            full.error_by_eval_output.sum(dim=0),
+        )
+        self.assertIsNone(keep.error_by_eval_output)
+        assert keep.error_by_eval is not None
+        assert keep.error_by_output is not None
+        torch.testing.assert_close(keep.error_by_eval, torch.zeros(2))
+        torch.testing.assert_close(keep.error_by_output, torch.zeros(2))
+
     def test_computes_eval_output_error_from_reconstructed_candidate(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -328,6 +379,7 @@ class TestActivationMeasurements(unittest.TestCase):
         input_features: int,
         include_samples: bool = False,
     ) -> tuple[object, object]:
+        root.mkdir(parents=True, exist_ok=True)
         tensor_name = "blocks.0.attn.wq.weight"
         eval_sum_x2 = torch.arange(
             1,
@@ -416,6 +468,60 @@ class TestActivationMeasurements(unittest.TestCase):
                     if include_samples
                     else {}
                 ),
+            },
+            str(tensors_path),
+        )
+        calibration = load_activation_calibration(metadata_path)
+        return calibration, calibration.get(tensor_name)
+
+    def _write_cvar_calibration(
+        self,
+        root: Path,
+        input_features: int,
+    ) -> tuple[object, object]:
+        root.mkdir(parents=True, exist_ok=True)
+        tensor_name = "blocks.0.attn.wq.weight"
+        eval_sum_x2 = torch.arange(
+            1,
+            input_features + 1,
+            dtype=torch.float32,
+        ).repeat(2, 1)
+        metadata = {
+            "format": "potatoforge_activation_calibration",
+            "version": 2,
+            "collection_mode": "cvar",
+            "session_id": "measurement-session-cvar",
+            "baseline_label": "bf16",
+            "activation_basis": "logical_linear_input",
+            "activation_axis": "last_dimension",
+            "layer_count": 1,
+            "evaluation_count": 2,
+            "evaluations": [
+                {
+                    "evaluation_index": index,
+                    "root_input_sum_x2": float(index + 1),
+                    "root_output_sum_y2": float(index + 11),
+                }
+                for index in range(2)
+            ],
+            "layers": {
+                tensor_name: {
+                    "input_features": input_features,
+                    "output_features": 2,
+                    "eval_sum_x2_key": f"{tensor_name}.eval_sum_x2",
+                    "eval_output_energy_key": (
+                        f"{tensor_name}.eval_output_energy"
+                    ),
+                }
+            },
+        }
+        metadata_path = root / "calibration.json"
+        tensors_path = root / "calibration.safetensors"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        save_file(
+            {
+                f"{tensor_name}.eval_sum_x2": eval_sum_x2,
+                f"{tensor_name}.eval_output_energy": torch.ones(2),
             },
             str(tensors_path),
         )

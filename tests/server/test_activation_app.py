@@ -90,6 +90,8 @@ class ActivationServerTests(TestCase):
                         'folder': 'activation',
                         'name': calibration.name,
                         'path': str(calibration),
+                        'version': 1,
+                        'collection_mode': None,
                     }
                 ],
             )
@@ -106,6 +108,64 @@ class ActivationServerTests(TestCase):
             self.assertEqual(
                 client.get('/api/activation-calibrations').json()['calibrations'],
                 discover_activation_calibrations(root / 'models.toml'),
+            )
+
+    def test_activation_discovery_includes_v2_mode_and_rejects_invalid_modes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            client, _, activation, _, _ = self._fixture(root)
+            expected = []
+            for name, mode in (('cvar', 'cvar'), ('full', 'full')):
+                calibration = activation / f'{name}.json'
+                calibration.write_text(
+                    json.dumps(
+                        {
+                            'format': 'potatoforge_activation_calibration',
+                            'version': 2,
+                            'collection_mode': mode,
+                        }
+                    ),
+                    encoding='utf-8',
+                )
+                calibration.with_suffix('.safetensors').write_bytes(b'fixture')
+                expected.append(
+                    {
+                        'folder': 'activation',
+                        'name': calibration.name,
+                        'path': str(calibration),
+                        'version': 2,
+                        'collection_mode': mode,
+                    }
+                )
+
+            for name, mode in (('missing', None), ('unknown', 'compact'), ('typed', 2)):
+                invalid = activation / f'{name}.json'
+                document = {
+                    'format': 'potatoforge_activation_calibration',
+                    'version': 2,
+                }
+                if mode is not None:
+                    document['collection_mode'] = mode
+                invalid.write_text(json.dumps(document), encoding='utf-8')
+                invalid.with_suffix('.safetensors').write_bytes(b'fixture')
+
+            expected.append(
+                {
+                    'folder': 'activation',
+                    'name': 'calibration.json',
+                    'path': str(activation / 'calibration.json'),
+                    'version': 1,
+                    'collection_mode': None,
+                }
+            )
+            expected.sort(key=lambda item: item['name'])
+            self.assertEqual(
+                discover_activation_calibrations(root / 'models.toml'),
+                expected,
+            )
+            self.assertEqual(
+                client.get('/api/activation-calibrations').json()['calibrations'],
+                expected,
             )
 
     def test_catalogs_and_activation_folder_preserve_other_lists(self) -> None:

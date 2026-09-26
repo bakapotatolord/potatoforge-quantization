@@ -54,7 +54,11 @@ def evaluation_relative_sse(
         eval_sum_y2,
     )
     numerator = error.sum(dim=1)
-    denominator = output_energy.sum(dim=1)
+    denominator = (
+        output_energy
+        if output_energy.ndim == 1
+        else output_energy.sum(dim=1)
+    )
     return _safe_ratio(numerator, denominator, absolute_floor=absolute_floor)
 
 
@@ -163,6 +167,46 @@ def global_channel_contribution(
     )
 
 
+def observed_metric_components_from_marginals(
+    error_by_eval: torch.Tensor,
+    error_by_output: torch.Tensor,
+    eval_output_energy: torch.Tensor,
+    *,
+    absolute_floor: float = 0.0,
+) -> tuple[float, torch.Tensor, torch.Tensor]:
+    """Return observed SSE metrics from evaluation/output error marginals."""
+    eval_error = error_by_eval.float()
+    output_error = error_by_output.float()
+    energy = eval_output_energy.float()
+    if eval_error.ndim != 1 or energy.ndim != 1 or eval_error.shape != energy.shape:
+        raise ValueError("Evaluation marginals and output energy must match.")
+    if output_error.ndim != 1:
+        raise ValueError("Output error marginals must be rank 1.")
+    _require_finite(eval_error, "error_by_eval")
+    _require_nonnegative(eval_error, "error_by_eval")
+    _require_finite(output_error, "error_by_output")
+    _require_nonnegative(output_error, "error_by_output")
+    _require_finite(energy, "eval_output_energy")
+    _require_nonnegative(energy, "eval_output_energy")
+    total_energy = energy.sum()
+    aggregate = _safe_ratio(
+        eval_error.sum(),
+        total_energy,
+        absolute_floor=absolute_floor,
+    )
+    per_evaluation = _safe_ratio(
+        eval_error,
+        energy,
+        absolute_floor=absolute_floor,
+    )
+    channel_contribution = _safe_ratio(
+        output_error,
+        total_energy,
+        absolute_floor=absolute_floor,
+    )
+    return float(aggregate.item()), per_evaluation, channel_contribution
+
+
 def row_relative_channel_sse(
     error_by_eval_output: torch.Tensor,
     eval_sum_y2: torch.Tensor,
@@ -176,6 +220,8 @@ def row_relative_channel_sse(
     )
     if not math.isfinite(floor_fraction) or floor_fraction < 0:
         raise ValueError("floor_fraction must be finite and non-negative.")
+    if output_energy.ndim == 1:
+        raise ValueError("Per-channel output energy is unavailable.")
     numerator = error.sum(dim=0)
     denominator = output_energy.sum(dim=0)
     positive = denominator[denominator > 0]
@@ -381,7 +427,14 @@ def _validate_measurement_pair(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     error = _validate_error_matrix(error_by_eval_output)
     output_energy = eval_sum_y2.float()
-    if output_energy.ndim != 2 or tuple(output_energy.shape) != tuple(error.shape):
+    shape_matches = (
+        output_energy.ndim == 1
+        and output_energy.shape[0] == error.shape[0]
+    ) or (
+        output_energy.ndim == 2
+        and tuple(output_energy.shape) == tuple(error.shape)
+    )
+    if not shape_matches:
         raise ValueError("Measurement and eval_sum_y2 shapes do not match.")
     _require_finite(output_energy, "eval_sum_y2")
     _require_nonnegative(output_energy, "eval_sum_y2")
@@ -510,6 +563,7 @@ __all__ = [
     "diagonal_reference_output_energy",
     "evaluation_relative_sse",
     "global_channel_contribution",
+    "observed_metric_components_from_marginals",
     "row_relative_channel_sse",
     "reduce_evaluation_scores",
     "sampled_diagonal_approximation_ratio",
