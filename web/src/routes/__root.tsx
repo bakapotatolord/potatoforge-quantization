@@ -1,4 +1,4 @@
-import { ChartBar, Cube, Gear, MagnifyingGlass, Pulse, SlidersHorizontal } from '@phosphor-icons/react'
+import { ChartBar, Cube, Gear, MagnifyingGlass, Play, Pulse, SlidersHorizontal } from '@phosphor-icons/react'
 import { AppShell, Burger, Container, Group, NavLink, Title } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-router'
@@ -60,6 +60,13 @@ function RootLayout() {
           label="Quantize"
           leftSection={<Cube size={18} />}
           active={pathname === '/quantize'}
+        />
+        <NavLink
+          component={Link}
+          to="/comfy"
+          label="Comfy Runner"
+          leftSection={<Play size={18} />}
+          active={pathname === '/comfy'}
         />
         <NavLink
           component={Link}

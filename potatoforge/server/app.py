@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -66,6 +69,8 @@ from .activation_jobs import ActivationAuditJobManager
 from .audit_jobs import AuditJobManager
 from .jobs import ActiveJobError, InactiveJobError, UnknownJobError
 from .quantize_jobs import QuantizeJobManager
+from .comfy_runner import ComfyClient, ComfyRunner, launch_comfy
+from .comfy_workflow import inspect_dataset, inspect_workflow, load_json, validate_bindings
 
 
 class CommandResult(BaseModel):
@@ -154,6 +159,34 @@ class QuantizeRequest(BaseModel):
     adapter_strength: list[float] = Field(default_factory=list)
     dry_run: bool = False
     timing: bool = False
+
+
+class ComfyConnectionRequest(BaseModel):
+    base_url: str = "http://127.0.0.1:8188"
+
+
+class ComfyFileRequest(BaseModel):
+    path: Path
+
+
+class ComfyLaunchRequest(ComfyConnectionRequest):
+    command: Path
+    working_directory: Path
+    timeout_seconds: int = Field(default=120, ge=1, le=600)
+
+
+class ComfyBinding(BaseModel):
+    dataset_field: str
+    node_id: str
+    class_type: str
+    input_name: str
+
+
+class ComfyRunRequest(ComfyConnectionRequest):
+    workflow_path: Path
+    dataset_path: Path
+    bindings: list[ComfyBinding]
+    final_workflow_path: Path | None = None
 
 
 async def _run_workflow(action: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -437,9 +470,127 @@ def create_app(
     audit_jobs = AuditJobManager()
     activation_jobs = ActivationAuditJobManager()
     quantize_jobs = QuantizeJobManager()
+    comfy_jobs = ComfyRunner(config_path.with_name("comfy_runner_state.json"))
     app.state.audit_jobs = audit_jobs
     app.state.activation_jobs = activation_jobs
     app.state.quantize_jobs = quantize_jobs
+    app.state.comfy_jobs = comfy_jobs
+
+    async def comfy_preflight_check(request: ComfyRunRequest) -> dict[str, Any]:
+        workflow, _ = load_json(request.workflow_path)
+        dataset, _ = load_json(request.dataset_path)
+        bindings = [binding.model_dump() for binding in request.bindings]
+        validate_bindings(workflow, dataset, bindings)
+        async with ComfyClient(request.base_url) as client:
+            await client.get("/system_stats")
+            definitions: dict[str, Any] = {}
+            for class_type in {binding.class_type for binding in request.bindings}:
+                response = await client.http.get(f"/object_info/{quote(class_type, safe='')}")
+                if response.status_code == 200:
+                    definitions.update(response.json())
+            validate_bindings(workflow, dataset, bindings, definitions)
+        if request.final_workflow_path is not None:
+            final_workflow, _ = load_json(request.final_workflow_path)
+            inspect_workflow(final_workflow)
+        return {"valid": True, "run_count": len(dataset["runs"]),
+                "checked_classes": list(definitions)}
+
+    @app.post("/api/comfy/connect")
+    async def comfy_connect(request: ComfyConnectionRequest) -> dict[str, Any]:
+        try:
+            async with ComfyClient(request.base_url) as client:
+                system = await client.get("/system_stats")
+                jobs = await client.http.get("/api/jobs", params={"limit": 1})
+                return {"connected": True, "base_url": client.base_url, "system": system,
+                        "capabilities": {"jobs_api": jobs.status_code == 200,
+                                         "targeted_cancel": jobs.status_code == 200}}
+        except (ValueError, httpx.HTTPError) as error:
+            raise HTTPException(status_code=422, detail=f"Could not connect to ComfyUI: {error}") from error
+
+    @app.post("/api/comfy/launch")
+    async def comfy_launch(request: ComfyLaunchRequest, client_request: Request) -> dict[str, Any]:
+        try:
+            local = client_request.client is not None and ipaddress.ip_address(client_request.client.host).is_loopback
+        except ValueError:
+            local = False
+        if not local:
+            raise HTTPException(status_code=403, detail="Comfy launch is available only to local clients.")
+        try:
+            return await launch_comfy(request.base_url, request.command,
+                                      request.working_directory, request.timeout_seconds)
+        except (ValueError, RuntimeError, TimeoutError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/comfy/workflows/inspect")
+    def comfy_workflow_inspect(request: ComfyFileRequest) -> dict[str, Any]:
+        try:
+            workflow, _ = load_json(request.path)
+            return {"path": str(request.path), "nodes": inspect_workflow(workflow)}
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/comfy/json-files")
+    def comfy_json_files(folder: Path) -> dict[str, Any]:
+        try:
+            if not folder.is_dir():
+                raise ValueError(f"JSON folder does not exist: {folder}")
+            files = sorted((path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".json"),
+                           key=lambda path: path.name.casefold())
+            return {"files": [{"name": path.name, "path": str(path)} for path in files[:500]]}
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/comfy/datasets/inspect")
+    def comfy_dataset_inspect(request: ComfyFileRequest) -> dict[str, Any]:
+        try:
+            dataset, _ = load_json(request.path)
+            return {"path": str(request.path), **inspect_dataset(dataset)}
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/comfy/runs", status_code=202)
+    async def comfy_start_run(request: ComfyRunRequest) -> dict[str, Any]:
+        try:
+            await comfy_preflight_check(request)
+            return {"job": comfy_jobs.start_run(request.base_url, request.workflow_path,
+                request.dataset_path, [binding.model_dump() for binding in request.bindings],
+                request.final_workflow_path)}
+        except ActiveJobError as error:
+            raise HTTPException(status_code=409, detail="A Comfy Runner job is already active.") from error
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except httpx.HTTPError as error:
+            raise HTTPException(status_code=502, detail=f"ComfyUI preflight failed: {error}") from error
+
+    @app.post("/api/comfy/preflight")
+    async def comfy_preflight(request: ComfyRunRequest) -> dict[str, Any]:
+        try:
+            return await comfy_preflight_check(request)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except httpx.HTTPError as error:
+            raise HTTPException(status_code=502, detail=f"ComfyUI preflight failed: {error}") from error
+
+    @app.get("/api/comfy/runs/current")
+    def comfy_current_run() -> dict[str, Any]:
+        return {"job": comfy_jobs.current()}
+
+    @app.delete("/api/comfy/runs/{job_id}")
+    def comfy_cancel_run(job_id: str) -> dict[str, Any]:
+        try:
+            return {"job": comfy_jobs.cancel(job_id)}
+        except UnknownJobError as error:
+            raise HTTPException(status_code=404, detail="Comfy Runner job not found.") from error
+        except InactiveJobError as error:
+            raise HTTPException(status_code=409, detail="Comfy Runner job is no longer active.") from error
+
+    @app.get("/api/comfy/runs/{job_id}/events")
+    async def comfy_run_events(job_id: str) -> StreamingResponse:
+        try:
+            subscriber = comfy_jobs.subscribe(job_id)
+        except UnknownJobError as error:
+            raise HTTPException(status_code=404, detail="Comfy Runner job not found.") from error
+        return StreamingResponse(comfy_jobs.stream(subscriber), media_type="text/event-stream")
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

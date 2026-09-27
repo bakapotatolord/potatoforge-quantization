@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ActivationRouteImport } from './routes/activation'
 import { Route as AuditRouteImport } from './routes/audit'
+import { Route as ComfyRouteImport } from './routes/comfy'
 import { Route as InspectRouteImport } from './routes/inspect'
 import { Route as OptimizeRouteImport } from './routes/optimize'
 import { Route as QuantizeRouteImport } from './routes/quantize'
@@ -30,6 +31,11 @@ const ActivationRoute = ActivationRouteImport.update({
 const AuditRoute = AuditRouteImport.update({
   id: '/audit',
   path: '/audit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ComfyRoute = ComfyRouteImport.update({
+  id: '/comfy',
+  path: '/comfy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const InspectRoute = InspectRouteImport.update({
@@ -57,6 +63,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
+  '/comfy': typeof ComfyRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
   '/quantize': typeof QuantizeRoute
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
+  '/comfy': typeof ComfyRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
   '/quantize': typeof QuantizeRoute
@@ -76,6 +84,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/activation': typeof ActivationRoute
   '/audit': typeof AuditRoute
+  '/comfy': typeof ComfyRoute
   '/inspect': typeof InspectRoute
   '/optimize': typeof OptimizeRoute
   '/quantize': typeof QuantizeRoute
@@ -87,6 +96,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activation'
     | '/audit'
+    | '/comfy'
     | '/inspect'
     | '/optimize'
     | '/quantize'
@@ -96,6 +106,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activation'
     | '/audit'
+    | '/comfy'
     | '/inspect'
     | '/optimize'
     | '/quantize'
@@ -105,6 +116,7 @@ export interface FileRouteTypes {
     | '/'
     | '/activation'
     | '/audit'
+    | '/comfy'
     | '/inspect'
     | '/optimize'
     | '/quantize'
@@ -115,6 +127,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ActivationRoute: typeof ActivationRoute
   AuditRoute: typeof AuditRoute
+  ComfyRoute: typeof ComfyRoute
   InspectRoute: typeof InspectRoute
   OptimizeRoute: typeof OptimizeRoute
   QuantizeRoute: typeof QuantizeRoute
@@ -142,6 +155,13 @@ declare module '@tanstack/react-router' {
       path: '/audit'
       fullPath: '/audit'
       preLoaderRoute: typeof AuditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/comfy': {
+      id: '/comfy'
+      path: '/comfy'
+      fullPath: '/comfy'
+      preLoaderRoute: typeof ComfyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/inspect': {
@@ -179,6 +199,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivationRoute: ActivationRoute,
   AuditRoute: AuditRoute,
+  ComfyRoute: ComfyRoute,
   InspectRoute: InspectRoute,
   OptimizeRoute: OptimizeRoute,
   QuantizeRoute: QuantizeRoute,

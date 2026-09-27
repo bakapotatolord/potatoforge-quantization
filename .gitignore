@@ -22,6 +22,7 @@ wheels/
 # Local model files and conversion outputs
 *.safetensors
 potatoforge/server/model_library.toml
+potatoforge/server/comfy_runner_state.json
 
 *.safetensors.partial
 
