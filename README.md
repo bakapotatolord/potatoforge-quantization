@@ -36,7 +36,22 @@ potatoforge --help
 Use the Torch build appropriate for the target CPU or CUDA environment. After
 the `pip` setup, replace `uv run potatoforge` with `potatoforge` below.
 
-## Choose your path
+## Start with the local UI
+
+The local UI is the recommended starting point for inspecting models, building
+profiles, and quantizing with configured folders. A built frontend is included;
+after installation, launch it with:
+
+```powershell
+uv run potatoforge ui
+```
+
+`potatoforge ui` starts a local FastAPI service, opens the UI in your browser,
+and keeps all model paths on the local machine. After changing frontend source,
+rebuild with `pnpm --dir web install` and `pnpm --dir web build`. Use the CLI
+below for scripting and advanced workflows.
+
+## CLI and advanced workflows
 
 ### Use a profile you have verified
 

@@ -9,6 +9,8 @@ coverage.xml
 htmlcov/
 build/
 dist/
+!web/dist/
+!web/dist/**
 wheels/
 *.egg-info/
 .uv-cache-potatoforge/
