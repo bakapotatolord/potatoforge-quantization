@@ -39,6 +39,7 @@ type QuantizeFormValues = {
   loras: Array<{ path: string | null; strength: string }>
   device: 'cpu' | 'cuda'
   dry_run: boolean
+  timing: boolean
 }
 
 type QuantizeResult =
@@ -50,6 +51,7 @@ type QuantizeResult =
       output_path: string
       output_bytes: number
       adapter_count: number
+      timing_report?: string
       dry_run?: false
     }
 
@@ -205,6 +207,7 @@ function QuantizePage() {
       loras: [],
       device: 'cuda',
       dry_run: false,
+      timing: false,
     },
     validate: {
       source_path: (value) => (value ? null : 'Source checkpoint is required'),
@@ -437,6 +440,7 @@ function QuantizePage() {
         adapter_strength: values.loras.map((lora) => Number(lora.strength)),
         device: values.device,
         dry_run: values.dry_run,
+        timing: !values.dry_run && values.timing,
       })
       setJob(response.job)
       setActiveJobId(response.job.id)
@@ -677,6 +681,12 @@ function QuantizePage() {
               CUDA accelerates supported ConvRot INT5/INT6 and W4A4 work but must be available locally.
             </Text>
             <Switch
+              label="Collect timing breakdown"
+              description="Shown after conversion; measurement can add overhead, especially with CUDA."
+              disabled={formDisabled || form.values.dry_run}
+              {...form.getInputProps('timing', { type: 'checkbox' })}
+            />
+            <Switch
               label="Estimate output size only"
               description="Do not write a checkpoint"
               disabled={formDisabled}
@@ -872,6 +882,22 @@ function QuantizePage() {
           <Stack gap="lg">
             <Title order={3}>{result.dry_run ? 'Estimated output' : 'Quantization complete'}</Title>
             <QuantizeResultSummary result={result} />
+            {result.dry_run !== true && result.timing_report && (
+              <Stack gap="sm">
+                <Title order={4}>Timing breakdown</Title>
+                <ScrollArea h={360} type="auto" scrollbars="xy">
+                  <Text
+                    component="pre"
+                    ff="monospace"
+                    size="sm"
+                    m={0}
+                    style={{ whiteSpace: 'pre', width: 'max-content', minWidth: '100%', userSelect: 'text' }}
+                  >
+                    {result.timing_report}
+                  </Text>
+                </ScrollArea>
+              </Stack>
+            )}
           </Stack>
         </Paper>
       )}

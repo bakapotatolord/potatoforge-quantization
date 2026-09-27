@@ -31,11 +31,12 @@ class QuantizeJobManager(LocalJobManager):
                 adapter_path=request.adapter_path,
                 adapter_strength=request.adapter_strength,
                 dry_run=request.dry_run,
+                timing=request.timing,
                 on_entry_started=lambda index, total, entry: self._on_entry_started(
                     job, index, total, entry
                 ),
             )
-            final_result = self._result_payload(result)
+            final_result = self._result_payload(result, timing=request.timing)
         except ConversionCancelled:
             self.finish(job, "cancelled", error="Quantization stopped.")
         except (FileExistsError, FileNotFoundError, ValueError) as error:
@@ -60,14 +61,17 @@ class QuantizeJobManager(LocalJobManager):
         )
 
     @staticmethod
-    def _result_payload(result: Any) -> dict[str, Any]:
+    def _result_payload(result: Any, *, timing: bool = False) -> dict[str, Any]:
         if result.estimated_bytes is not None:
             return {"estimated_output_bytes": result.estimated_bytes, "dry_run": True}
         output_path = result.output_path
         if output_path is None:
             raise ValueError("Quantize conversion did not produce an output path.")
-        return {
+        payload = {
             "output_path": str(output_path),
             "output_bytes": output_path.stat().st_size,
             "adapter_count": result.adapter_count,
         }
+        if timing and result.timing is not None:
+            payload["timing_report"] = result.timing.render()
+        return payload

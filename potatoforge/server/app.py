@@ -153,6 +153,7 @@ class QuantizeRequest(BaseModel):
     adapter_path: list[Path] = Field(default_factory=list)
     adapter_strength: list[float] = Field(default_factory=list)
     dry_run: bool = False
+    timing: bool = False
 
 
 async def _run_workflow(action: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -868,6 +869,7 @@ def create_app(
             adapter_path=request.adapter_path,
             adapter_strength=request.adapter_strength,
             dry_run=request.dry_run,
+            timing=request.timing,
         )
         if result.estimated_bytes is not None:
             return CommandResult(
@@ -877,12 +879,15 @@ def create_app(
                 }
             )
         assert result.output_path is not None
+        conversion_result = {
+            "output_path": str(result.output_path),
+            "output_bytes": result.output_path.stat().st_size,
+            "adapter_count": result.adapter_count,
+        }
+        if request.timing and result.timing is not None:
+            conversion_result["timing_report"] = result.timing.render()
         return CommandResult(
-            result={
-                "output_path": str(result.output_path),
-                "output_bytes": result.output_path.stat().st_size,
-                "adapter_count": result.adapter_count,
-            }
+            result=conversion_result
         )
 
     @app.post("/api/quantize/jobs", status_code=202)

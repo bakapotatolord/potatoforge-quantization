@@ -1046,6 +1046,7 @@ class ServerAppTests(TestCase):
                         "profile": str(profile),
                         "device": "cuda",
                         "dry_run": True,
+                        "timing": True,
                     },
                 )
 
@@ -1063,6 +1064,7 @@ class ServerAppTests(TestCase):
                     "adapter_path": [],
                     "adapter_strength": [],
                     "dry_run": True,
+                    "timing": True,
                 },
             )
 
@@ -1106,6 +1108,41 @@ class ServerAppTests(TestCase):
                     }
                 },
             )
+
+    def test_quantize_conversion_includes_timing_report_when_requested(self) -> None:
+        with TemporaryDirectory() as directory:
+            client, source, profile, outputs = self._quantize_fixture(Path(directory))
+            output = outputs / "quantized.safetensors"
+            output.write_bytes(b"quantized")
+            timing_report = "Quantization timing\n  total: 1.25s"
+            with patch("potatoforge.server.app.quantize_model") as quantize_model:
+                quantize_model.return_value = SimpleNamespace(
+                    estimated_bytes=None,
+                    output_path=output,
+                    adapter_count=1,
+                    timing=SimpleNamespace(render=Mock(return_value=timing_report)),
+                )
+                response = client.post(
+                    "/api/quantize",
+                    json={
+                        "source_path": str(source),
+                        "output_path": str(output),
+                        "profile": str(profile),
+                        "timing": True,
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json()["result"],
+                {
+                    "output_path": str(output),
+                    "output_bytes": len(b"quantized"),
+                    "adapter_count": 1,
+                    "timing_report": timing_report,
+                },
+            )
+            self.assertTrue(quantize_model.call_args.kwargs["timing"])
 
     def test_quantize_forwards_lora_files_and_strengths(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1152,6 +1189,7 @@ class ServerAppTests(TestCase):
                     "adapter_path": [adapter],
                     "adapter_strength": [0.75],
                     "dry_run": False,
+                    "timing": False,
                 },
             )
 
@@ -1334,8 +1372,10 @@ class ServerAppTests(TestCase):
             started = Event()
             release = Event()
             output = outputs / "output.safetensors"
+            command_kwargs: dict[str, object] = {}
 
             def blocked_quantize(*args, **kwargs):
+                command_kwargs.update(kwargs)
                 started.set()
                 release.wait(timeout=5)
                 output.write_bytes(b"quantized")
@@ -1366,8 +1406,11 @@ class ServerAppTests(TestCase):
 
                 release.set()
                 events = live_client.get(f"/api/quantize/jobs/{job_id}/events")
+                current = live_client.get("/api/quantize/jobs/current").json()["job"]
                 self.assertEqual(events.status_code, 200)
                 self.assertIn("event: complete\n", events.text)
+                self.assertNotIn("timing_report", current["result"])
+                self.assertFalse(command_kwargs["timing"])
 
     def test_quantize_job_can_be_stopped(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1397,6 +1440,7 @@ class ServerAppTests(TestCase):
                         "source_path": str(source),
                         "output_path": str(output),
                         "profile": str(profile),
+                        "timing": True,
                     },
                 )
                 job_id = response.json()["job"]["id"]
@@ -1411,6 +1455,7 @@ class ServerAppTests(TestCase):
 
             self.assertIn('"status":"cancelled"', events.text)
             self.assertIn('"error":"Quantization stopped."', events.text)
+            self.assertNotIn("timing_report", events.text)
 
     def test_quantize_job_events_replay_progress_and_result(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1418,10 +1463,13 @@ class ServerAppTests(TestCase):
             started = Event()
             release = Event()
             callback: dict[str, object] = {}
+            command_kwargs: dict[str, object] = {}
             output = outputs / "output.safetensors"
+            timing_report = "Quantization timing\n  total: 2.50s"
 
             def mocked_quantize(*args, **kwargs):
                 callback["value"] = kwargs["on_entry_started"]
+                command_kwargs.update(kwargs)
                 started.set()
                 release.wait(timeout=5)
                 output.write_bytes(b"quantized")
@@ -1429,6 +1477,7 @@ class ServerAppTests(TestCase):
                     estimated_bytes=None,
                     output_path=output,
                     adapter_count=2,
+                    timing=SimpleNamespace(render=Mock(return_value=timing_report)),
                 )
 
             with TestClient(client.app) as live_client, patch(
@@ -1441,6 +1490,7 @@ class ServerAppTests(TestCase):
                         "source_path": str(source),
                         "output_path": str(output),
                         "profile": str(profile),
+                        "timing": True,
                     },
                 )
                 job_id = response.json()["job"]["id"]
@@ -1453,6 +1503,7 @@ class ServerAppTests(TestCase):
                 release.set()
 
                 events = live_client.get(f"/api/quantize/jobs/{job_id}/events")
+                current = live_client.get("/api/quantize/jobs/current").json()["job"]
 
             self.assertEqual(events.headers["content-type"], "text/event-stream; charset=utf-8")
             self.assertIn(
@@ -1462,6 +1513,9 @@ class ServerAppTests(TestCase):
             self.assertIn('"current":1,"total":2', events.text)
             self.assertIn('"output_path":"', events.text)
             self.assertIn('"adapter_count":2', events.text)
+            self.assertIn(json.dumps(timing_report), events.text)
+            self.assertEqual(current["result"]["timing_report"], timing_report)
+            self.assertTrue(command_kwargs["timing"])
             self.assertLess(events.text.index("event: state"), events.text.index("event: output"))
             self.assertLess(events.text.index("event: output"), events.text.index("event: complete"))
             self.assertIn('"status":"succeeded"', events.text)
@@ -1494,6 +1548,7 @@ class ServerAppTests(TestCase):
                     adapter_path=[],
                     adapter_strength=[],
                     dry_run=False,
+                    timing=False,
                 )
                 job = manager.start(request, mocked_quantize)
                 self.assertTrue(await asyncio.to_thread(started.wait, 2))
@@ -1517,8 +1572,10 @@ class ServerAppTests(TestCase):
             client, source, profile, _ = self._quantize_fixture(Path(directory))
             started = Event()
             release = Event()
+            callback: dict[str, object] = {}
 
             def mocked_estimate(*args, **kwargs):
+                callback["timing"] = kwargs["timing"]
                 started.set()
                 release.wait(timeout=5)
                 return SimpleNamespace(
@@ -1538,16 +1595,24 @@ class ServerAppTests(TestCase):
                         "output_path": None,
                         "profile": str(profile),
                         "dry_run": True,
+                        "timing": True,
                     },
                 )
                 job_id = response.json()["job"]["id"]
                 self.assertTrue(started.wait(timeout=2))
                 release.set()
                 events = live_client.get(f"/api/quantize/jobs/{job_id}/events")
+                current = live_client.get("/api/quantize/jobs/current").json()["job"]
 
             self.assertNotIn("event: output\n", events.text)
             self.assertIn('"estimated_output_bytes":123456', events.text)
             self.assertIn('"dry_run":true', events.text)
+            self.assertNotIn("timing_report", events.text)
+            self.assertEqual(
+                current["result"],
+                {"estimated_output_bytes": 123456, "dry_run": True},
+            )
+            self.assertTrue(callback["timing"])
 
     def test_quantize_job_validation_happens_before_creation(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1626,6 +1691,7 @@ class ServerAppTests(TestCase):
                         "source_path": str(source),
                         "output_path": str(output),
                         "profile": str(profile),
+                        "timing": True,
                     },
                 )
                 job_id = response.json()["job"]["id"]
@@ -1636,4 +1702,5 @@ class ServerAppTests(TestCase):
 
             self.assertIn('"status":"failed"', events.text)
             self.assertIn("CUDA is unavailable", events.text)
+            self.assertNotIn("timing_report", events.text)
             self.assertEqual(unknown.status_code, 404)
