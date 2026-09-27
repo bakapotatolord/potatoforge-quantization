@@ -143,6 +143,69 @@ uv run potatoforge patch `
 `blocks.*` is a literal prefix selector: it selects source tensor names that
 start with `blocks`.
 
+### Experimental Krea2/Kroma MLP pruning loop
+
+The pruning workflow keeps stage artifacts small and uses original MLP channel
+IDs throughout. Build static BF16 weight influence once, select a cumulative
+stage from aggregate Comfy calibration data, inspect the companion final-output
+cascade audit, and apply only an accepted plan to the original checkpoint:
+
+```powershell
+uv run potatoforge prune krea2-mlp weight-stats `
+    --model path\to\kroma-bf16.safetensors `
+    --output artifacts\krea2-down-weight-stats.safetensors
+
+uv run potatoforge prune krea2-mlp select `
+    --activation-stats artifacts\stage1-activation-stats.safetensors `
+    --weight-stats artifacts\krea2-down-weight-stats.safetensors `
+    --add-channels-per-block 256 `
+    --output-plan artifacts\stage1-plan.json
+
+uv run potatoforge prune krea2-mlp audit-summary `
+    --audit artifacts\stage1-cascade-audit.json `
+    --plan artifacts\stage1-plan.json
+
+uv run potatoforge prune krea2-mlp apply-plan `
+    --model path\to\kroma-bf16.safetensors `
+    --plan artifacts\stage6-plan.json `
+    --output path\to\kroma-pruned-bf16.safetensors
+```
+
+`--activation-stats` also accepts a direct (non-recursive) directory of matching
+`name.json` and `name.safetensors` calibration pairs. Files are sorted
+deterministically, validated for the same model/plan/schema, and combined by
+summing raw `sum_squared_activation` and `observation_count` tensors before
+computing the mean; per-file means are never averaged. Unrelated files are
+ignored.
+
+Repeat calibration and selection with `--base-plan` for later stages. The
+local score proposes channels; the final-output cascade audit and fixed visual
+tests remain the acceptance gate. Keep prompts, seeds, resolution, sampler,
+scheduler, steps, guidance, text encoder, and source quantized model fixed
+between stages. Activation stats should come from the unpruned quantized model
+used for inference; static weight stats come from the original floating-point
+source. This mixed-source score is intentional in V1.
+
+### Experimental Krea2/Kroma whole-block pruning loop
+
+The companion Comfy node writes one calibration JSON/Safetensors pair per run.
+Rank a direct, non-recursive directory, audit its shortlist in Comfy, then
+explicitly accept one original block ID:
+
+```powershell
+uv run potatoforge prune krea2-block rank --calibration "C:\Misc\kroma3-block-pruning\round_0\calibration" --top-k 5 --output "C:\Misc\kroma3-block-pruning\round_0\candidates.json"
+uv run potatoforge prune krea2-block audit-summary --audit "C:\Misc\kroma3-block-pruning\round_0\audits" --output "C:\Misc\kroma3-block-pruning\round_0\audit-summary.json"
+uv run potatoforge prune krea2-block plan-add --block 17 --block-count 28 --output "C:\Misc\kroma3-block-pruning\round_1\base-plan.json"
+uv run potatoforge prune krea2-block plan-add --base-plan "C:\Misc\kroma3-block-pruning\round_1\base-plan.json" --block 23 --output "C:\Misc\kroma3-block-pruning\round_2\base-plan.json"
+```
+
+Calibration combines raw sums before calculating
+`sum_residual_sq / (sum_input_sq + 1e-12)`; unrelated files are ignored and
+artifact paths are deterministically sorted. Recalibrate after every accepted
+block. Comfy audit v2 stores derived ratios rather than raw error/baseline
+sums, so its cross-file metric is a `forward_count`-weighted
+`mean_relative_sse`, not an exact energy-weighted aggregate.
+
 ## Command groups
 
 | Goal | Canonical commands | Main artifact |

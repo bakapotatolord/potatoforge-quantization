@@ -33,7 +33,7 @@ def _validate_patch_paths(source_path: Path, output_path: Path) -> Path:
     return partial
 
 
-def _validate_file_ranges(
+def validate_file_ranges(
     file_path: Path,
     ranges: Iterable[tuple[str, tuple[int, int]]],
     file_label: str,
@@ -98,7 +98,7 @@ def execute_patch_plan(
     source = Path(source_path)
     output = Path(output_path)
     partial = _validate_patch_paths(source, output)
-    _validate_file_ranges(
+    validate_file_ranges(
         source,
         (
             (entry.source_tensor_name, entry.source_data_offsets)
@@ -119,7 +119,7 @@ def execute_patch_plan(
         if on_progress is not None:
             on_progress("Validating output")
         output_header = read_source_model_header(partial)
-        _validate_file_ranges(
+        validate_file_ranges(
             partial,
             (
                 (tensor_name, tuple(descriptor["data_offsets"]))

@@ -30,7 +30,7 @@ class TestCli(unittest.TestCase):
                 continue
             if not in_commands:
                 continue
-            match = re.match(r"\s*\|\s+([a-z][a-z-]*)\s+", line)
+            match = re.match(r"\s*\|\s+([a-z0-9][a-z0-9-]*)\s+", line)
             if match:
                 names.add(match.group(1))
         return names
@@ -46,6 +46,7 @@ class TestCli(unittest.TestCase):
                 "lora",
                 "profile",
                 "activation",
+                "prune",
                 "quantize",
                 "patch",
                 "extract",
@@ -77,9 +78,12 @@ class TestCli(unittest.TestCase):
                     "score",
                     "optimize",
                     "compare",
-                    "merge",
                 },
                 "Consume source/calibration files or activation caches",
+            ),
+            ("prune",): (
+                {"krea2", "krea2-block", "krea2-mlp"},
+                "Physically prune supported model structures",
             ),
         }
         for command, (expected_commands, purpose) in expected.items():

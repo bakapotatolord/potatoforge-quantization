@@ -59,6 +59,25 @@ from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
 from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
+from .krea2_mlp_pruning import (
+    Krea2MLPPrunePlan,
+    Krea2MLPSelectionResult,
+    apply_krea2_mlp_plan,
+    build_krea2_mlp_weight_stats,
+    krea2_mlp_plan_sha256,
+    load_krea2_mlp_cascade_audit,
+    prune_krea2_mlp_checkpoint,
+    render_krea2_mlp_cascade_audit,
+    select_krea2_mlp_plan,
+)
+from .krea2_combined_pruning import apply_krea2_combined_prune
+from .krea2_block_pruning import (
+    add_krea2_block_to_plan,
+    apply_krea2_block_plan,
+    rank_krea2_blocks,
+    remap_krea2_block_profile,
+    summarize_krea2_block_audits,
+)
 from .patch_planning import build_patch_metadata, build_patch_plan
 from .patching import execute_patch_plan
 from .planning import (
@@ -110,6 +129,22 @@ activation_app = typer.Typer(
         "caches, reports, workbooks, or profiles."
     ),
 )
+prune_app = typer.Typer(
+    no_args_is_help=True,
+    help="Physically prune supported model structures before quantization.",
+)
+krea2_mlp_app = typer.Typer(
+    invoke_without_command=True,
+    help="Calibrate, select, audit, and apply Krea2/Kroma MLP pruning plans.",
+)
+krea2_block_app = typer.Typer(
+    invoke_without_command=True,
+    help="Rank Krea2 block calibration and manage cumulative bypass plans.",
+)
+krea2_app = typer.Typer(
+    invoke_without_command=True,
+    help="Apply coordinated Krea2/Kroma structural pruning.",
+)
 app.add_typer(
     inspect_app,
     name="inspect",
@@ -126,6 +161,14 @@ app.add_typer(
     name="activation",
     short_help="Analyze activation calibration.",
 )
+app.add_typer(
+    prune_app,
+    name="prune",
+    short_help="Physically prune model structures.",
+)
+prune_app.add_typer(krea2_mlp_app, name="krea2-mlp")
+prune_app.add_typer(krea2_block_app, name="krea2-block")
+prune_app.add_typer(krea2_app, name="krea2")
 VERSION = "0.1.0"
 
 
@@ -283,6 +326,84 @@ def _print_profile_sweep_progress(
 
 def _print_patch_progress(message: str) -> None:
     typer.echo(message, err=True)
+
+
+def _print_krea2_prune_plan(
+    plan: Krea2MLPPrunePlan,
+    output_path: Path,
+) -> None:
+    typer.echo("Krea2 main MLP pruning")
+    typer.echo("----------------------")
+    typer.echo(f"Blocks:                  {len(plan.block_indices)}")
+    typer.echo(f"Hidden width:            {plan.hidden_width}")
+    typer.echo(f"Original MLP width:      {plan.original_mlp_width}")
+    typer.echo(
+        f"Removed range:           "
+        f"[{plan.start_channel}:{plan.end_channel})"
+    )
+    typer.echo(f"Removed channels:        {plan.remove_channels}")
+    typer.echo(f"New MLP width:            {plan.new_mlp_width}")
+    typer.echo(
+        "ConvRot 256 eligible:    "
+        f"{'yes' if plan.new_mlp_width % plan.convrot_group_size == 0 else 'no'}"
+    )
+    typer.echo(
+        "Estimated source saving: "
+        f"~{plan.estimated_saving_bytes / 1_000_000_000:.3f} GB"
+    )
+    typer.echo(f"Output:                  {output_path}")
+
+
+def _print_krea2_selection(plan: dict[str, object], output_path: Path) -> None:
+    selection = plan.get("selection")
+    selection_document = selection if isinstance(selection, dict) else {}
+    parent = selection_document.get("parent_plan_sha256", "none")
+    add_count = selection_document.get("added_per_block_this_stage", "unknown")
+    parent_removed = (
+        0
+        if parent == "none"
+        else int(plan["removed_per_block"]) - int(add_count)
+    )
+    typer.echo("Krea2 MLP selection stage")
+    typer.echo("-------------------------")
+    typer.echo(f"Blocks:                      {plan['block_count']}")
+    typer.echo(f"Original MLP width:          {plan['original_mlp_width']}")
+    typer.echo(f"Parent removed/block:        {parent_removed}")
+    typer.echo(f"Added/block this stage:      {add_count}")
+    typer.echo(f"New cumulative removed:      {plan['removed_per_block']}")
+    typer.echo(f"Runtime masked width:        {plan['new_mlp_width']}")
+    typer.echo(
+        "256-aligned width:           "
+        f"{'yes' if int(plan['new_mlp_width']) % 256 == 0 else 'no'}"
+    )
+    typer.echo("Metric:                      mean_sq_activation × down_col_norm_sq")
+    typer.echo(f"Parent plan:                 {parent}")
+    typer.echo(f"Output plan:                 {output_path}")
+
+
+def _print_krea2_activation_aggregation(
+    input_path: Path,
+    result: Krea2MLPSelectionResult,
+) -> None:
+    artifact_paths = result.activation_artifacts
+    total_observations = result.activation_total_observations
+    formatted_observations = (
+        str(int(total_observations))
+        if total_observations.is_integer()
+        else str(total_observations)
+    )
+    plan = result.plan
+    typer.echo("Krea2 MLP activation aggregation")
+    typer.echo("---------------------------------")
+    typer.echo(f"Input directory:             {input_path}")
+    typer.echo(f"Calibration artifacts:       {len(artifact_paths)}")
+    typer.echo(f"Blocks:                      {plan['block_count']}")
+    typer.echo(f"Original MLP width:          {plan['original_mlp_width']}")
+    typer.echo(f"Total observations:          {formatted_observations}")
+    typer.echo(
+        "Aggregation:                 raw sums/counts summed first; "
+        "per-file means are never averaged"
+    )
 
 
 def _build_adapter_inputs(
@@ -1131,6 +1252,331 @@ def optimize(
         )
 
     _run("optimize", action)
+
+
+@krea2_mlp_app.callback()
+def prune_krea2_mlp(
+    ctx: typer.Context,
+    model_path: Path | None = typer.Option(
+        None,
+        "--model",
+        help="Unquantized floating-point Krea2/Kroma checkpoint.",
+    ),
+    output_path: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Output checkpoint path.",
+    ),
+    start_channel: int | None = typer.Option(
+        None,
+        "--start-channel",
+        help="First intermediate MLP channel to remove.",
+    ),
+    remove_channels: int | None = typer.Option(
+        None,
+        "--remove-channels",
+        help="Number of contiguous intermediate MLP channels to remove.",
+    ),
+) -> None:
+    """Physically prune contiguous channels when no subcommand is selected."""
+    if ctx.invoked_subcommand is not None:
+        if any(
+            value is not None
+            for value in (model_path, output_path, start_channel, remove_channels)
+        ):
+            raise typer.BadParameter(
+                "contiguous pruning options cannot be combined with a subcommand"
+            )
+        return
+    if (
+        model_path is None
+        or output_path is None
+        or start_channel is None
+        or remove_channels is None
+    ):
+        raise typer.BadParameter(
+            "direct pruning requires --model, --output, --start-channel, "
+            "and --remove-channels"
+        )
+
+    def action() -> None:
+        result = prune_krea2_mlp_checkpoint(
+            model_path,
+            output_path,
+            start_channel,
+            remove_channels,
+            on_plan=lambda plan: _print_krea2_prune_plan(plan, output_path),
+        )
+        typer.echo("Pruning completed.")
+        typer.echo(f"Target tensors modified: {result.target_tensors_modified}")
+        typer.echo(f"Other tensors copied:    {result.other_tensors_copied}")
+        typer.echo(f"Output size:              {result.output_bytes} bytes")
+
+    _run("prune krea2-mlp", action)
+
+
+@krea2_mlp_app.command("weight-stats")
+def krea2_mlp_weight_stats(
+    model_path: Path = typer.Option(
+        ...,
+        "--model",
+        help="Original unquantized floating-point Krea2/Kroma checkpoint.",
+    ),
+    output_path: Path = typer.Option(
+        ...,
+        "--output",
+        help="FP32 down-column norm Safetensors artifact.",
+    ),
+) -> None:
+    """Build static per-block down.weight column norms."""
+    def action() -> None:
+        result = build_krea2_mlp_weight_stats(model_path, output_path)
+        typer.echo("Krea2 MLP weight stats")
+        typer.echo("---------------------")
+        typer.echo(f"Blocks:              {len(result.stats.block_indices)}")
+        typer.echo(f"Hidden width:        {result.stats.hidden_width}")
+        typer.echo(f"Original MLP width:  {result.stats.original_mlp_width}")
+        typer.echo(f"Metric:              down_column_norm_sq")
+        typer.echo(f"Output:              {result.output_path}")
+        typer.echo(f"Output size:         {result.output_bytes} bytes")
+
+    _run("prune krea2-mlp weight-stats", action)
+
+
+@krea2_mlp_app.command("select")
+def krea2_mlp_select(
+    activation_stats_path: Path = typer.Option(
+        ...,
+        "--activation-stats",
+        help="Activation-stats artifact or direct directory of same-stem pairs.",
+    ),
+    weight_stats_path: Path = typer.Option(
+        ...,
+        "--weight-stats",
+        help="Static down-column norm artifact.",
+    ),
+    output_plan_path: Path = typer.Option(
+        ...,
+        "--output-plan",
+        "--output",
+        help="Cumulative JSON plan output.",
+    ),
+    base_plan_path: Path | None = typer.Option(
+        None,
+        "--base-plan",
+        help="Optional prior cumulative plan.",
+    ),
+    add_channels_per_block: int = typer.Option(
+        256,
+        "--add-channels-per-block",
+        help="New original-coordinate channels to add per block.",
+    ),
+    importance_output_path: Path | None = typer.Option(
+        None,
+        "--importance-output",
+        help="Optional FP32 importance Safetensors artifact.",
+    ),
+) -> None:
+    """Select the next cumulative pruning stage."""
+    def action() -> None:
+        result = select_krea2_mlp_plan(
+            activation_stats_path,
+            weight_stats_path,
+            output_plan_path,
+            base_plan_path=base_plan_path,
+            add_channels_per_block=add_channels_per_block,
+            importance_output_path=importance_output_path,
+        )
+        if activation_stats_path.is_dir():
+            _print_krea2_activation_aggregation(activation_stats_path, result)
+        _print_krea2_selection(result.plan, result.output_path)
+        if result.importance_path is not None:
+            typer.echo(f"Importance output:           {result.importance_path}")
+
+    _run("prune krea2-mlp select", action)
+
+
+@krea2_mlp_app.command("apply-plan")
+def krea2_mlp_apply_plan(
+    model_path: Path = typer.Option(
+        ...,
+        "--model",
+        help="Original unquantized floating-point Krea2/Kroma checkpoint.",
+    ),
+    plan_path: Path = typer.Option(..., "--plan", help="Accepted cumulative JSON plan."),
+    output_path: Path = typer.Option(..., "--output", help="Pruned BF16/F16/F32 output."),
+) -> None:
+    """Apply arbitrary per-block plan indices once to the original source."""
+    def action() -> None:
+        result = apply_krea2_mlp_plan(
+            model_path,
+            plan_path,
+            output_path,
+            on_plan=lambda plan: _print_krea2_prune_plan(plan, output_path),
+        )
+        typer.echo("Pruning completed.")
+        typer.echo(f"Target tensors modified: {result.target_tensors_modified}")
+        typer.echo(f"Other tensors copied:    {result.other_tensors_copied}")
+        typer.echo(f"Output size:              {result.output_bytes} bytes")
+
+    _run("prune krea2-mlp apply-plan", action)
+
+
+@krea2_mlp_app.command("audit-summary")
+def krea2_mlp_audit_summary(
+    audit_path: Path = typer.Option(..., "--audit", help="Cascade-audit JSON artifact."),
+    plan_path: Path | None = typer.Option(
+        None,
+        "--plan",
+        help="Optional plan whose hash must match the audit candidate.",
+    ),
+) -> None:
+    """Print final-output cascade-audit metrics without a threshold decision."""
+    def action() -> None:
+        audit = load_krea2_mlp_cascade_audit(audit_path)
+        if plan_path is not None and audit.candidate_plan_hash != krea2_mlp_plan_sha256(plan_path):
+            raise ValueError("Cascade audit candidate_plan_hash does not match the plan.")
+        typer.echo(render_krea2_mlp_cascade_audit(audit))
+
+    _run("prune krea2-mlp audit-summary", action)
+
+
+@krea2_block_app.command("rank")
+def krea2_block_rank(
+    calibration_path: Path = typer.Option(..., "--calibration", help="Block-calibration artifact or direct directory."),
+    output_path: Path = typer.Option(..., "--output", help="Candidate JSON output."),
+    top_k: int = typer.Option(5, "--top-k", help="Lowest-impact candidates to shortlist."),
+) -> None:
+    """Rank active blocks from raw calibration sums."""
+    def action() -> None:
+        result = rank_krea2_blocks(calibration_path, output_path, top_k=top_k)
+        typer.echo(f"Artifacts: {result['artifact_count']}; top-K: {result['top_k']}; output: {output_path}")
+    _run("prune krea2-block rank", action)
+
+
+@krea2_block_app.command("audit-summary")
+def krea2_block_audit_summary(
+    audit_path: Path = typer.Option(..., "--audit", help="Block cascade-audit artifact or direct directory."),
+    output_path: Path = typer.Option(..., "--output", help="Audit-summary JSON output."),
+) -> None:
+    """Group candidate audits without accepting a block."""
+    def action() -> None:
+        result = summarize_krea2_block_audits(audit_path, output_path)
+        typer.echo(f"Artifacts: {result['artifact_count']}; candidates: {len(result['ranking'])}; output: {output_path}")
+    _run("prune krea2-block audit-summary", action)
+
+
+@krea2_block_app.command("plan-add")
+def krea2_block_plan_add(
+    block: int = typer.Option(..., "--block", help="Original block ID to accept."),
+    output_path: Path = typer.Option(..., "--output", help="Next cumulative plan JSON output."),
+    block_count: int | None = typer.Option(None, "--block-count", help="Required without --base-plan."),
+    base_plan_path: Path | None = typer.Option(None, "--base-plan", help="Optional prior cumulative plan."),
+) -> None:
+    """Explicitly add one original block ID to a cumulative plan."""
+    def action() -> None:
+        plan = add_krea2_block_to_plan(output_path, block=block, block_count=block_count, base_plan_path=base_plan_path)
+        typer.echo(f"Removed blocks: {plan['removed_blocks']}; output: {output_path}")
+    _run("prune krea2-block plan-add", action)
+
+
+@krea2_block_app.command("apply-plan")
+def krea2_block_apply_plan(
+    model_path: Path = typer.Option(..., "--model", help="Original-topology Krea2/Kroma safetensors model."),
+    plan_path: Path = typer.Option(..., "--plan", help="Cumulative original-ID block-prune plan."),
+    output_path: Path = typer.Option(..., "--output", help="Physically pruned safetensors output."),
+    manifest_path: Path | None = typer.Option(None, "--manifest", help="Optional mapping-manifest JSON output."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and report without writing files."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace existing output and manifest files."),
+) -> None:
+    """Remove planned blocks; plans always use original block IDs."""
+    def action() -> None:
+        result = apply_krea2_block_plan(
+            model_path, plan_path, output_path, manifest_path=manifest_path,
+            dry_run=dry_run, overwrite=overwrite,
+        )
+        typer.echo(
+            f"Original main blocks: {result.original_block_count}; removed: {list(result.removed_blocks)}; "
+            f"remaining: {result.original_block_count - len(result.removed_blocks)}; "
+            f"renamed tensors: {result.renamed_tensor_count}; removed tensors: {result.removed_tensor_count}; "
+            f"removed payload bytes: {result.removed_payload_bytes}; dry run: {result.dry_run}"
+        )
+        if dry_run:
+            typer.echo(f"Old-to-new mapping: {json.dumps(result.old_to_new, sort_keys=True)}")
+        if not dry_run:
+            typer.echo(f"Output: {result.output_path}; manifest: {result.manifest_path}")
+    _run("prune krea2-block apply-plan", action)
+
+
+@krea2_block_app.command("remap-profile")
+def krea2_block_remap_profile(
+    profile_path: Path = typer.Option(..., "--profile", help="Original-topology quantization profile JSON."),
+    plan_path: Path = typer.Option(..., "--plan", help="Cumulative original-ID block-prune plan."),
+    output_path: Path = typer.Option(..., "--output", help="Remapped quantization profile JSON."),
+    source_model_path: Path | None = typer.Option(None, "--source-model", "--model", help="Optional original-topology model for assignment verification."),
+    pruned_model_path: Path | None = typer.Option(None, "--pruned-model", help="Optional physical-prune output for full assignment verification."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and report without writing a profile."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing profile output."),
+) -> None:
+    """Move exact block-prefix quantization rules with surviving tensors."""
+    def action() -> None:
+        result = remap_krea2_block_profile(
+            profile_path, plan_path, output_path, source_model_path=source_model_path,
+            pruned_model_path=pruned_model_path, dry_run=dry_run, overwrite=overwrite,
+        )
+        typer.echo(
+            f"Removed rules: {result.removed_rules}; rewritten rules: {result.rewritten_rules}; "
+            f"unchanged rules: {result.unchanged_rules}; verified assignments: {result.verified_assignments}; "
+            f"dry run: {result.dry_run}"
+        )
+        if dry_run:
+            typer.echo(f"Old-to-new mapping: {json.dumps(result.old_to_new, sort_keys=True)}")
+        if not dry_run:
+            typer.echo(f"Output: {result.output_path}")
+    _run("prune krea2-block remap-profile", action)
+
+
+@krea2_app.command("apply-combined")
+def krea2_apply_combined(
+    model_path: Path = typer.Option(..., "--model", help="Original-topology, original-width Krea2/Kroma checkpoint."),
+    block_plan_path: Path = typer.Option(..., "--block-plan", help="Cumulative original-ID block-prune plan."),
+    mlp_plan_path: Path = typer.Option(..., "--mlp-plan", help="Original-topology Krea2 MLP plan."),
+    quant_profile_path: Path = typer.Option(..., "--quant-profile", help="Original-topology quantization profile."),
+    output_path: Path = typer.Option(..., "--output", help="Final block- and MLP-pruned checkpoint."),
+    remapped_mlp_plan_path: Path | None = typer.Option(None, "--remapped-mlp-plan", help="Optional remapped MLP-plan sidecar path."),
+    output_profile_path: Path | None = typer.Option(None, "--output-profile", help="Optional remapped quant-profile sidecar path."),
+    manifest_path: Path | None = typer.Option(None, "--manifest", help="Optional combined-manifest sidecar path."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate plans and profile mapping without writing outputs."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace existing output artifacts."),
+) -> None:
+    """Apply coordinated block pruning, MLP pruning, and profile remapping."""
+    def action() -> None:
+        result = apply_krea2_combined_prune(
+            model_path, block_plan_path, mlp_plan_path, quant_profile_path, output_path,
+            remapped_mlp_plan_path=remapped_mlp_plan_path,
+            output_profile_path=output_profile_path,
+            manifest_path=manifest_path,
+            dry_run=dry_run,
+            overwrite=overwrite,
+        )
+        typer.echo(
+            f"Blocks: {result.original_block_count} -> {result.original_block_count - len(result.removed_blocks)}; "
+            f"removed originals: {list(result.removed_blocks)}; MLP width: "
+            f"{result.original_mlp_width} -> {result.new_mlp_width}; dry run: {result.dry_run}"
+        )
+        if result.dry_run:
+            typer.echo(f"Old-to-new mapping: {json.dumps(result.old_to_new, sort_keys=True)}")
+            typer.echo(
+                f"MLP entries: {result.original_block_count} -> "
+                f"{result.original_block_count - len(result.removed_blocks)}; profile rules removed: "
+                f"{result.removed_profile_rules}; rewritten: {result.rewritten_profile_rules}"
+            )
+        if not result.dry_run:
+            typer.echo(f"Output: {result.output_path}")
+            typer.echo(f"MLP plan: {result.remapped_mlp_plan_path}")
+            typer.echo(f"Quant profile: {result.output_profile_path}")
+            typer.echo(f"Manifest: {result.manifest_path}; verified assignments: {result.verified_assignments}")
+    _run("prune krea2 apply-combined", action)
 
 
 @app.command("quantize")
