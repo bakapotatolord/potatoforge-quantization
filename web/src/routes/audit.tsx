@@ -27,6 +27,7 @@ import { PageHeader } from '../components/PageHeader.tsx'
 import { getModels } from '../models.ts'
 import { joinOutputPath } from '../utils/output-path.ts'
 import { parentPath } from '../utils/parent-path.ts'
+import { useJobLifecycle } from '../use-job-lifecycle.ts'
 
 type AuditFormValues = {
   source_path: string | null
@@ -67,10 +68,6 @@ type AuditOutputEvent = {
   progress: AuditProgress
 }
 
-type CurrentAuditJobResponse = {
-  job: AuditJobSnapshot | null
-}
-
 type StartAuditJobResponse = {
   job: AuditJobSnapshot
 }
@@ -90,15 +87,31 @@ const DEVICE_OPTIONS = [
 ]
 
 function AuditPage() {
-  const [job, setJob] = useState<AuditJobSnapshot | null>(null)
-  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const {
+    job,
+    setJob,
+    activeJobId,
+    setActiveJobId,
+    restoring,
+    restoreError,
+    streamError,
+    setStreamError,
+  } = useJobLifecycle<AuditJobSnapshot, AuditOutputEvent>(
+    '/api/audit/jobs',
+    'Audit',
+    {
+      onOutput: (output) => {
+        setLines((previous) => [...previous, output.line])
+        setJob((previous) =>
+          previous === null ? previous : { ...previous, progress: output.progress },
+        )
+      },
+    },
+  )
   const [startPending, setStartPending] = useState(false)
   const [stopPending, setStopPending] = useState(false)
-  const [restoring, setRestoring] = useState(true)
   const [lines, setLines] = useState<string[]>([])
   const [requestError, setRequestError] = useState<Error | null>(null)
-  const [streamError, setStreamError] = useState<string | null>(null)
-  const receivedSequences = useRef(new Set<number>())
   const defaultMethodsApplied = useRef(false)
   const outputViewportRef = useRef<HTMLDivElement>(null)
   const outputAtBottom = useRef(true)
@@ -115,88 +128,6 @@ function AuditPage() {
     queryKey: ['audit-methods'],
     queryFn: () => getJson<AuditMethodsResponse>('/api/audit-methods'),
   })
-
-  useEffect(() => {
-    let cancelled = false
-    getJson<CurrentAuditJobResponse>('/api/audit/jobs/current')
-      .then(({ job: currentJob }) => {
-        if (cancelled || currentJob === null) return
-        setJob(currentJob)
-        if (
-          currentJob.status === 'starting' ||
-          currentJob.status === 'running' ||
-          currentJob.status === 'stopping'
-        ) {
-          setActiveJobId(currentJob.id)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setRequestError(
-            error instanceof Error ? error : new Error('Could not restore Audit job'),
-          )
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setRestoring(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeJobId === null) return
-
-    const source = new EventSource(
-      `/api/audit/jobs/${encodeURIComponent(activeJobId)}/events`,
-    )
-    let completeReceived = false
-    let terminalStateReceived = false
-    receivedSequences.current.clear()
-
-    const handleState = (event: MessageEvent<string>) => {
-      const nextJob = JSON.parse(event.data) as AuditJobSnapshot
-      terminalStateReceived =
-        nextJob.status === 'succeeded' ||
-        nextJob.status === 'failed' ||
-        nextJob.status === 'cancelled'
-      setStreamError(null)
-      setJob(nextJob)
-    }
-    const handleOutput = (event: MessageEvent<string>) => {
-      const output = JSON.parse(event.data) as AuditOutputEvent
-      if (receivedSequences.current.has(output.sequence)) return
-      receivedSequences.current.add(output.sequence)
-      setStreamError(null)
-      setLines((previous) => [...previous, output.line])
-      setJob((previous) =>
-        previous === null ? previous : { ...previous, progress: output.progress },
-      )
-    }
-    const handleComplete = (event: MessageEvent<string>) => {
-      const completedJob = JSON.parse(event.data) as AuditJobSnapshot
-      completeReceived = true
-      setStreamError(null)
-      setJob(completedJob)
-      setActiveJobId(null)
-      source.close()
-    }
-
-    source.addEventListener('state', handleState)
-    source.addEventListener('output', handleOutput)
-    source.addEventListener('complete', handleComplete)
-    source.onerror = () => {
-      if (!completeReceived && !terminalStateReceived) {
-        setStreamError('The Audit progress connection was interrupted.')
-      }
-    }
-
-    return () => {
-      completeReceived = true
-      source.close()
-    }
-  }, [activeJobId])
 
   useEffect(() => {
     const viewport = outputViewportRef.current
@@ -266,7 +197,8 @@ function AuditPage() {
   const result = job?.status === 'succeeded' ? job.result : null
   const jobError = job?.status === 'failed' ? job.error : null
   const jobCancelled = job?.status === 'cancelled'
-  const errorMessage = requestError?.message ?? jobError ?? streamError
+  const errorMessage =
+    requestError?.message ?? restoreError?.message ?? jobError ?? streamError
   const showProgress = isJobActive || lines.length > 0
   const statusLabel =
     job?.status === 'starting'

@@ -30,6 +30,7 @@ import { getModels } from '../models.ts'
 import { formatBytes } from '../utils/format-bytes.ts'
 import { joinOutputPath } from '../utils/output-path.ts'
 import { parentPath } from '../utils/parent-path.ts'
+import { useJobLifecycle } from '../use-job-lifecycle.ts'
 
 type QuantizeFormValues = {
   source_path: string | null
@@ -75,10 +76,6 @@ type QuantizeOutputEvent = {
   sequence: number
   line: string
   progress: QuantizeProgress
-}
-
-type CurrentQuantizeJobResponse = {
-  job: QuantizeJobSnapshot | null
 }
 
 type StartQuantizeJobResponse = {
@@ -166,19 +163,51 @@ function QuantizeResultSummary({ result }: { result: QuantizeResult }) {
 }
 
 function QuantizePage() {
-  const [job, setJob] = useState<QuantizeJobSnapshot | null>(null)
-  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const {
+    job,
+    setJob,
+    activeJobId,
+    setActiveJobId,
+    restoring,
+    restoreError,
+    streamError,
+    setStreamError,
+  } = useJobLifecycle<QuantizeJobSnapshot, QuantizeOutputEvent>(
+    '/api/quantize/jobs',
+    'Quantize',
+    {
+      onRestore: (currentJob) => {
+        if (currentJob === null) return
+        if (
+          currentJob.status === 'starting' ||
+          currentJob.status === 'running' ||
+          currentJob.status === 'stopping'
+        ) {
+          setShowOutput(true)
+        } else {
+          setCompletedJobId(currentJob.id)
+        }
+      },
+      onOutput: (output) => {
+        setLines((previous) => [...previous, output.line])
+        setJob((previous) =>
+          previous === null ? previous : { ...previous, progress: output.progress },
+        )
+      },
+      onComplete: (completedJob) => {
+        setCompletedJobId(completedJob.id)
+        setResultOpened(completedJob.status === 'succeeded')
+      },
+    },
+  )
   const [completedJobId, setCompletedJobId] = useState<string | null>(null)
   const [lines, setLines] = useState<string[]>([])
   const [startPending, setStartPending] = useState(false)
   const [stopPending, setStopPending] = useState(false)
-  const [restoring, setRestoring] = useState(true)
   const [requestError, setRequestError] = useState<Error | null>(null)
-  const [streamError, setStreamError] = useState<string | null>(null)
   const [showOutput, setShowOutput] = useState(false)
   const [profileDetailsOpened, setProfileDetailsOpened] = useState(false)
   const [resultOpened, setResultOpened] = useState(false)
-  const receivedSequences = useRef(new Set<number>())
   const terminalViewportRef = useRef<HTMLDivElement>(null)
   const terminalAtBottom = useRef(true)
 
@@ -234,93 +263,6 @@ function QuantizePage() {
       ),
     enabled: profileDetailsOpened && form.values.profile !== null,
   })
-
-  useEffect(() => {
-    let cancelled = false
-    getJson<CurrentQuantizeJobResponse>('/api/quantize/jobs/current')
-      .then(({ job: currentJob }) => {
-        if (cancelled || currentJob === null) return
-        setJob(currentJob)
-        if (
-          currentJob.status === 'starting' ||
-          currentJob.status === 'running' ||
-          currentJob.status === 'stopping'
-        ) {
-          setActiveJobId(currentJob.id)
-          setShowOutput(true)
-        } else {
-          setCompletedJobId(currentJob.id)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setRequestError(
-            error instanceof Error ? error : new Error('Could not restore Quantize job'),
-          )
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setRestoring(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeJobId === null) return
-
-    const source = new EventSource(
-      `/api/quantize/jobs/${encodeURIComponent(activeJobId)}/events`,
-    )
-    let completeReceived = false
-    let terminalStateReceived = false
-    receivedSequences.current.clear()
-
-    const handleState = (event: MessageEvent<string>) => {
-      const nextJob = JSON.parse(event.data) as QuantizeJobSnapshot
-      terminalStateReceived =
-        nextJob.status === 'succeeded' ||
-        nextJob.status === 'failed' ||
-        nextJob.status === 'cancelled'
-      setStreamError(null)
-      setJob(nextJob)
-    }
-    const handleOutput = (event: MessageEvent<string>) => {
-      const output = JSON.parse(event.data) as QuantizeOutputEvent
-      if (receivedSequences.current.has(output.sequence)) return
-      receivedSequences.current.add(output.sequence)
-      setStreamError(null)
-      setLines((previous) => [...previous, output.line])
-      setJob((previous) =>
-        previous === null ? previous : { ...previous, progress: output.progress },
-      )
-    }
-    const handleComplete = (event: MessageEvent<string>) => {
-      const completedJob = JSON.parse(event.data) as QuantizeJobSnapshot
-      completeReceived = true
-      setStreamError(null)
-      setJob(completedJob)
-      setCompletedJobId(completedJob.id)
-      setActiveJobId(null)
-      setResultOpened(completedJob.status === 'succeeded')
-      source.close()
-    }
-
-    source.addEventListener('state', handleState)
-    source.addEventListener('output', handleOutput)
-    source.addEventListener('complete', handleComplete)
-    source.onerror = () => {
-      if (!completeReceived && !terminalStateReceived) {
-        setStreamError('The Quantize progress connection was interrupted.')
-      }
-    }
-
-    return () => {
-      completeReceived = true
-      source.close()
-    }
-  }, [activeJobId])
 
   useEffect(() => {
     const viewport = terminalViewportRef.current
@@ -404,7 +346,8 @@ function QuantizePage() {
   const jobError =
     completedJobId === job?.id && job.status === 'failed' ? job.error : null
   const jobCancelled = completedJobId === job?.id && job.status === 'cancelled'
-  const error = jobError ?? requestError?.message ?? streamError
+  const error =
+    jobError ?? requestError?.message ?? restoreError?.message ?? streamError
   const dryRunJob = form.values.dry_run || result?.dry_run === true
   const showStatus =
     showOutput &&
@@ -446,7 +389,6 @@ function QuantizePage() {
       setActiveJobId(response.job.id)
       setCompletedJobId(null)
       setLines([])
-      receivedSequences.current.clear()
       setRequestError(null)
       setStreamError(null)
       setShowOutput(true)
@@ -463,7 +405,7 @@ function QuantizePage() {
     if (activeJobId === null) return
     setStopPending(true)
     try {
-      const response = await deleteJson<CurrentQuantizeJobResponse>(
+      const response = await deleteJson<{ job: QuantizeJobSnapshot | null }>(
         `/api/quantize/jobs/${encodeURIComponent(activeJobId)}`,
         {},
       )

@@ -30,6 +30,7 @@ import { getModels } from '../models.ts'
 import { formatBytes } from '../utils/format-bytes.ts'
 import { joinOutputPath } from '../utils/output-path.ts'
 import { parentPath } from '../utils/parent-path.ts'
+import { useJobLifecycle } from '../use-job-lifecycle.ts'
 
 type FoldersResponse = {
   folders: string[]
@@ -193,15 +194,39 @@ function formatMetric(value: number | null) {
 
 function ActivationAuditPanel() {
   const queryClient = useQueryClient()
-  const [job, setJob] = useState<ActivationJobSnapshot | null>(null)
-  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const {
+    job,
+    setJob,
+    activeJobId,
+    setActiveJobId,
+    restoring,
+    restoreError,
+    streamError,
+    setStreamError,
+  } = useJobLifecycle<ActivationJobSnapshot, ActivationOutputEvent>(
+    '/api/activation/audit/jobs',
+    'activation audit',
+    {
+      onRestore: (currentJob) => {
+        if (currentJob === null) setLines([])
+      },
+      onOutput: (output) => {
+        setLines((previous) => [...previous, output.line])
+        setJob((previous) =>
+          previous === null ? previous : { ...previous, progress: output.progress },
+        )
+      },
+      onComplete: (completedJob) => {
+        if (completedJob.status === 'succeeded') {
+          void queryClient.invalidateQueries({ queryKey: ['activation-audit-caches'] })
+        }
+      },
+    },
+  )
   const [startPending, setStartPending] = useState(false)
   const [stopPending, setStopPending] = useState(false)
-  const [restoring, setRestoring] = useState(true)
   const [lines, setLines] = useState<string[]>([])
   const [requestError, setRequestError] = useState<Error | null>(null)
-  const [streamError, setStreamError] = useState<string | null>(null)
-  const receivedSequences = useRef(new Set<number>())
   const defaultMethodsApplied = useRef(false)
   const outputViewportRef = useRef<HTMLDivElement>(null)
   const outputAtBottom = useRef(true)
@@ -248,96 +273,6 @@ function ActivationAuditPanel() {
   })
 
   useEffect(() => {
-    let cancelled = false
-    getJson<{ job: ActivationJobSnapshot | null }>('/api/activation/audit/jobs/current')
-      .then(({ job: currentJob }) => {
-        if (cancelled) return
-        if (currentJob === null) {
-          setJob(null)
-          setActiveJobId(null)
-          setLines([])
-          receivedSequences.current.clear()
-          return
-        }
-        setJob(currentJob)
-        if (
-          currentJob.status === 'starting' ||
-          currentJob.status === 'running' ||
-          currentJob.status === 'stopping'
-        ) {
-          setActiveJobId(currentJob.id)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setRequestError(
-            error instanceof Error ? error : new Error('Could not restore activation audit job'),
-          )
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setRestoring(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeJobId === null) return
-    const source = new EventSource(
-      '/api/activation/audit/jobs/' + encodeURIComponent(activeJobId) + '/events',
-    )
-    let completeReceived = false
-    let terminalStateReceived = false
-    receivedSequences.current.clear()
-
-    const handleState = (event: MessageEvent<string>) => {
-      const nextJob = JSON.parse(event.data) as ActivationJobSnapshot
-      terminalStateReceived =
-        nextJob.status === 'succeeded' ||
-        nextJob.status === 'failed' ||
-        nextJob.status === 'cancelled'
-      setStreamError(null)
-      setJob(nextJob)
-    }
-    const handleOutput = (event: MessageEvent<string>) => {
-      const output = JSON.parse(event.data) as ActivationOutputEvent
-      if (receivedSequences.current.has(output.sequence)) return
-      receivedSequences.current.add(output.sequence)
-      setStreamError(null)
-      setLines((previous) => [...previous, output.line])
-      setJob((previous) =>
-        previous === null ? previous : { ...previous, progress: output.progress },
-      )
-    }
-    const handleComplete = (event: MessageEvent<string>) => {
-      const completedJob = JSON.parse(event.data) as ActivationJobSnapshot
-      completeReceived = true
-      setStreamError(null)
-      setJob(completedJob)
-      setActiveJobId(null)
-      source.close()
-      if (completedJob.status === 'succeeded') {
-        void queryClient.invalidateQueries({ queryKey: ['activation-audit-caches'] })
-      }
-    }
-
-    source.addEventListener('state', handleState)
-    source.addEventListener('output', handleOutput)
-    source.addEventListener('complete', handleComplete)
-    source.onerror = () => {
-      if (!completeReceived && !terminalStateReceived) {
-        setStreamError('The activation audit progress connection was interrupted.')
-      }
-    }
-    return () => {
-      completeReceived = true
-      source.close()
-    }
-  }, [activeJobId, queryClient])
-
-  useEffect(() => {
     if (!defaultMethodsApplied.current && methodsQuery.data) {
       form.setFieldValue('methods', methodsQuery.data.default_methods)
       defaultMethodsApplied.current = true
@@ -377,7 +312,9 @@ function ActivationAuditPanel() {
     (job.status === 'starting' || job.status === 'running' || job.status === 'stopping')
   const formDisabled = restoring || startPending || isJobActive
   const result = job?.status === 'succeeded' ? job.result : null
-  const errorMessage = requestError?.message ?? (job?.status === 'failed' ? job.error : null) ?? streamError
+  const errorMessage =
+    requestError?.message ?? restoreError?.message ??
+    (job?.status === 'failed' ? job.error : null) ?? streamError
 
   const submit = async (values: ActivationAuditFormValues) => {
     if (values.output_folder === null) return
