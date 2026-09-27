@@ -472,25 +472,11 @@ def run_activation_audit(
         raise
 
 
-def score_activation_audit(
-    cache: ActivationAuditCache | str | Path,
-    calibration: ActivationCalibration | str | Path,
-    *,
-    metric: str = "aggregate_observed_relative_sse",
-    absolute_floor: float = 0.0,
-) -> dict[str, object]:
-    """Score cached candidates without reconstructing or requantizing weights."""
-    activation_calibration = (
-        calibration
-        if isinstance(calibration, ActivationCalibration)
-        else ActivationCalibration.load(calibration)
-    )
-    activation_cache = (
-        cache
-        if isinstance(cache, ActivationAuditCache)
-        else ActivationAuditCache.load(cache, calibration=activation_calibration)
-    )
-    _validate_calibration_match(activation_cache, activation_calibration)
+def _validate_score_metric(
+    activation_cache: ActivationAuditCache,
+    activation_calibration: ActivationCalibration,
+    metric: str,
+) -> None:
     if metric not in ACTIVATION_AUDIT_METRICS:
         raise ValueError(f"Unsupported activation audit metric: {metric!r}")
     capability_reason = activation_calibration.metric_unavailability_reason(metric)
@@ -523,6 +509,28 @@ def score_activation_audit(
                     raise ActivationMetricCapabilityError(
                         f"Metric '{metric}' is unavailable for {name}: {reason}"
                     )
+
+
+def score_activation_audit(
+    cache: ActivationAuditCache | str | Path,
+    calibration: ActivationCalibration | str | Path,
+    *,
+    metric: str = "aggregate_observed_relative_sse",
+    absolute_floor: float = 0.0,
+) -> dict[str, object]:
+    """Score cached candidates without reconstructing or requantizing weights."""
+    activation_calibration = (
+        calibration
+        if isinstance(calibration, ActivationCalibration)
+        else ActivationCalibration.load(calibration)
+    )
+    activation_cache = (
+        cache
+        if isinstance(cache, ActivationAuditCache)
+        else ActivationAuditCache.load(cache, calibration=activation_calibration)
+    )
+    _validate_calibration_match(activation_cache, activation_calibration)
+    _validate_score_metric(activation_cache, activation_calibration, metric)
 
     results: list[dict[str, object]] = []
     available_count = 0
