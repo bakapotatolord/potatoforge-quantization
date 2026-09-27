@@ -1137,6 +1137,15 @@ function OptimizeActivationPanel() {
         </Stack>
       </form>
 
+      {optimizeMutation.isPending && (
+        <Group gap="sm" mt="md" aria-live="polite">
+          <Loader size="sm" />
+          <Text>
+            {form.values.dry_run ? 'Estimating activation profile' : 'Optimizing activation profile'}
+          </Text>
+        </Group>
+      )}
+
       {error && (
         <Alert color="red" mt="md">
           {error instanceof Error ? error.message : 'Activation optimization failed'}
