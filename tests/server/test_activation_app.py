@@ -331,7 +331,7 @@ class ActivationServerTests(TestCase):
             client, _, activation, calibration, profiles = self._fixture(root)
             outside = root / 'outside.json'
             with patch(
-                'potatoforge.server.app.score_activation_cache'
+                'potatoforge.server.app.score_activation_audit'
             ) as score, patch(
                 'potatoforge.server.app.optimize_activation_profile'
             ) as optimize:
@@ -375,10 +375,10 @@ class ActivationServerTests(TestCase):
                 dry_run=False,
             )
             with patch(
-                'potatoforge.server.app.score_activation_cache',
+                'potatoforge.server.app.score_activation_audit',
                 return_value={'summary': {'layer_count': 1}},
             ) as score, patch(
-                'potatoforge.server.app.inspect_activation_cache',
+                'potatoforge.server.app.inspect_activation_audit',
                 return_value={'summary': {'layer_count': 1}},
             ) as inspect, patch(
                 'potatoforge.server.app.optimize_activation_profile',

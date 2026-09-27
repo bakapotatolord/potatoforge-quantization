@@ -11,7 +11,7 @@ from pathlib import Path
 from .app import create_app
 
 
-def _run_built_ui(static_dir: Path) -> None:
+def run_ui(static_dir: Path) -> None:
     import uvicorn
 
     host = "127.0.0.1"
@@ -49,7 +49,3 @@ def _run_built_ui(static_dir: Path) -> None:
         if thread.is_alive():
             thread.join(timeout=5)
         listener.close()
-
-
-def run_ui(static_dir: Path) -> None:
-    _run_built_ui(static_dir)

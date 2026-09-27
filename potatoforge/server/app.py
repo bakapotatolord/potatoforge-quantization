@@ -17,17 +17,17 @@ from pydantic import BaseModel, Field
 from ..audits.activation_audit import (
     ACTIVATION_AUDIT_METRICS,
     activation_audit_pair_paths,
+    inspect_activation_audit,
+    score_activation_audit,
 )
 from ..audits.activation_measurements import MEASUREMENT_METHODS, METHOD_ACTIONS
 from ..application.commands import (
     activation_audit_model,
     audit_model,
-    inspect_activation_cache,
     inspect_model,
     optimize_activation_profile,
     optimize_profile,
     quantize_model,
-    score_activation_cache,
 )
 from ..audits.weight_audit import (
     DEFAULT_COMMAND_AUDIT_METHODS,
@@ -66,9 +66,9 @@ from .model_library import (
     remove_profile_folder,
 )
 from .activation_jobs import ActivationAuditJobManager
-from .audit_jobs import AuditJobManager
+from .audit_jobs import AuditJobManager, audit_result_payload
 from .jobs import ActiveJobError, InactiveJobError, UnknownJobError
-from .quantize_jobs import QuantizeJobManager
+from .quantize_jobs import QuantizeJobManager, quantize_result_payload
 from .comfy_runner import ComfyClient, ComfyRunner, launch_comfy
 from .comfy_workflow import inspect_dataset, inspect_workflow, load_json, validate_bindings
 
@@ -202,7 +202,7 @@ def _with_default_suffix(path: Path, suffix: str) -> Path:
     return path if path.suffix else path.with_suffix(suffix)
 
 
-def _validate_quantize_paths(
+def _prepare_quantize_request(
     request: QuantizeRequest,
     config_path: Path,
     *,
@@ -262,7 +262,7 @@ def _validate_quantize_paths(
             )
 
 
-def _validate_optimize_paths(request: OptimizeRequest, config_path: Path) -> None:
+def _prepare_optimize_request(request: OptimizeRequest, config_path: Path) -> None:
     request.output_path = _with_default_suffix(request.output_path, ".json")
     if not is_configured_output(request.audit_path, config_path):
         raise HTTPException(
@@ -276,7 +276,7 @@ def _validate_optimize_paths(request: OptimizeRequest, config_path: Path) -> Non
         )
 
 
-def _validate_audit_paths(request: AuditRequest, config_path: Path) -> None:
+def _prepare_audit_request(request: AuditRequest, config_path: Path) -> None:
     request.output = _with_default_suffix(request.output, ".json")
     if not is_configured_model(request.source_path, config_path):
         raise HTTPException(
@@ -377,7 +377,7 @@ def _validate_activation_review_paths(
         raise HTTPException(status_code=422, detail=f"Unsupported activation audit metric: {metric!r}")
 
 
-def _validate_activation_optimize_paths(
+def _prepare_activation_optimize_request(
     request: ActivationOptimizeRequest,
     config_path: Path,
 ) -> None:
@@ -805,7 +805,7 @@ def create_app(
 
     @app.post("/api/audit")
     async def audit(request: AuditRequest) -> CommandResult:
-        _validate_audit_paths(request, config_path)
+        _prepare_audit_request(request, config_path)
         result = await _run_workflow(
             audit_model,
             request.source_path,
@@ -814,20 +814,11 @@ def create_app(
             overwrite=request.overwrite,
             methods=request.methods,
         )
-        summary = result.document["summary"]
-        return CommandResult(
-            result={
-                "source_path": str(request.source_path),
-                "audit_path": str(request.output),
-                "audited_layer_count": summary["audited_layer_count"],
-                "skipped_tensor_count": summary["skipped_tensor_count"],
-                "warning": "Weight reconstruction only; not runtime speed or image quality.",
-            }
-        )
+        return CommandResult(result=audit_result_payload(request, result))
 
     @app.post("/api/audit/jobs", status_code=202)
     async def start_audit_job(request: AuditRequest) -> dict[str, Any]:
-        _validate_audit_paths(request, config_path)
+        _prepare_audit_request(request, config_path)
         try:
             job = audit_jobs.start(request, audit_model)
         except ActiveJobError as error:
@@ -919,7 +910,7 @@ def create_app(
             config_path,
         )
         result = await _run_workflow(
-            score_activation_cache,
+            score_activation_audit,
             request.audit_cache,
             request.activation_calibration,
             metric=request.metric,
@@ -935,7 +926,7 @@ def create_app(
             config_path,
         )
         result = await _run_workflow(
-            inspect_activation_cache,
+            inspect_activation_audit,
             request.audit_cache,
             request.activation_calibration,
             tensor_name=request.tensor_name,
@@ -947,7 +938,7 @@ def create_app(
     async def optimize_activation(
         request: ActivationOptimizeRequest,
     ) -> CommandResult:
-        _validate_activation_optimize_paths(request, config_path)
+        _prepare_activation_optimize_request(request, config_path)
         result = await _run_workflow(
             optimize_activation_profile,
             request.audit_cache,
@@ -986,7 +977,7 @@ def create_app(
 
     @app.post("/api/optimize")
     async def optimize(request: OptimizeRequest) -> CommandResult:
-        _validate_optimize_paths(request, config_path)
+        _prepare_optimize_request(request, config_path)
         result = await _run_workflow(
             optimize_profile,
             request.audit_path,
@@ -1010,7 +1001,7 @@ def create_app(
 
     @app.post("/api/quantize")
     async def quantize(request: QuantizeRequest) -> CommandResult:
-        _validate_quantize_paths(request, config_path)
+        _prepare_quantize_request(request, config_path)
         result = await _run_workflow(
             quantize_model,
             request.source_path,
@@ -1022,28 +1013,11 @@ def create_app(
             dry_run=request.dry_run,
             timing=request.timing,
         )
-        if result.estimated_bytes is not None:
-            return CommandResult(
-                result={
-                    "estimated_output_bytes": result.estimated_bytes,
-                    "dry_run": True,
-                }
-            )
-        assert result.output_path is not None
-        conversion_result = {
-            "output_path": str(result.output_path),
-            "output_bytes": result.output_path.stat().st_size,
-            "adapter_count": result.adapter_count,
-        }
-        if request.timing and result.timing is not None:
-            conversion_result["timing_report"] = result.timing.render()
-        return CommandResult(
-            result=conversion_result
-        )
+        return CommandResult(result=quantize_result_payload(result, timing=request.timing))
 
     @app.post("/api/quantize/jobs", status_code=202)
     async def start_quantize_job(request: QuantizeRequest) -> dict[str, Any]:
-        _validate_quantize_paths(request, config_path, check_existing_output=True)
+        _prepare_quantize_request(request, config_path, check_existing_output=True)
         try:
             job = quantize_jobs.start(request, quantize_model)
         except ActiveJobError as error:

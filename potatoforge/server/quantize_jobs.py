@@ -13,6 +13,22 @@ logger = logging.getLogger(__name__)
 QuantizeCommand = Callable[..., Any]
 
 
+def quantize_result_payload(result: Any, *, timing: bool = False) -> dict[str, Any]:
+    if result.estimated_bytes is not None:
+        return {"estimated_output_bytes": result.estimated_bytes, "dry_run": True}
+    output_path = result.output_path
+    if output_path is None:
+        raise ValueError("Quantize conversion did not produce an output path.")
+    payload = {
+        "output_path": str(output_path),
+        "output_bytes": output_path.stat().st_size,
+        "adapter_count": result.adapter_count,
+    }
+    if timing and result.timing is not None:
+        payload["timing_report"] = result.timing.render()
+    return payload
+
+
 class QuantizeJobManager(LocalJobManager):
     """Run one Quantize command with replayable progress and cancellation."""
 
@@ -36,7 +52,7 @@ class QuantizeJobManager(LocalJobManager):
                     job, index, total, entry
                 ),
             )
-            final_result = self._result_payload(result, timing=request.timing)
+            final_result = quantize_result_payload(result, timing=request.timing)
         except ConversionCancelled:
             self.finish(job, "cancelled", error="Quantization stopped.")
         except (FileExistsError, FileNotFoundError, ValueError) as error:
@@ -59,19 +75,3 @@ class QuantizeJobManager(LocalJobManager):
             },
             format_conversion_progress(index, total, entry),
         )
-
-    @staticmethod
-    def _result_payload(result: Any, *, timing: bool = False) -> dict[str, Any]:
-        if result.estimated_bytes is not None:
-            return {"estimated_output_bytes": result.estimated_bytes, "dry_run": True}
-        output_path = result.output_path
-        if output_path is None:
-            raise ValueError("Quantize conversion did not produce an output path.")
-        payload = {
-            "output_path": str(output_path),
-            "output_bytes": output_path.stat().st_size,
-            "adapter_count": result.adapter_count,
-        }
-        if timing and result.timing is not None:
-            payload["timing_report"] = result.timing.render()
-        return payload

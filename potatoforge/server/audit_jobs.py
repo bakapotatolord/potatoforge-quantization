@@ -13,6 +13,17 @@ logger = logging.getLogger(__name__)
 AuditCommand = Callable[..., Any]
 
 
+def audit_result_payload(request: Any, result: Any) -> dict[str, Any]:
+    summary = result.document["summary"]
+    return {
+        "source_path": str(request.source_path),
+        "audit_path": str(request.output),
+        "audited_layer_count": summary["audited_layer_count"],
+        "skipped_tensor_count": summary["skipped_tensor_count"],
+        "warning": "Weight reconstruction only; not runtime speed or image quality.",
+    }
+
+
 class AuditJobManager(LocalJobManager):
     """Run one Audit command with replayable progress and cancellation."""
 
@@ -33,7 +44,7 @@ class AuditJobManager(LocalJobManager):
                     job, index, total, entry
                 ),
             )
-            final_result = self._result_payload(request, result)
+            final_result = audit_result_payload(request, result)
         except ConversionCancelled:
             self.finish(job, "cancelled", error="Audit stopped.")
         except (FileExistsError, FileNotFoundError, ValueError) as error:
@@ -52,14 +63,3 @@ class AuditJobManager(LocalJobManager):
             {"current": index, "total": total, "tensor_name": tensor_name},
             f"[{index}/{total}] {tensor_name}",
         )
-
-    @staticmethod
-    def _result_payload(request: Any, result: Any) -> dict[str, Any]:
-        summary = result.document["summary"]
-        return {
-            "source_path": str(request.source_path),
-            "audit_path": str(request.output),
-            "audited_layer_count": summary["audited_layer_count"],
-            "skipped_tensor_count": summary["skipped_tensor_count"],
-            "warning": "Weight reconstruction only; not runtime speed or image quality.",
-        }

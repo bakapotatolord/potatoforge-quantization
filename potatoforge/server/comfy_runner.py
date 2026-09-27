@@ -123,22 +123,22 @@ class ComfyRunner(LocalJobManager):
     def __init__(self, state_path: Path | None = None) -> None:
         super().__init__()
         self.state_path = state_path
-        self._previous: dict[str, Any] | None = None
+        self._persisted_snapshot: dict[str, Any] | None = None
         if state_path and state_path.is_file():
             try:
-                self._previous = json.loads(state_path.read_text(encoding="utf-8"))
-                if self._previous.get("status") in {"starting", "running", "stopping"}:
-                    self._previous["status"] = "failed"
-                    self._previous["error"] = "PotatoForge restarted during this run; check Comfy history before rerunning."
-                    self._save(self._previous)
+                self._persisted_snapshot = json.loads(state_path.read_text(encoding="utf-8"))
+                if self._persisted_snapshot.get("status") in {"starting", "running", "stopping"}:
+                    self._persisted_snapshot["status"] = "failed"
+                    self._persisted_snapshot["error"] = "PotatoForge restarted during this run; check Comfy history before rerunning."
+                    self._save(self._persisted_snapshot)
             except (OSError, ValueError, AttributeError):
                 logger.warning("Could not read prior Comfy Runner state from %s", state_path)
 
     def current(self) -> dict[str, Any] | None:
-        return super().current() or self._previous
+        return super().current() or self._persisted_snapshot
 
     def _save(self, snapshot: dict[str, Any]) -> None:
-        self._previous = snapshot
+        self._persisted_snapshot = snapshot
         if self.state_path is None:
             return
         try:

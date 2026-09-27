@@ -12,9 +12,7 @@ from typing import Any, Callable, Iterable
 from ..audits.activation_audit import (
     ACTIVATION_AUDIT_METRICS,
     activation_audit_pair_paths,
-    inspect_activation_audit,
     run_activation_audit,
-    score_activation_audit,
 )
 from ..audits.activation_measurements import MEASUREMENT_METHODS
 from ..audits.activation_profiles import generate_activation_cache_profile
@@ -206,34 +204,6 @@ def activation_audit_model(
         cache_tensors_path=actual_tensors_path,
         method_count=len(requested_methods),
         layer_count=len(calibration.tensor_names()),
-    )
-
-
-def score_activation_cache(
-    audit_cache: Path,
-    activation_calibration: Path,
-    *,
-    metric: str = ACTIVATION_AUDIT_METRICS[0],
-) -> dict[str, object]:
-    return score_activation_audit(
-        audit_cache,
-        activation_calibration,
-        metric=metric,
-    )
-
-
-def inspect_activation_cache(
-    audit_cache: Path,
-    activation_calibration: Path,
-    *,
-    tensor_name: str | None = None,
-    top_n: int = 5,
-) -> dict[str, object]:
-    return inspect_activation_audit(
-        audit_cache,
-        activation_calibration,
-        tensor_name=tensor_name,
-        top_n=top_n,
     )
 
 
