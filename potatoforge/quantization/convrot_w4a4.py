@@ -93,15 +93,17 @@ def _w4_math_weights(weights: torch.Tensor) -> torch.Tensor:
     return weights.float() if weights.dtype == torch.float16 else weights
 
 
-def _select_w4_absmax_scale(weights: torch.Tensor) -> torch.Tensor:
+def _w4_absmax_and_scale(
+    weights: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     math_weights = _w4_math_weights(weights)
-    return (
-        math_weights.abs()
-        .amax(dim=1, keepdim=True)
-        .float()
-        .div(_W4_QMAX)
-        .clamp_min(_W4_SCALE_FLOOR)
-    )
+    max_abs = math_weights.abs().amax(dim=1, keepdim=True).float()
+    return max_abs, max_abs.div(_W4_QMAX).clamp_min(_W4_SCALE_FLOOR)
+
+
+def _select_w4_absmax_scale(weights: torch.Tensor) -> torch.Tensor:
+    _, scales = _w4_absmax_and_scale(weights)
+    return scales
 
 
 def _quantize_w4_rowwise_with_scale(
@@ -168,9 +170,12 @@ def _calculate_w4a4_candidate_mse(
 
 def _w4a4_mse_zero_row_state(
     weights: torch.Tensor,
+    max_abs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     weights_float = weights.float()
-    zero_rows = weights_float.abs().amax(dim=1, keepdim=True) == 0
+    if max_abs is None:
+        max_abs = weights_float.abs().amax(dim=1, keepdim=True)
+    zero_rows = max_abs == 0
     return weights_float, zero_rows, bool(zero_rows.all())
 
 
@@ -280,8 +285,8 @@ def _select_w4a4_mse_scale_prepared(
 
 def select_w4a4_mse_scale(weights: torch.Tensor) -> torch.Tensor:
     _validate_w4_weights(weights)
-    base_scale = _select_w4_absmax_scale(weights)
-    weights_float, zero_rows, all_zero = _w4a4_mse_zero_row_state(weights)
+    max_abs, base_scale = _w4_absmax_and_scale(weights)
+    weights_float, zero_rows, all_zero = _w4a4_mse_zero_row_state(weights, max_abs)
     return _select_w4a4_mse_scale_prepared(
         weights,
         weights_float,
@@ -325,6 +330,7 @@ def _quantize_convrot_w4a4_cuda(
             ),
         )
 
+    del device_weights
     with timed_internal_stage(
         internal_timings,
         "scale",
@@ -367,7 +373,7 @@ def select_w4a4_mse_scale_cuda(
         "scale_init",
         device,
     ):
-        base_scale = _select_w4_absmax_scale(rotated_weights)
+        max_abs, base_scale = _w4_absmax_and_scale(rotated_weights)
 
     with timed_internal_stage(
         internal_timings,
@@ -376,6 +382,7 @@ def select_w4a4_mse_scale_cuda(
     ):
         weights_float, zero_rows, all_zero = _w4a4_mse_zero_row_state(
             rotated_weights,
+            max_abs,
         )
 
     best_mse = base_scale
@@ -434,6 +441,7 @@ def _quantize_convrot_w4a4_mse_cuda(
             output_dtype=torch.float32,
             hadamard=cached_cuda_hadamard_matrix(CONVROT_GROUP_SIZE, device, torch.float32),
         )
+    del device_weights
     scales = select_w4a4_mse_scale_cuda(rotated_weights, device, internal_timings)
     with timed_internal_stage(internal_timings, "final_quantize", device):
         codes_and_scales = _quantize_w4_codes(rotated_weights, scales)

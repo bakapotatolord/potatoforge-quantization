@@ -254,9 +254,14 @@ def select_rowwise_mse_scale(
     qmax: int,
     candidate_mse: RowwiseCandidateMSE | None = None,
 ) -> torch.Tensor:
-    base_scale = select_rowwise_absmax_scale(weights, qmax=qmax)
     weights_float = weights.float()
-    zero_rows = weights_float.abs().amax(dim=1, keepdim=True) == 0
+    max_abs = weights_float.abs().amax(dim=1, keepdim=True)
+    zero_rows = max_abs == 0
+    base_scale = torch.where(
+        zero_rows,
+        torch.ones_like(max_abs),
+        (max_abs / qmax).clamp_min(1e-30),
+    )
     if bool(zero_rows.all()):
         return base_scale
     best_mse, best_multiplier = run_rowwise_mse_coarse_search(

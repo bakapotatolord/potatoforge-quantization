@@ -129,6 +129,7 @@ def _quantize_int8_convrot_cuda(
             output_dtype=torch.float32,
             hadamard=hadamard,
         )
+    del device_weights
     result = quantize_symmetric_rows(
         rotated_weights,
         internal_timings=internal_timings,
@@ -188,6 +189,7 @@ def quantize_int8_convrot_mse(
             group_size=CONVROT_GROUP_SIZE,
             output_dtype=torch.float32,
         )
+    del device_weights
     with timed_internal_stage(internal_timings, "mse_scale", timing_device):
         validate_rowwise_finite_weights(rotated_weights, format_name="INT8")
         scales = select_rowwise_mse_scale(
