@@ -67,24 +67,16 @@ def unpack_signed_int4_row_major(packed: torch.Tensor) -> torch.Tensor:
     if packed.ndim != 2:
         raise ValueError("packed INT4 data must be a 2D matrix")
 
-    low_nibbles = packed & 0x0F
-    high_nibbles = (packed >> 4) & 0x0F
-
-    low_codes = torch.where(
-        low_nibbles >= 8,
-        low_nibbles - 16,
-        low_nibbles,
+    unpacked = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2),
+        dtype=torch.int8,
+        device=packed.device,
     )
-    high_codes = torch.where(
-        high_nibbles >= 8,
-        high_nibbles - 16,
-        high_nibbles,
-    )
-
-    return torch.stack(
-        (low_codes, high_codes),
-        dim=2,
-    ).flatten(start_dim=1)
+    # INT8 right shifts sign-extend each nibble directly in its output position.
+    torch.bitwise_left_shift(packed, 4, out=unpacked[:, 0::2])
+    unpacked[:, 0::2].bitwise_right_shift_(4)
+    torch.bitwise_right_shift(packed, 4, out=unpacked[:, 1::2])
+    return unpacked
 
 def _validate_w4_weights(weights: torch.Tensor) -> None:
     if weights.dtype not in (torch.bfloat16, torch.float16, torch.float32):
