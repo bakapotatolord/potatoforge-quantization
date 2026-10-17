@@ -14,7 +14,6 @@ from ..planning import (
 )
 from ..profiles import QuantizationAction
 from ..quantization.convrot_w4a4 import (
-    ConvRotW4A4Result,
     dequantize_convrot_w4a4,
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
@@ -48,7 +47,6 @@ from ..quantization.int7_rowwise import (
     quantize_int7_rowwise,
 )
 from ..quantization.int8_tensorwise import (
-    Int8TensorwiseResult,
     dequantize_int8_convrot,
     dequantize_int8_tensorwise,
     quantize_int8_convrot,
@@ -313,12 +311,7 @@ def _reconstruct_candidate(
         )
     if method in ("int8_convrot", "int8_convrot_mse"):
         quantize = quantize_int8_convrot_mse if method == "int8_convrot_mse" else quantize_int8_convrot
-        result = quantize(weights, device=device)
-        if torch.device(device).type == "cuda":
-            result = Int8TensorwiseResult(
-                result.codes.to(device=device),
-                result.scales.to(device=device),
-            )
+        result = quantize(weights, device=device, return_on_device=True)
         return dequantize_int8_convrot(result)
     if method == "int6_convrot":
         if torch.device(device).type != "cuda":
@@ -343,20 +336,10 @@ def _reconstruct_candidate(
         packed = quantize_int7_convrot_mse_packed(weights, device=device)
         return dequantize_int7_convrot_packed(packed, device=device)
     if method == "convrot_w4a4":
-        result = quantize_convrot_w4a4(weights, device=device)
-        if torch.device(device).type == "cuda":
-            result = ConvRotW4A4Result(
-                result.packed_codes.to(device=device),
-                result.scales.to(device=device),
-            )
+        result = quantize_convrot_w4a4(weights, device=device, return_on_device=True)
         return dequantize_convrot_w4a4(result)
     if method == "convrot_w4a4_mse":
-        result = quantize_convrot_w4a4_mse(weights, device=device)
-        if torch.device(device).type == "cuda":
-            result = ConvRotW4A4Result(
-                result.packed_codes.to(device=device),
-                result.scales.to(device=device),
-            )
+        result = quantize_convrot_w4a4_mse(weights, device=device, return_on_device=True)
         return dequantize_convrot_w4a4(result)
     raise ValueError(f"Unsupported activation measurement method: {method!r}")
 

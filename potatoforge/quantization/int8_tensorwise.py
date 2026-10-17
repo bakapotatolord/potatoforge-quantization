@@ -53,6 +53,7 @@ def quantize_int8_convrot(
     *,
     internal_timings: dict[str, float] | None = None,
     device: str | torch.device = "cpu",
+    return_on_device: bool = False,
 ) -> Int8TensorwiseResult:
     _validate_int8_tensorwise_weights(weights)
 
@@ -83,6 +84,7 @@ def quantize_int8_convrot(
             weights,
             target_device,
             internal_timings,
+            return_on_device=return_on_device,
         )
 
     with timed_internal_stage(
@@ -105,6 +107,8 @@ def _quantize_int8_convrot_cuda(
     weights: torch.Tensor,
     device: torch.device,
     internal_timings: dict[str, float] | None,
+    *,
+    return_on_device: bool = False,
 ) -> Int8TensorwiseResult:
     with timed_internal_stage(
         internal_timings,
@@ -141,9 +145,10 @@ def _quantize_int8_convrot_cuda(
         "finalize",
         device,
     ):
+        result_device = device if return_on_device else "cpu"
         return Int8TensorwiseResult(
-            codes=result.codes.cpu(),
-            scales=result.scales.cpu(),
+            codes=result.codes.to(device=result_device),
+            scales=result.scales.to(device=result_device),
         )
 
 def _quantize_int8_with_scale(
@@ -174,6 +179,7 @@ def quantize_int8_convrot_mse(
     *,
     internal_timings: dict[str, float] | None = None,
     device: str | torch.device = "cpu",
+    return_on_device: bool = False,
 ) -> Int8TensorwiseResult:
     """Use rowwise MSE scale selection with the ordinary INT8 ConvRot format."""
     _validate_int8_tensorwise_weights(weights)
@@ -199,7 +205,11 @@ def quantize_int8_convrot_mse(
     with timed_internal_stage(internal_timings, "final_quantize", timing_device):
         result = _quantize_int8_with_scale(rotated_weights, scales)
     with timed_internal_stage(internal_timings, "finalize", timing_device):
-        return Int8TensorwiseResult(result.codes.cpu(), result.scales.cpu())
+        result_device = target_device if return_on_device else "cpu"
+        return Int8TensorwiseResult(
+            result.codes.to(device=result_device),
+            result.scales.to(device=result_device),
+        )
 
 
 def dequantize_int8_convrot(result: Int8TensorwiseResult) -> torch.Tensor:

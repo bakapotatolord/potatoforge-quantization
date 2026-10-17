@@ -306,6 +306,8 @@ def _quantize_convrot_w4a4_cuda(
     weights: torch.Tensor,
     device: torch.device,
     internal_timings: dict[str, float] | None,
+    *,
+    return_on_device: bool = False,
 ) -> ConvRotW4A4Result:
     with timed_internal_stage(
         internal_timings,
@@ -357,9 +359,10 @@ def _quantize_convrot_w4a4_cuda(
         "finalize",
         device,
     ):
+        result_device = device if return_on_device else "cpu"
         return ConvRotW4A4Result(
-            packed_codes=packed_codes.cpu(),
-            scales=codes_and_scales[1].squeeze(dim=1).cpu(),
+            packed_codes=packed_codes.to(device=result_device),
+            scales=codes_and_scales[1].squeeze(dim=1).to(device=result_device),
         )
 
 
@@ -431,6 +434,8 @@ def _quantize_convrot_w4a4_mse_cuda(
     weights: torch.Tensor,
     device: torch.device,
     internal_timings: dict[str, float] | None,
+    *,
+    return_on_device: bool = False,
 ) -> ConvRotW4A4Result:
     with timed_internal_stage(internal_timings, "prepare", device):
         device_weights = weights.to(device=device)
@@ -458,9 +463,10 @@ def _quantize_convrot_w4a4_mse_cuda(
         "finalize",
         device,
     ):
+        result_device = device if return_on_device else "cpu"
         return ConvRotW4A4Result(
-            packed_codes=packed_codes.cpu(),
-            scales=codes_and_scales[1].squeeze(dim=1).cpu(),
+            packed_codes=packed_codes.to(device=result_device),
+            scales=codes_and_scales[1].squeeze(dim=1).to(device=result_device),
         )
 
 
@@ -469,6 +475,7 @@ def quantize_convrot_w4a4(
     *,
     device: str | torch.device = "cpu",
     internal_timings: dict[str, float] | None = None,
+    return_on_device: bool = False,
 ) -> ConvRotW4A4Result:
     target_device = resolve_convrot_device(
         device,
@@ -479,6 +486,7 @@ def quantize_convrot_w4a4(
             weights,
             target_device,
             internal_timings,
+            return_on_device=return_on_device,
         )
 
     rotated_weights = apply_hadamard_rotation(
@@ -498,6 +506,7 @@ def quantize_convrot_w4a4_mse(
     *,
     device: str | torch.device = "cpu",
     internal_timings: dict[str, float] | None = None,
+    return_on_device: bool = False,
 ) -> ConvRotW4A4Result:
     target_device = resolve_convrot_device(
         device,
@@ -508,6 +517,7 @@ def quantize_convrot_w4a4_mse(
             weights,
             target_device,
             internal_timings,
+            return_on_device=return_on_device,
         )
 
     rotated_weights = apply_hadamard_rotation(
