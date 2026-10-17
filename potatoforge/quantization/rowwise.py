@@ -328,7 +328,7 @@ def quantize_symmetric_rows(
             "quantize_values",
             _timing_device,
         ):
-            codes = torch.round(math_values / scales).clamp(qmin, qmax)
+            codes = (math_values / scales).round_().clamp_(qmin, qmax)
     else:
         if values.dtype == torch.float16:
             with timed_internal_stage(
@@ -365,7 +365,7 @@ def quantize_symmetric_rows(
                 torch.full_like(scale_math, tiny),
                 scale_math,
             )
-            codes = torch.round(math_values / scale_math).clamp(qmin, qmax)
+            codes = (math_values / scale_math).round_().clamp_(qmin, qmax)
 
     with timed_internal_stage(
         internal_timings,

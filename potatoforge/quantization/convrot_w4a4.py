@@ -128,7 +128,7 @@ def _quantize_w4_codes(
     stored_scales = scales.float().clamp_min(_W4_SCALE_FLOOR)
     scale_math = stored_scales.to(math_weights.dtype)
 
-    codes = torch.round(math_weights / scale_math).clamp(
+    codes = (math_weights / scale_math).round_().clamp_(
         _W4_QMIN,
         _W4_QMAX,
     ).to(torch.int8)

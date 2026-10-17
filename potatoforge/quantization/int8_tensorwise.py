@@ -151,7 +151,7 @@ def _quantize_int8_with_scale(
 ) -> Int8TensorwiseResult:
     # Match ordinary INT8 ConvRot's FP32 division before rounding.
     scales = scales.float().clamp_min(1e-30)
-    codes = torch.round(weights / scales.to(weights.dtype)).clamp(-128, 127)
+    codes = (weights / scales.to(weights.dtype)).round_().clamp_(-128, 127)
     return Int8TensorwiseResult(codes.to(torch.int8), scales)
 
 
