@@ -41,6 +41,42 @@ class TestConvrotW4A4(unittest.TestCase):
         self.assertEqual(tuple(unpacked.shape), (1, 6))
         self.assertTrue(torch.equal(unpacked, original_codes))
 
+    def test_preserves_all_int4_byte_patterns_on_cpu_and_cuda(self) -> None:
+        pairs = [(low, high) for low in range(-8, 8) for high in range(-8, 8)]
+        codes = torch.tensor(pairs, dtype=torch.int8).reshape(16, 32)
+        packed = torch.tensor(
+            [(low & 0x0F) | ((high & 0x0F) << 4) for low, high in pairs],
+            dtype=torch.uint8,
+        ).reshape(16, 16).view(torch.int8)
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+
+        for device in devices:
+            device_codes = codes.to(device)
+            device_packed = packed.to(device)
+            cases = (
+                (device_codes, device_packed),
+                (
+                    device_codes.t().contiguous().t(),
+                    device_packed.t().contiguous().t(),
+                ),
+                (device_codes[:0], device_packed[:0]),
+                (device_codes[:, :0], device_packed[:, :0]),
+            )
+            for expected_codes, expected_packed in cases:
+                with self.subTest(
+                    device=device,
+                    shape=tuple(expected_codes.shape),
+                    stride=expected_codes.stride(),
+                ):
+                    actual_packed = pack_signed_int4_row_major(expected_codes)
+                    actual_codes = unpack_signed_int4_row_major(expected_packed)
+                    self.assertEqual(actual_packed.dtype, torch.int8)
+                    self.assertEqual(actual_codes.dtype, torch.int8)
+                    self.assertEqual(actual_packed.device, expected_packed.device)
+                    self.assertEqual(actual_codes.device, expected_codes.device)
+                    self.assertTrue(torch.equal(actual_packed, expected_packed))
+                    self.assertTrue(torch.equal(actual_codes, expected_codes))
+
     def test_rejects_odd_code_width(self) -> None:
         codes = torch.tensor([[0, 1, 2]], dtype=torch.int8)
 

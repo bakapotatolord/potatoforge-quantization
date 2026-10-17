@@ -54,10 +54,11 @@ def pack_signed_int4_row_major(codes: torch.Tensor) -> torch.Tensor:
     if torch.any(codes < -8) or torch.any(codes > 7):
         raise ValueError("INT4 codes must be in the range [-8, 7]")
 
-    low_nibbles = codes[:, 0::2].to(torch.int32) & 0x0F
-    high_nibbles = codes[:, 1::2].to(torch.int32) & 0x0F
+    low_nibbles = codes[:, 0::2] & 0x0F
+    high_nibbles = codes[:, 1::2] & 0x0F
 
-    return (low_nibbles | (high_nibbles << 4)).to(torch.int8)
+    # INT8 shifts preserve the packed byte pattern even when its sign bit is set.
+    return low_nibbles | (high_nibbles << 4)
 
 def unpack_signed_int4_row_major(packed: torch.Tensor) -> torch.Tensor:
     if packed.dtype != torch.int8:
@@ -66,10 +67,8 @@ def unpack_signed_int4_row_major(packed: torch.Tensor) -> torch.Tensor:
     if packed.ndim != 2:
         raise ValueError("packed INT4 data must be a 2D matrix")
 
-    packed_i32 = packed.to(torch.int32)
-
-    low_nibbles = packed_i32 & 0x0F
-    high_nibbles = (packed_i32 >> 4) & 0x0F
+    low_nibbles = packed & 0x0F
+    high_nibbles = (packed >> 4) & 0x0F
 
     low_codes = torch.where(
         low_nibbles >= 8,
@@ -85,7 +84,7 @@ def unpack_signed_int4_row_major(packed: torch.Tensor) -> torch.Tensor:
     return torch.stack(
         (low_codes, high_codes),
         dim=2,
-    ).flatten(start_dim=1).to(torch.int8)
+    ).flatten(start_dim=1)
 
 def _validate_w4_weights(weights: torch.Tensor) -> None:
     if weights.dtype not in (torch.bfloat16, torch.float16, torch.float32):
