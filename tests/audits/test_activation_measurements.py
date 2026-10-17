@@ -172,6 +172,7 @@ class TestActivationMeasurements(unittest.TestCase):
                 "int6_convrot",
                 "int6_convrot_mse",
                 "int8_convrot",
+                "int8_convrot_mse",
                 "int7_convrot",
                 "int7_convrot_mse",
             ),
@@ -201,19 +202,20 @@ class TestActivationMeasurements(unittest.TestCase):
                 dtype=torch.bfloat16,
             ).reshape(2, 256)
 
-            result = measure_activation_candidate(
+            results = [measure_activation_candidate(
                 "blocks.0.attn.wq.weight",
                 self._descriptor(2, 256),
                 weights,
                 layer,
-                "int8_convrot",
+                method,
                 device="cuda",
-            )
+            ) for method in ("int8_convrot", "int8_convrot_mse")]
 
-        self.assertTrue(result.available)
-        assert result.error_by_eval_output is not None
-        self.assertEqual(result.error_by_eval_output.device.type, "cpu")
-        self.assertEqual(tuple(result.error_by_eval_output.shape), (2, 2))
+        for result in results:
+            self.assertTrue(result.available)
+            assert result.error_by_eval_output is not None
+            self.assertEqual(result.error_by_eval_output.device.type, "cpu")
+            self.assertEqual(tuple(result.error_by_eval_output.shape), (2, 2))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_cuda_method_timing_records_when_enabled(self) -> None:

@@ -552,6 +552,7 @@ def _quantization_metadata_for_layers(
     layer_actions: Mapping[str, str],
 ) -> dict[str, str]:
     runtime_actions = {
+        "int8_convrot_mse": "int8_convrot",
         "convrot_w4a4_mse": "convrot_w4a4",
         "convrot_w4a4_mse_gptq": "convrot_w4a4",
         "int5_convrot_mse": "int5_convrot",

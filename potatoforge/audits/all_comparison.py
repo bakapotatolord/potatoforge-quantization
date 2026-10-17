@@ -39,6 +39,7 @@ from ..quantization.int8_tensorwise import (
     dequantize_int8_convrot,
     dequantize_int8_tensorwise,
     quantize_int8_convrot,
+    quantize_int8_convrot_mse,
     quantize_int8_tensorwise,
 )
 
@@ -83,6 +84,7 @@ class AllQuantizationComparison(NamedTuple):
     int6_relative_l2_error: float | None
     int7_relative_l2_error: float | None
     int8_convrot_relative_l2_error: float | None
+    int8_convrot_mse_relative_l2_error: float | None
     int5_convrot_relative_l2_error: float | None
     int5_convrot_mse_relative_l2_error: float | None
     int6_convrot_relative_l2_error: float | None
@@ -166,6 +168,7 @@ def compare_all_reconstructions(
                 "int6",
                 "int7",
                 "int8_convrot",
+                "int8_convrot_mse",
                 "int5_convrot",
                 "int5_convrot_mse",
                 "int6_convrot",
@@ -203,6 +206,7 @@ def compare_all_reconstructions(
             int6_relative_l2_error=None,
             int7_relative_l2_error=None,
             int8_convrot_relative_l2_error=None,
+            int8_convrot_mse_relative_l2_error=None,
             int5_convrot_relative_l2_error=None,
             int5_convrot_mse_relative_l2_error=None,
             int6_convrot_relative_l2_error=None,
@@ -245,6 +249,7 @@ def compare_all_reconstructions(
             int6_relative_l2_error=int6_error,
             int7_relative_l2_error=int7_error,
             int8_convrot_relative_l2_error=None,
+            int8_convrot_mse_relative_l2_error=None,
             int5_convrot_relative_l2_error=None,
             int5_convrot_mse_relative_l2_error=None,
             int6_convrot_relative_l2_error=None,
@@ -262,6 +267,16 @@ def compare_all_reconstructions(
         int8_convrot_error = _relative_l2_error_from_float(
             original_float, int8_convrot_reconstructed, source_l2
         )
+
+    int8_convrot_mse_error = None
+    if "int8_convrot_mse" in methods:
+        int8_convrot_mse_result = quantize_int8_convrot_mse(weights, device=device)
+        int8_convrot_mse_reconstructed = dequantize_int8_convrot(int8_convrot_mse_result)
+        int8_convrot_mse_error = _relative_l2_error_from_float(
+            original_float, int8_convrot_mse_reconstructed, source_l2
+        )
+        del int8_convrot_mse_result
+        del int8_convrot_mse_reconstructed
 
     int5_convrot_error = None
     if "int5_convrot" in methods:
@@ -354,6 +369,7 @@ def compare_all_reconstructions(
         int6_relative_l2_error=int6_error,
         int7_relative_l2_error=int7_error,
         int8_convrot_relative_l2_error=int8_convrot_error,
+        int8_convrot_mse_relative_l2_error=int8_convrot_mse_error,
         int5_convrot_relative_l2_error=int5_convrot_error,
         int5_convrot_mse_relative_l2_error=int5_convrot_mse_error,
         int6_convrot_relative_l2_error=int6_convrot_error,

@@ -4,10 +4,12 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
 
+from potatoforge.audits import all_comparison
 from potatoforge.audits.weight_audit import (
     audit_bf16_source,
     print_weight_audit_table,
@@ -43,6 +45,7 @@ class TestWeightAudit(unittest.TestCase):
                 "int6",
                 "int7",
                 "int8_convrot",
+                "int8_convrot_mse",
                 "int5_convrot",
                 "int5_convrot_mse",
                 "int6_convrot",
@@ -53,6 +56,11 @@ class TestWeightAudit(unittest.TestCase):
                 "convrot_w4a4_mse",
             },
         )
+        self.assertEqual(
+            methods["int8_convrot_mse"]["storage_bytes"],
+            methods["int8_convrot"]["storage_bytes"],
+        )
+        self.assertIsNotNone(methods["int8_convrot_mse"]["relative_l2_error"])
         self.assertEqual(
             methods["convrot_w4a4_mse"]["storage_bytes"],
             methods["convrot_w4a4"]["storage_bytes"],
@@ -85,6 +93,17 @@ class TestWeightAudit(unittest.TestCase):
             methods["convrot_w4a4_mse"]["relative_l2_error"],
             methods["convrot_w4a4"]["relative_l2_error"] + 1e-7,
         )
+
+    def test_can_audit_int8_convrot_mse_without_running_plain_convrot(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.safetensors"
+            save_file({"blocks.0.weight": torch.ones((2, 256), dtype=torch.bfloat16)}, str(source))
+            with patch.object(all_comparison, "quantize_int8_convrot", side_effect=AssertionError("plain quantizer ran")):
+                document = audit_bf16_source(source, methods=("int8_convrot_mse",))
+        result = document["results"][0]
+        self.assertIsNone(result["methods"]["int8_convrot"]["relative_l2_error"])
+        self.assertIsNotNone(result["methods"]["int8_convrot_mse"]["relative_l2_error"])
+        self.assertIsNone(result["error_deltas"]["int8_convrot_mse_vs_int8_convrot"])
 
     def test_can_skip_plain_int8_and_int6_methods(self) -> None:
         with TemporaryDirectory() as directory:

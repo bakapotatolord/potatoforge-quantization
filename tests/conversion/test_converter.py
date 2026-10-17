@@ -29,6 +29,7 @@ from potatoforge.lora.lora_merge import (
 from potatoforge.quantization import (
     quantize_int8_tensorwise,
     quantize_int8_convrot,
+    quantize_int8_convrot_mse,
 )
 from potatoforge.quantization.int6_rowwise import quantize_int6_rowwise
 from potatoforge.quantization.int6_packing import pack_int6_row_major
@@ -1051,6 +1052,35 @@ class TestConverter(unittest.TestCase):
             output_tensors["blocks.0.attn.wq.comfy_quant"].tolist()
         ).decode("utf-8")
         self.assertEqual(json.loads(marker), INT7_CONVROT_MARKER)
+
+    def test_int8_convrot_mse_profile_uses_ordinary_storage_and_metadata(self) -> None:
+        weights = torch.randn((2, 512), generator=torch.Generator().manual_seed(1729)).bfloat16()
+        bias = torch.tensor([1.0, -2.0], dtype=torch.bfloat16)
+        tensor_name = "blocks.0.attn.wq.weight"
+        for device in (("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)):
+            with self.subTest(device=device), TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source.safetensors"
+                target = root / "target.safetensors"
+                profile_path = root / "profile.json"
+                save_file({tensor_name: weights, "blocks.0.attn.wq.bias": bias}, str(source))
+                profile_path.write_text(json.dumps({
+                    "format_version": 1, "profile_id": "int8-mse", "default": "keep",
+                    "rules": [{"action": "int8_convrot_mse", "prefix": "blocks.", "suffixes": [".weight"]}],
+                }), encoding="utf-8")
+
+                convert_model_from_profile(source, target, profile_path, device=device)
+                output = load_file(target)
+                header = read_header_from_safetensors(target)
+                expected = quantize_int8_convrot_mse(weights, device=device)
+                self.assertTrue(torch.equal(output[tensor_name], expected.codes))
+                self.assertTrue(torch.equal(output["blocks.0.attn.wq.weight_scale"], expected.scales))
+                self.assertTrue(torch.equal(output["blocks.0.attn.wq.bias"], bias))
+                marker = bytes(output["blocks.0.attn.wq.comfy_quant"].tolist()).decode("utf-8")
+                self.assertEqual(json.loads(marker), INT8_CONVROT_MARKER)
+                metadata = header["__metadata__"]
+                self.assertEqual(metadata["potatoforge.quantization"], "int8_convrot")
+                self.assertEqual(json.loads(metadata["potatoforge.quantization_layers"]), {tensor_name: "int8_convrot"})
 
     def test_converter_writes_packed_int7_convrot_mse_with_ordinary_metadata(
         self,

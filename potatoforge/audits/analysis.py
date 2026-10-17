@@ -43,6 +43,7 @@ ANALYSIS_METHODS: Final[tuple[tuple[QuantizationMethod, str], ...]] = (
     ("int7_convrot_mse", "INT7 ConvRot + MSE"),
     ("int8", "INT8"),
     ("int8_convrot", "INT8 ConvRot"),
+    ("int8_convrot_mse", "INT8 ConvRot + MSE"),
 )
 PROFILE_METHODS: Final[tuple[tuple[QuantizationMethod, str], ...]] = (
     ("bf16", "BF16"),

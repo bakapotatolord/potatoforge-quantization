@@ -53,6 +53,9 @@ INT5_MSE_INTERNAL_STAGES = (
 )
 INT6_MSE_INTERNAL_STAGES = INT5_MSE_INTERNAL_STAGES
 INT7_MSE_INTERNAL_STAGES = INT5_MSE_INTERNAL_STAGES
+INT8_MSE_INTERNAL_STAGES = (
+    "prepare", "rotation", "mse_scale", "final_quantize", "finalize",
+)
 SIZE_BUCKETS = ("<1 MiB", "1–16 MiB", ">16 MiB")
 _MIB = 1024**2
 

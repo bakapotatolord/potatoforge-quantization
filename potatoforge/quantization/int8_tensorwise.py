@@ -8,7 +8,14 @@ from .hadamard import (
     cached_cuda_hadamard_matrix,
 )
 from ..timing import timed_internal_stage
-from .rowwise import RowwiseQuantizationResult, quantize_symmetric_rows
+from .rowwise import (
+    RowwiseQuantizationResult,
+    quantize_symmetric_rows,
+    resolve_convrot_device,
+    select_rowwise_mse_scale,
+    validate_convrot_input_width,
+    validate_rowwise_finite_weights,
+)
 
 
 Int8TensorwiseResult = RowwiseQuantizationResult
@@ -146,6 +153,58 @@ def _quantize_int8_convrot_cuda(
             codes=result.codes.cpu(),
             scales=result.scales.cpu(),
         )
+
+def _quantize_int8_with_scale(
+    weights: torch.Tensor,
+    scales: torch.Tensor,
+) -> Int8TensorwiseResult:
+    # Preserve ordinary INT8 ConvRot's BF16 division before rounding.
+    scales = scales.float().clamp_min(1e-30)
+    codes = torch.round(weights / scales.to(weights.dtype)).clamp(-128, 127)
+    return Int8TensorwiseResult(codes.to(torch.int8), scales)
+
+
+def _calculate_int8_candidate_mse(
+    weights: torch.Tensor,
+    weights_float: torch.Tensor,
+    scales: torch.Tensor,
+) -> torch.Tensor:
+    result = _quantize_int8_with_scale(weights, scales)
+    error = result.codes.float() * result.scales - weights_float
+    return error.square_().mean(dim=1, keepdim=True)
+
+
+def quantize_int8_convrot_mse(
+    weights: torch.Tensor,
+    *,
+    internal_timings: dict[str, float] | None = None,
+    device: str | torch.device = "cpu",
+) -> Int8TensorwiseResult:
+    """Use rowwise MSE scale selection with the ordinary INT8 ConvRot format."""
+    _validate_int8_tensorwise_weights(weights)
+    validate_convrot_input_width(weights, format_name="INT8", group_size=CONVROT_GROUP_SIZE)
+    target_device = resolve_convrot_device(device, format_name="INT8")
+    timing_device = target_device if target_device.type == "cuda" else None
+
+    with timed_internal_stage(internal_timings, "prepare", timing_device):
+        device_weights = weights.to(device=target_device)
+    with timed_internal_stage(internal_timings, "rotation", timing_device):
+        rotated_weights = apply_hadamard_rotation(
+            device_weights,
+            group_size=CONVROT_GROUP_SIZE,
+            output_dtype=torch.bfloat16 if weights.dtype == torch.bfloat16 else torch.float32,
+        )
+    with timed_internal_stage(internal_timings, "mse_scale", timing_device):
+        validate_rowwise_finite_weights(rotated_weights, format_name="INT8")
+        scales = select_rowwise_mse_scale(
+            rotated_weights, qmin=-128, qmax=127,
+            candidate_mse=_calculate_int8_candidate_mse,
+        )
+    with timed_internal_stage(internal_timings, "final_quantize", timing_device):
+        result = _quantize_int8_with_scale(rotated_weights, scales)
+    with timed_internal_stage(internal_timings, "finalize", timing_device):
+        return Int8TensorwiseResult(result.codes.cpu(), result.scales.cpu())
+
 
 def dequantize_int8_convrot(result: Int8TensorwiseResult) -> torch.Tensor:
     rotated_weights = dequantize_int8_tensorwise(result)

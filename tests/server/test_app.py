@@ -244,6 +244,7 @@ class ServerAppTests(TestCase):
                 {"value": "int6", "label": "INT6 Rowwise"},
                 {"value": "int7", "label": "INT7 Rowwise"},
                 {"value": "int8_convrot", "label": "INT8 ConvRot"},
+                {"value": "int8_convrot_mse", "label": "INT8 ConvRot MSE"},
                 {"value": "int5_convrot", "label": "INT5 ConvRot"},
                 {"value": "int5_convrot_mse", "label": "INT5 ConvRot MSE"},
                 {"value": "int6_convrot", "label": "INT6 ConvRot"},
@@ -341,6 +342,7 @@ class ServerAppTests(TestCase):
                     "overwrite": True,
                     "methods": [
                         "int8_convrot",
+                        "int8_convrot_mse",
                         "int5_convrot",
                         "int5_convrot_mse",
                         "int6_convrot",
@@ -430,6 +432,7 @@ class ServerAppTests(TestCase):
                     "overwrite": True,
                     "methods": [
                         "int8_convrot",
+                        "int8_convrot_mse",
                         "int5_convrot",
                         "int5_convrot_mse",
                         "int6_convrot",

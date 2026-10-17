@@ -33,6 +33,7 @@ _ACTION_FILLS = {
     "keep": PatternFill("solid", fgColor="E7E6E6"),
     "convrot_w4a4": PatternFill("solid", fgColor="FFF2CC"),
     "int8_convrot": PatternFill("solid", fgColor="D9EAD3"),
+    "int8_convrot_mse": PatternFill("solid", fgColor="D9EAD3"),
 }
 _NUMBER_FORMAT = "0.000000000000"
 
@@ -299,6 +300,7 @@ def _write_summary(
                 counts.get("keep", 0),
                 counts.get("convrot_w4a4", 0),
                 counts.get("int8_convrot", 0),
+                counts.get("int8_convrot_mse", 0),
                 summary["layer_count"],
             )
         )
@@ -314,6 +316,7 @@ def _write_summary(
             "keep_count",
             "convrot_w4a4_count",
             "int8_convrot_count",
+            "int8_convrot_mse_count",
             "layer_count",
         ),
         rows,

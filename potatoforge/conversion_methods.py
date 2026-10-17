@@ -37,6 +37,7 @@ from .planning import (
 )
 from .quantization import (
     quantize_int8_convrot,
+    quantize_int8_convrot_mse,
     quantize_int8_tensorwise,
 )
 from .quantization.convrot_w4a4 import (
@@ -68,6 +69,7 @@ from .timing import (
     INT5_MSE_INTERNAL_STAGES,
     INT6_MSE_INTERNAL_STAGES,
     INT7_MSE_INTERNAL_STAGES,
+    INT8_MSE_INTERNAL_STAGES,
     W4A4_MSE_INTERNAL_STAGES,
     TensorTiming,
     timed_stage,
@@ -333,6 +335,22 @@ def _encode_int8_convrot(
     return EncodedQuantizedPayload(result.codes, result.scales)
 
 
+def _encode_int8_convrot_mse(
+    weights: torch.Tensor,
+    device: str | torch.device,
+    record: TensorTiming | None,
+) -> EncodedQuantizedPayload:
+    result = _run_quantize(
+        record,
+        lambda: quantize_int8_convrot_mse(
+            weights,
+            device=device,
+            internal_timings=None if record is None else record.internal_stages,
+        ),
+    )
+    return EncodedQuantizedPayload(result.codes, result.scales)
+
+
 def _encode_convrot_w4a4(
     weights: torch.Tensor,
     device: str | torch.device,
@@ -428,6 +446,15 @@ _METHODS: tuple[ConversionMethodDefinition, ...] = (
         plan=plan_int8_convrot,
         marker_payload=INT8_CONVROT_MARKER_PAYLOAD,
         encode=_encode_int8_convrot,
+    ),
+    ConversionMethodDefinition(
+        action="int8_convrot_mse",
+        label="INT8 ConvRot MSE",
+        is_convrot=True,
+        internal_stages=INT8_MSE_INTERNAL_STAGES,
+        plan=plan_int8_convrot,
+        marker_payload=INT8_CONVROT_MARKER_PAYLOAD,
+        encode=_encode_int8_convrot_mse,
     ),
     ConversionMethodDefinition(
         action="convrot_w4a4",

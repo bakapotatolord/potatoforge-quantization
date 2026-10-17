@@ -24,6 +24,7 @@ class TestConversionMethods(unittest.TestCase):
                 "int7_convrot",
                 "int7_convrot_mse",
                 "int8_convrot",
+                "int8_convrot_mse",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
                 "convrot_w4a4_mse_gptq",
@@ -33,6 +34,7 @@ class TestConversionMethods(unittest.TestCase):
             tuple(method.action for method in convrot_conversion_methods()),
             (
                 "int8_convrot",
+                "int8_convrot_mse",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
                 "convrot_w4a4_mse_gptq",

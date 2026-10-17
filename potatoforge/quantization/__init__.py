@@ -4,6 +4,7 @@ from .int8_tensorwise import (
     quantize_int8_tensorwise,
     dequantize_int8_convrot,
     quantize_int8_convrot,
+    quantize_int8_convrot_mse,
 )
 from .int6_rowwise import (
     Int6ConvRotPackedResult,

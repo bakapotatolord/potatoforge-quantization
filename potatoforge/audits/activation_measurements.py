@@ -52,6 +52,7 @@ from ..quantization.int8_tensorwise import (
     dequantize_int8_convrot,
     dequantize_int8_tensorwise,
     quantize_int8_convrot,
+    quantize_int8_convrot_mse,
     quantize_int8_tensorwise,
 )
 from ..timing import timed_stage
@@ -71,6 +72,7 @@ METHOD_ACTIONS: Final[dict[str, QuantizationAction]] = {
     "int5_convrot": "int5_convrot",
     "int5_convrot_mse": "int5_convrot_mse",
     "int8_convrot": "int8_convrot",
+    "int8_convrot_mse": "int8_convrot_mse",
     "int6_convrot": "int6_convrot",
     "int6_convrot_mse": "int6_convrot_mse",
     "int7_convrot": "int7_convrot",
@@ -86,6 +88,7 @@ MEASUREMENT_METHODS: Final[tuple[str, ...]] = (
     "int6_convrot",
     "int6_convrot_mse",
     "int8_convrot",
+    "int8_convrot_mse",
     "int7_convrot",
     "int7_convrot_mse",
 )
@@ -308,8 +311,9 @@ def _reconstruct_candidate(
         return dequantize_int5_convrot_packed(
             quantize_int5_convrot_mse_packed(weights, device=device)
         )
-    if method == "int8_convrot":
-        result = quantize_int8_convrot(weights, device=device)
+    if method in ("int8_convrot", "int8_convrot_mse"):
+        quantize = quantize_int8_convrot_mse if method == "int8_convrot_mse" else quantize_int8_convrot
+        result = quantize(weights, device=device)
         if torch.device(device).type == "cuda":
             result = Int8TensorwiseResult(
                 result.codes.to(device=device),

@@ -81,7 +81,7 @@ uv run potatoforge inspect model path\to\quantized.safetensors --quantization
 Do not treat a profile as a generic match: use it only when its source and
 loader compatibility applies to the checkpoint.
 
-The opt-in `int5_convrot_mse`, `int6_convrot_mse`, and `int7_convrot_mse`
+The opt-in `int5_convrot_mse`, `int6_convrot_mse`, `int7_convrot_mse`, and `int8_convrot_mse`
 actions keep ordinary ConvRot storage and loader markers while searching lower
 row scales. This can lower average reconstruction error but can increase
 maximum error by clipping outliers; each nonzero row evaluates 34 candidates.
@@ -89,6 +89,11 @@ These actions are not a promise of faster conversion or better generated
 images. MSE actions require a runtime compatible with their ordinary format;
 INT7 actions require the matching external INT7-capable
 `ComfyUI-PotatoForge-INTx` release.
+
+`int8_convrot_mse` preserves ordinary INT8 ConvRot's rotation and quantization
+arithmetic, including BF16 rounding for BF16 source weights. It changes only
+scale selection; regular `int8_convrot` keeps its existing behavior. Both are
+available separately in profiles, weight/activation audits, and profile selection.
 
 ### Create a weight-only profile
 

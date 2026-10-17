@@ -23,11 +23,11 @@ from potatoforge.audits.profile_optimizer import (
     optimize_target_size,
     write_profile,
 )
-from potatoforge.audits.weight_audit import audit_bf16_source, write_weight_audit_report
+from potatoforge.audits.weight_audit import audit_bf16_source, print_weight_audit_table, write_weight_audit_report
 from potatoforge.converter import convert_model, convert_model_from_profile
 from potatoforge.headers.source_header import read_source_model_header
 from potatoforge.planning import build_plan
-from potatoforge.profiles import load_profile
+from potatoforge.profiles import load_profile, resolve_profile
 from potatoforge.quantization.convrot_w4a4 import (
     ConvRotW4A4Result,
     dequantize_convrot_w4a4,
@@ -776,6 +776,42 @@ class TestProfileOptimizer(unittest.TestCase):
                 "tensor_c.weight": 1,
             },
         )
+
+    def test_older_version_eight_audit_keeps_int8_mse_unavailable(self) -> None:
+        with TemporaryDirectory() as directory:
+            audit = audit_bf16_source(self._write_source(directory))
+            for result in audit["results"]:
+                del result["methods"]["int8_convrot_mse"]
+                del result["error_deltas"]["int8_convrot_mse_vs_int8_convrot"]
+            del audit["summary"]["storage_bytes"]["int8_convrot_mse"]
+            path = Path(directory) / "legacy-v8.json"
+            write_weight_audit_report(path, audit)
+            original = path.read_text()
+            loaded = load_weight_audit(path)
+            self.assertEqual(path.read_text(), original)
+            with patch("builtins.print"):
+                print_weight_audit_table(loaded["results"])
+        for result in loaded["results"]:
+            self.assertIsNone(result["methods"]["int8_convrot_mse"]["relative_l2_error"])
+            with self.assertRaisesRegex(ValueError, "No allowed measurement choices"):
+                _method_choices(result, frozenset(("int8_convrot_mse",)), None)
+
+    def test_optimizer_can_select_the_int8_mse_action(self) -> None:
+        tensor_name = "blocks.0.attn.wq.weight"
+        profile = {"default": "keep", "rules": (
+            {"action": "int8_convrot_mse", "prefix": tensor_name, "suffixes": ("",)},
+        )}
+        with TemporaryDirectory() as directory:
+            source = self._write_source(directory)
+            audit = audit_bf16_source(source)
+            audit["results"][0]["methods"]["int8_convrot"]["relative_l2_error"] = 0.02
+            audit["results"][0]["methods"]["int8_convrot_mse"]["relative_l2_error"] = 0.01
+            target = estimate_profile_bytes(read_source_model_header(source), profile)
+            optimized = optimize_target_size(
+                audit, "int8-mse", target,
+                frozenset(("int8_convrot", "int8_convrot_mse")),
+            )
+        self.assertEqual(resolve_profile(optimized.profile, tensor_name), "int8_convrot_mse")
 
     def test_rejects_an_audit_missing_current_methods(self) -> None:
         with TemporaryDirectory() as directory:

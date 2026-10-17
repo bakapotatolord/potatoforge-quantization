@@ -34,6 +34,7 @@ _METHOD_ACTIONS: Final[dict[QuantizationMethod, QuantizationAction]] = {
     "int6": "int6_rowwise",
     "int7": "int7_rowwise",
     "int8_convrot": "int8_convrot",
+    "int8_convrot_mse": "int8_convrot_mse",
     "int5_convrot": "int5_convrot",
     "int5_convrot_mse": "int5_convrot_mse",
     "int6_convrot": "int6_convrot",
@@ -53,6 +54,7 @@ SUPPORTED_METHODS: Final[frozenset[QuantizationMethod]] = frozenset(
         "int8",
         "int7",
         "int8_convrot",
+        "int8_convrot_mse",
         "int5_convrot",
         "int5_convrot_mse",
         "int6_convrot",
@@ -358,10 +360,18 @@ def _validated_results(
             raise ValueError("Weight audit contains an invalid weight_l2_sq.")
         if result["tensor_name"] in tensor_names:
             raise ValueError("Weight audit contains duplicate tensor measurements.")
-        if frozenset(result["methods"]) != MEASURED_METHODS:
+        if frozenset(result["methods"]) not in (
+            MEASURED_METHODS,
+            MEASURED_METHODS - {"int8_convrot_mse"},
+        ):
             raise ValueError(
                 "Weight audit contains unsupported or incomplete method records."
             )
+        # Earlier version 8 reports have no INT8 MSE measurement.
+        result["methods"].setdefault("int8_convrot_mse", {
+            "relative_l2_error": None, "storage_bytes": None,
+            "storage_saved_bytes": None, "storage_saving_fraction": None,
+        })
         for method in MEASURED_METHODS:
             measurement = result["methods"].get(method)
             if not isinstance(measurement, dict):

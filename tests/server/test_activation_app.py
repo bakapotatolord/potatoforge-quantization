@@ -176,7 +176,7 @@ class ActivationServerTests(TestCase):
             methods = client.get('/api/activation-methods').json()
             self.assertEqual(
                 methods['default_methods'],
-                ['convrot_w4a4', 'convrot_w4a4_mse', 'int5_convrot', 'int5_convrot_mse', 'int6_convrot', 'int6_convrot_mse', 'int8_convrot', 'int7_convrot', 'int7_convrot_mse'],
+                ['convrot_w4a4', 'convrot_w4a4_mse', 'int5_convrot', 'int5_convrot_mse', 'int6_convrot', 'int6_convrot_mse', 'int8_convrot', 'int8_convrot_mse', 'int7_convrot', 'int7_convrot_mse'],
             )
             self.assertEqual(
                 client.get('/api/activation-metrics').json()['default_metric'],
