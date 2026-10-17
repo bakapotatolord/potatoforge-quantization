@@ -14,6 +14,17 @@ class TestInt8ConvRotMSE(unittest.TestCase):
         weights[1, 0] = 20
         return weights.to(dtype)
 
+    def test_bf16_convrot_matches_fp32_input_on_cpu_and_cuda(self):
+        weights = self._weights(torch.bfloat16)
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        for device in devices:
+            for quantize in (int8.quantize_int8_convrot, int8.quantize_int8_convrot_mse):
+                with self.subTest(device=device, quantizer=quantize.__name__):
+                    expected = quantize(weights.float(), device=device)
+                    result = quantize(weights, device=device)
+                    self.assertTrue(torch.equal(result.codes, expected.codes))
+                    self.assertTrue(torch.equal(result.scales, expected.scales))
+
     def test_mse_reduces_rotated_error_and_preserves_plain_quantization(self):
         for dtype in (torch.bfloat16, torch.float16, torch.float32):
             with self.subTest(dtype=dtype):
@@ -21,7 +32,7 @@ class TestInt8ConvRotMSE(unittest.TestCase):
                 original = weights.clone()
                 rotated = apply_hadamard_rotation(
                     weights, 256,
-                    output_dtype=torch.bfloat16 if dtype == torch.bfloat16 else torch.float32,
+                    output_dtype=torch.float32,
                 )
                 baseline_scale = rotated.abs().amax(1, keepdim=True).float().div(127).clamp_min(1e-30)
                 baseline_codes = torch.round(rotated / baseline_scale.to(rotated.dtype)).clamp(-128, 127).to(torch.int8)
@@ -82,7 +93,7 @@ class TestInt8ConvRotMSE(unittest.TestCase):
                 plain = int8.quantize_int8_convrot(weights, device="cuda")
                 rotated = apply_hadamard_rotation(
                     weights.cuda(), 256,
-                    output_dtype=torch.bfloat16 if dtype == torch.bfloat16 else torch.float32,
+                    output_dtype=torch.float32,
                 ).float().cpu()
                 plain_error = (plain.codes.float() * plain.scales - rotated).square().mean(1)
                 mse_error = (result.codes.float() * result.scales - rotated).square().mean(1)

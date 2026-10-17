@@ -93,11 +93,7 @@ def quantize_int8_convrot(
         rotated_weights = apply_hadamard_rotation(
             weights,
             group_size=CONVROT_GROUP_SIZE,
-            output_dtype=(
-                torch.float32
-                if weights.dtype in (torch.float16, torch.float32)
-                else torch.bfloat16
-            ),
+            output_dtype=torch.float32,
         )
     return quantize_symmetric_rows(
         rotated_weights,
@@ -110,11 +106,6 @@ def _quantize_int8_convrot_cuda(
     device: torch.device,
     internal_timings: dict[str, float] | None,
 ) -> Int8TensorwiseResult:
-    output_dtype = (
-        torch.float32
-        if weights.dtype in (torch.float16, torch.float32)
-        else torch.bfloat16
-    )
     with timed_internal_stage(
         internal_timings,
         "prepare",
@@ -130,12 +121,12 @@ def _quantize_int8_convrot_cuda(
         hadamard = cached_cuda_hadamard_matrix(
             CONVROT_GROUP_SIZE,
             device,
-            output_dtype,
+            torch.float32,
         )
         rotated_weights = apply_hadamard_rotation(
             device_weights,
             group_size=CONVROT_GROUP_SIZE,
-            output_dtype=output_dtype,
+            output_dtype=torch.float32,
             hadamard=hadamard,
         )
     result = quantize_symmetric_rows(
@@ -158,7 +149,7 @@ def _quantize_int8_with_scale(
     weights: torch.Tensor,
     scales: torch.Tensor,
 ) -> Int8TensorwiseResult:
-    # Preserve ordinary INT8 ConvRot's BF16 division before rounding.
+    # Match ordinary INT8 ConvRot's FP32 division before rounding.
     scales = scales.float().clamp_min(1e-30)
     codes = torch.round(weights / scales.to(weights.dtype)).clamp(-128, 127)
     return Int8TensorwiseResult(codes.to(torch.int8), scales)
@@ -192,7 +183,7 @@ def quantize_int8_convrot_mse(
         rotated_weights = apply_hadamard_rotation(
             device_weights,
             group_size=CONVROT_GROUP_SIZE,
-            output_dtype=torch.bfloat16 if weights.dtype == torch.bfloat16 else torch.float32,
+            output_dtype=torch.float32,
         )
     with timed_internal_stage(internal_timings, "mse_scale", timing_device):
         validate_rowwise_finite_weights(rotated_weights, format_name="INT8")

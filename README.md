@@ -90,10 +90,11 @@ images. MSE actions require a runtime compatible with their ordinary format;
 INT7 actions require the matching external INT7-capable
 `ComfyUI-PotatoForge-INTx` release.
 
-`int8_convrot_mse` preserves ordinary INT8 ConvRot's rotation and quantization
-arithmetic, including BF16 rounding for BF16 source weights. It changes only
-scale selection; regular `int8_convrot` keeps its existing behavior. Both are
-available separately in profiles, weight/activation audits, and profile selection.
+`int8_convrot` and `int8_convrot_mse` use FP32 rotation and code calculation on
+both CPU and CUDA, including for BF16 source weights. The MSE variant changes
+scale selection. Both keep INT8 codes, FP32 row scales, and ordinary INT8 ConvRot
+loader markers, and remain available separately in profiles, weight/activation
+audits, and profile selection.
 
 ### Create a weight-only profile
 
