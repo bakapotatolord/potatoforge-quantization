@@ -160,8 +160,11 @@ def _calculate_int8_candidate_mse(
     weights_float: torch.Tensor,
     scales: torch.Tensor,
 ) -> torch.Tensor:
-    result = _quantize_int8_with_scale(weights, scales)
-    error = result.codes.float() * result.scales - weights_float
+    scales = scales.float().clamp_min(1e-30)
+    # Search needs rounded values, not INT8 storage for every candidate.
+    codes = (weights / scales.to(weights.dtype)).round_().clamp_(-128, 127)
+    error = codes.detach().float()
+    error.mul_(scales).sub_(weights_float)
     return error.square_().mean(dim=1, keepdim=True)
 
 

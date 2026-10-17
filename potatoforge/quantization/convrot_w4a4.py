@@ -149,8 +149,14 @@ def _calculate_w4a4_candidate_mse(
     weights_float: torch.Tensor,
     scales: torch.Tensor,
 ) -> torch.Tensor:
-    codes, stored_scales = _quantize_w4_codes(weights, scales)
-    error = codes.float()
+    math_weights = _w4_math_weights(weights)
+    stored_scales = scales.float().clamp_min(_W4_SCALE_FLOOR)
+    # Search needs rounded values, not INT8 storage for every candidate.
+    codes = (math_weights / stored_scales.to(math_weights.dtype)).round_().clamp_(
+        _W4_QMIN,
+        _W4_QMAX,
+    )
+    error = codes.detach().float()
     error.mul_(stored_scales)
     error.sub_(weights_float)
     error.square_()

@@ -18,6 +18,71 @@ from potatoforge.quantization.convrot_w4a4 import (
 
 
 class TestW4A4MseScale(unittest.TestCase):
+    @staticmethod
+    def _stored_candidate_mse(weights, weights_float, scales):
+        codes, stored_scales = _quantize_w4_codes(weights, scales)
+        error = codes.float() * stored_scales - weights_float
+        return error.square().mean(dim=1, keepdim=True)
+
+    def test_candidate_scores_exactly_match_stored_codes_on_cpu_and_cuda(self):
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        source = torch.randn((8, 512), generator=torch.Generator().manual_seed(127))
+        source[0].zero_()
+        source[1, :8] = torch.tensor([-7.5, -6.5, -1.5, -0.5, 0.5, 1.5, 6.5, 7.5])
+        source[2].mul_(1e-8)
+        for device in devices:
+            for dtype in (torch.bfloat16, torch.float16, torch.float32):
+                weights = source.to(device=device, dtype=dtype).requires_grad_()
+                weights_float = weights.detach().float()
+                original = weights.detach().clone()
+                scales = torch.tensor(
+                    [0, 1, 1e-20, 1e-6, 1e-2, 0.73, 1, 100],
+                    dtype=torch.float32, device=device,
+                )[:, None]
+                for multiplier in (0.1, 0.73, 1.0):
+                    with self.subTest(device=device, dtype=dtype, multiplier=multiplier):
+                        candidate_scales = scales * multiplier
+                        saved_scales = candidate_scales.clone()
+                        expected = self._stored_candidate_mse(
+                            weights, weights_float, candidate_scales
+                        )
+                        actual = _calculate_w4a4_candidate_mse(
+                            weights, weights_float, candidate_scales
+                        )
+                        self.assertTrue(torch.equal(actual, expected))
+                        self.assertFalse(actual.requires_grad)
+                        self.assertTrue(torch.equal(weights, original))
+                        self.assertTrue(torch.equal(candidate_scales, saved_scales))
+
+    def test_mse_payload_exactly_matches_stored_code_scoring_on_cpu_and_cuda(self):
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        source = torch.randn((8, 512), generator=torch.Generator().manual_seed(131))
+        source[0].zero_()
+        for device in devices:
+            for dtype in (torch.bfloat16, torch.float16, torch.float32):
+                weights = source.to(dtype)
+                cases = (
+                    weights,
+                    torch.zeros_like(weights),
+                    weights.t().contiguous().t(),
+                )
+                for case, weights in enumerate(cases):
+                    with self.subTest(device=device, dtype=dtype, case=case):
+                        original = weights.clone()
+                        with patch(
+                            "potatoforge.quantization.convrot_w4a4.load_w4a4_mse_candidate",
+                            return_value=None,
+                        ):
+                            with patch(
+                                "potatoforge.quantization.convrot_w4a4._calculate_w4a4_candidate_mse",
+                                side_effect=self._stored_candidate_mse,
+                            ):
+                                expected = quantize_convrot_w4a4_mse(weights, device=device)
+                            actual = quantize_convrot_w4a4_mse(weights, device=device)
+                        self.assertTrue(torch.equal(actual.packed_codes, expected.packed_codes))
+                        self.assertTrue(torch.equal(actual.scales, expected.scales))
+                        self.assertTrue(torch.equal(weights, original))
+
     def test_candidate_mse_matches_the_rowwise_quantizer(self) -> None:
         for dtype in (torch.bfloat16, torch.float16):
             with self.subTest(dtype=dtype):
