@@ -15,7 +15,7 @@ SOURCE = PROJECT_ROOT / "potatoforge" / "quantization" / "w4a4_mse_fused.cu"
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build the optional W4A4, INT5, INT6, and INT7 ConvRot-MSE candidate library."
+        description="Build the optional W4A4 and INT5-INT8 ConvRot-MSE candidate library."
     )
     parser.add_argument(
         "--output",

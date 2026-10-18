@@ -97,6 +97,56 @@ int launch_candidate(
     return 0;
 }
 
+__global__ void squared_error_kernel(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int columns,
+    int qmin,
+    int qmax,
+    float scale_floor) {
+    const int row = blockIdx.y;
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    if (column >= columns) {
+        return;
+    }
+    const std::size_t index = static_cast<std::size_t>(row) * columns + column;
+    const float weight = weights[index];
+    float scale = scales[row];
+    if (scale < scale_floor) {
+        scale = scale_floor;
+    }
+    float code = nearbyintf(__fdiv_rn(weight, scale));
+    if (code < qmin) {
+        code = qmin;
+    } else if (code > qmax) {
+        code = qmax;
+    }
+    // Preserve eager Torch's separate FP32 operations, including subnormals.
+    const float error = __fsub_rn(__fmul_rn(code, scale), weight);
+    output[index] = __fmul_rn(error, error);
+}
+
+int launch_squared_error(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream,
+    int qmin,
+    int qmax,
+    float scale_floor) {
+    if (!weights || !scales || !output || rows <= 0 || rows > 65535 || columns <= 0) {
+        return 1;
+    }
+    const dim3 blocks((columns + kThreads - 1) / kThreads, rows);
+    squared_error_kernel<<<blocks, kThreads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+        weights, scales, output, columns, qmin, qmax, scale_floor);
+    const cudaError_t error = cudaGetLastError();
+    return error == cudaSuccess ? 0 : 1000 + static_cast<int>(error);
+}
+
 }  // namespace
 
 extern "C" PF_EXPORT int potatoforge_w4a4_mse_candidate(
@@ -173,4 +223,24 @@ extern "C" PF_EXPORT int potatoforge_int7_convrot_mse_candidate(
         0.0f,
         -63,
         63);
+}
+
+extern "C" PF_EXPORT int potatoforge_int7_convrot_mse_squared_error(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_squared_error(weights, scales, output, rows, columns, stream, -63, 63, 0.0f);
+}
+
+extern "C" PF_EXPORT int potatoforge_int8_convrot_mse_squared_error(
+    const float* weights,
+    const float* scales,
+    float* output,
+    int rows,
+    int columns,
+    void* stream) {
+    return launch_squared_error(weights, scales, output, rows, columns, stream, -128, 127, 1.0e-30f);
 }

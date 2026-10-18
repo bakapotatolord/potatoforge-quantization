@@ -66,7 +66,7 @@ class TestInt8ConvRotMSE(unittest.TestCase):
                         with patch.object(
                             int8, "_calculate_int8_candidate_mse",
                             side_effect=self._stored_candidate_mse,
-                        ):
+                        ), patch.object(int8, "create_exact_mse_candidate", return_value=None):
                             expected = int8.quantize_int8_convrot_mse(source, device=device)
                         actual = int8.quantize_int8_convrot_mse(source, device=device)
                         self.assertTrue(torch.equal(actual.codes, expected.codes))

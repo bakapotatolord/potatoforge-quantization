@@ -16,6 +16,7 @@ from .rowwise import (
     validate_convrot_input_width,
     validate_rowwise_finite_weights,
 )
+from .w4a4_mse_native import create_exact_mse_candidate
 
 
 Int8TensorwiseResult = RowwiseQuantizationResult
@@ -198,10 +199,12 @@ def quantize_int8_convrot_mse(
     del device_weights
     with timed_internal_stage(internal_timings, "mse_scale", timing_device):
         validate_rowwise_finite_weights(rotated_weights, format_name="INT8")
+        candidate_mse = create_exact_mse_candidate(rotated_weights, bits=8)
         scales = select_rowwise_mse_scale(
             rotated_weights, qmin=-128, qmax=127,
-            candidate_mse=_calculate_int8_candidate_mse,
+            candidate_mse=candidate_mse if candidate_mse is not None else _calculate_int8_candidate_mse,
         )
+        del candidate_mse
     with timed_internal_stage(internal_timings, "final_quantize", timing_device):
         result = _quantize_int8_with_scale(rotated_weights, scales)
     with timed_internal_stage(internal_timings, "finalize", timing_device):

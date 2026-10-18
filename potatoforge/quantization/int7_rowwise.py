@@ -31,7 +31,7 @@ from .rowwise import (
     validate_rowwise_weight_metadata,
     validate_rowwise_weights,
 )
-from .w4a4_mse_native import load_int7_convrot_mse_candidate
+from .w4a4_mse_native import create_exact_mse_candidate
 
 
 INT7_QMAX: Final[int] = 63
@@ -230,11 +230,7 @@ def _quantize_int7_convrot_mse_cuda(
     best_mse = base_scale
     best_multiplier = torch.ones_like(base_scale)
     if not all_zero:
-        candidate_mse = load_int7_convrot_mse_candidate(
-            device.index
-            if device.index is not None
-            else torch.cuda.current_device()
-        )
+        candidate_mse = create_exact_mse_candidate(rotated_weights, bits=7)
         with timed_internal_stage(internal_timings, "coarse_search", device):
             best_mse, best_multiplier = run_rowwise_mse_coarse_search(
                 rotated_weights,
@@ -255,6 +251,8 @@ def _quantize_int7_convrot_mse_cuda(
                 qmax=INT7_QMAX,
                 candidate_mse=candidate_mse,
             )
+
+        del candidate_mse
 
     with timed_internal_stage(internal_timings, "final_quantize", device):
         scales = torch.where(

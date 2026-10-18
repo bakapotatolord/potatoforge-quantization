@@ -58,11 +58,14 @@ class MSECandidateEvaluator:
         function: ctypes._CFuncPtr,
         device: torch.device,
         label: str,
+        *,
+        squared_error: bool = False,
     ) -> None:
         self._library = library
         self._function = function
         self._device = device
         self._label = label
+        self._squared_error = squared_error
         self._output: torch.Tensor | None = None
 
     def __call__(
@@ -91,31 +94,37 @@ class MSECandidateEvaluator:
         if scales.shape[0] != rows:
             raise ValueError("Fused evaluator scale rows must match weights.")
 
+        output_shape = weights.shape if self._squared_error else scales.shape
         if (
             self._output is None
-            or self._output.shape != scales.shape
+            or self._output.shape != output_shape
             or self._output.device != self._device
         ):
             self._output = torch.empty(
-                scales.shape,
+                output_shape,
                 dtype=torch.float32,
                 device=self._device,
             )
 
-        stream = torch.cuda.current_stream(self._device).cuda_stream
-        status = self._function(
-            ctypes.c_void_p(weights.data_ptr()),
-            ctypes.c_void_p(scales.data_ptr()),
-            ctypes.c_void_p(self._output.data_ptr()),
-            ctypes.c_int(rows),
-            ctypes.c_int(columns),
-            ctypes.c_void_p(int(stream)),
-        )
+        with torch.cuda.device(self._device):
+            stream = torch.cuda.current_stream(self._device).cuda_stream
+            status = self._function(
+                ctypes.c_void_p(weights.data_ptr()),
+                ctypes.c_void_p(scales.data_ptr()),
+                ctypes.c_void_p(self._output.data_ptr()),
+                ctypes.c_int(rows),
+                ctypes.c_int(columns),
+                ctypes.c_void_p(int(stream)),
+            )
         if status != 0:
             raise RuntimeError(
                 f"Fused {self._label}-MSE CUDA launch failed "
                 f"for {rows}x{columns} on {self._device} with status {status}."
             )
+
+        if self._squared_error:
+            # Keep Torch's reduction order so candidate scores remain bit-identical.
+            return self._output.mean(dim=1, keepdim=True)
 
         # The search copies this result through torch.where before the next
         # candidate overwrites the reusable buffer on the same CUDA stream.
@@ -132,13 +141,9 @@ class W4A4MSECandidateEvaluator(MSECandidateEvaluator):
         super().__init__(library, function, device, "W4A4")
 
 
-def _load_mse_candidate(
-    device_index: int,
+def _load_native_function(
     symbol: str,
-    label: str,
-    evaluator_type: type[MSECandidateEvaluator] = MSECandidateEvaluator,
-) -> MSECandidateEvaluator | None:
-    device = torch.device("cuda", device_index)
+) -> tuple[ctypes.CDLL, ctypes._CFuncPtr] | None:
     for library_path in _candidate_library_paths():
         if not library_path.is_file():
             continue
@@ -147,10 +152,56 @@ def _load_mse_candidate(
             function = _configure_native_function(library, symbol)
         except (AttributeError, OSError):
             continue
-        if evaluator_type is MSECandidateEvaluator:
-            return MSECandidateEvaluator(library, function, device, label)
-        return evaluator_type(library, function, device)
+        return library, function
     return None
+
+
+def _load_mse_candidate(
+    device_index: int,
+    symbol: str,
+    label: str,
+    evaluator_type: type[MSECandidateEvaluator] = MSECandidateEvaluator,
+) -> MSECandidateEvaluator | None:
+    loaded = _load_native_function(symbol)
+    if loaded is None:
+        return None
+    library, function = loaded
+    device = torch.device("cuda", device_index)
+    if evaluator_type is MSECandidateEvaluator:
+        return MSECandidateEvaluator(library, function, device, label)
+    return evaluator_type(library, function, device)
+
+
+@lru_cache(maxsize=8)
+def _load_squared_error_function(
+    bits: int,
+) -> tuple[ctypes.CDLL, ctypes._CFuncPtr] | None:
+    return _load_native_function(f"potatoforge_int{bits}_convrot_mse_squared_error")
+
+
+def create_exact_mse_candidate(
+    weights: torch.Tensor,
+    *,
+    bits: int,
+) -> MSECandidateEvaluator | None:
+    if (
+        weights.device.type != "cuda"
+        or weights.dtype != torch.float32
+        or weights.requires_grad
+        or weights.ndim != 2
+        or not weights.is_contiguous()
+        or not 0 < weights.shape[0] <= 65535
+        or weights.shape[1] == 0
+    ):
+        return None
+    loaded = _load_squared_error_function(bits)
+    if loaded is None:
+        return None
+    library, function = loaded
+    # Only the binding is cached; each search owns and releases its scratch buffer.
+    return MSECandidateEvaluator(
+        library, function, weights.device, f"INT{bits} ConvRot", squared_error=True,
+    )
 
 
 @lru_cache(maxsize=8)
