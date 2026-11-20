@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "profile_id": "moss-w4a8",
+  "description": "Quantize all 168 MOSS layers.* projection weights with W4A8 ConvRot (ComfyUI asym_w4a8_int8). Keep norms and non-layer tensors unchanged.",
+  "default": "keep",
+  "rules": [
+    {
+      "action": "w4a8",
+      "prefix": "layers.",
+      "suffixes": [
+        ".proj.qkv.weight",
+        ".proj.o.weight",
+        ".proj.ffn_up_gate.weight",
+        ".proj.ffn_down.weight"
+      ]
+    }
+  ]
+}

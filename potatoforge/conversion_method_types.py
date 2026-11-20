@@ -14,6 +14,8 @@ QuantizationAction: TypeAlias = str
 class EncodedQuantizedPayload:
     codes: Any
     scales: Any
+    # Tensors written after the marker, in plan order (output_tensors[3:]).
+    extras: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

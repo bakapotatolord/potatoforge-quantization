@@ -28,6 +28,7 @@ class TestConversionMethods(unittest.TestCase):
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
                 "convrot_w4a4_mse_gptq",
+                "w4a8",
             },
         )
         self.assertEqual(
@@ -44,6 +45,7 @@ class TestConversionMethods(unittest.TestCase):
                 "int6_convrot_mse",
                 "int7_convrot",
                 "int7_convrot_mse",
+                "w4a8",
             ),
         )
 
@@ -99,6 +101,7 @@ class TestConversionMethods(unittest.TestCase):
             "I8": torch.int8,
             "U8": torch.uint8,
             "F32": torch.float32,
+            "F8_E4M3": torch.float8_e4m3fn,
         }
 
         for action in supported_quantizing_actions():
@@ -111,7 +114,7 @@ class TestConversionMethods(unittest.TestCase):
                     self.assertEqual(method.marker_payload, get_conversion_method("convrot_w4a4_mse").marker_payload)
                     continue
                 encoded = method.encode(weights, "cpu", None)
-                code_spec, scale_spec, _ = plan.output_tensors
+                code_spec, scale_spec = plan.output_tensors[:2]
 
                 self.assertEqual(encoded.codes.device.type, "cpu")
                 self.assertEqual(encoded.scales.device.type, "cpu")
@@ -125,6 +128,13 @@ class TestConversionMethods(unittest.TestCase):
                 )
                 self.assertEqual(tuple(encoded.codes.shape), code_spec.shape)
                 self.assertEqual(tuple(encoded.scales.shape), scale_spec.shape)
+                trailing = tuple(encoded.extras)
+                trailing_specs = plan.output_tensors[3:]
+                self.assertEqual(len(trailing), len(trailing_specs))
+                for tensor, spec in zip(trailing, trailing_specs):
+                    self.assertEqual(tensor.device.type, "cpu")
+                    self.assertEqual(tensor.dtype, expected_dtypes[spec.dtype])
+                    self.assertEqual(tuple(tensor.shape), spec.shape)
 
 
 if __name__ == "__main__":

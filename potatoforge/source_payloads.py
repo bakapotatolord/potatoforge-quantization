@@ -1,7 +1,7 @@
 from collections.abc import Iterator, Sequence
 from math import prod
 from pathlib import Path
-from typing import BinaryIO, Callable, TypeAlias
+from typing import Any, BinaryIO, Callable, TypeAlias
 
 from .conversion_method_types import (
     EncodedQuantizedPayload,
@@ -194,22 +194,40 @@ def stream_bf16_source_tensors(
             )
 
 
+def _trailing_payload_tensors(payload: EncodedQuantizedPayload) -> tuple[Any, ...]:
+    """Tensors written after the marker, in plan order."""
+    return tuple(payload.extras)
+
+
 def _validate_encoded_payload(
     action: QuantizationAction,
     entry: PlanEntry,
     payload: EncodedQuantizedPayload,
 ) -> None:
-    weight_spec, scale_spec, _ = entry["output_tensors"]
+    weight_spec, scale_spec = entry["output_tensors"][:2]
     expected_dtypes = {
         "I8": torch.int8,
         "U8": torch.uint8,
         "F32": torch.float32,
+        "F8_E4M3": torch.float8_e4m3fn,
     }
 
-    for field_name, tensor, spec in (
+    fields = [
         ("codes", payload.codes, weight_spec),
         ("scales", payload.scales, scale_spec),
-    ):
+    ]
+    trailing_specs = entry["output_tensors"][3:]
+    trailing = _trailing_payload_tensors(payload)
+    if len(trailing) != len(trailing_specs):
+        raise ValueError(
+            f"{action} encoder returned {len(trailing)} trailing tensors; "
+            f"the plan expects {len(trailing_specs)}."
+        )
+    fields.extend(
+        (f"trailing tensor {spec.name}", tensor, spec)
+        for tensor, spec in zip(trailing, trailing_specs)
+    )
+    for field_name, tensor, spec in fields:
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(
                 f"{action} encoder returned non-tensor {field_name}."
@@ -307,7 +325,7 @@ def _stream_entry_payloads(
         with timed_stage(record, "payload_bytes"):
             code_bytes = tensor_to_raw_bytes(encoded.codes)
 
-    weight_spec, scale_spec, marker_spec = entry["output_tensors"]
+    weight_spec, scale_spec, marker_spec = entry["output_tensors"][:3]
     yield weight_spec.name, code_bytes
 
     if timing is None:
@@ -317,6 +335,8 @@ def _stream_entry_payloads(
             scale_bytes = tensor_to_raw_bytes(encoded.scales)
     yield scale_spec.name, scale_bytes
     yield marker_spec.name, method.marker_payload
+    for spec, tensor in zip(entry["output_tensors"][3:], _trailing_payload_tensors(encoded)):
+        yield spec.name, tensor_to_raw_bytes(tensor)
 
 
 def stream_quantized_payloads(
