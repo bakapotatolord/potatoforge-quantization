@@ -12,7 +12,7 @@ from potatoforge.headers.source_header import read_source_model_header
 from potatoforge.patch_planning import build_patch_metadata, build_patch_plan
 from potatoforge.patching import execute_patch_plan
 from potatoforge.planning import W4A8_MARKER
-from potatoforge.quantization import w4a8
+from potatoforge.quantization import grouped_int8, w4a8
 
 REFERENCE = Path(__file__).parent / "data" / "w4a8_kitchen_reference.pt"
 
@@ -49,7 +49,7 @@ class TestW4A8Quantizer(unittest.TestCase):
     def test_chunking_does_not_change_the_result(self):
         weights = torch.randn(40, 512, generator=torch.Generator().manual_seed(5))
         whole = w4a8.quantize_w4a8(weights)
-        with patch.object(w4a8, "QUANT_ROW_ELEM_BUDGET", 512 * 3):
+        with patch.object(grouped_int8, "QUANT_ROW_ELEM_BUDGET", 512 * 3):
             chunked = w4a8.quantize_w4a8(weights)
         for first, second in zip(whole, chunked):
             self.assertTrue(torch.equal(first, second))

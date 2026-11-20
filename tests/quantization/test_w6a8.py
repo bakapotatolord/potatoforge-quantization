@@ -12,7 +12,8 @@ from potatoforge.headers.source_header import read_source_model_header
 from potatoforge.patch_planning import build_patch_metadata, build_patch_plan
 from potatoforge.patching import execute_patch_plan
 from potatoforge.planning import W6A8_MARKER
-from potatoforge.quantization import w4a8, w6a8
+from potatoforge.quantization import grouped_int8, w4a8, w6a8
+from potatoforge.quantization.hadamard import apply_hadamard_rotation
 
 REFERENCE = Path(__file__).parent / "data" / "w6a8_kitchen_reference.pt"
 
@@ -48,17 +49,17 @@ class TestW6A8Quantizer(unittest.TestCase):
         weights = torch.randn(32, 512, generator=torch.Generator().manual_seed(8))
         searched = w6a8.quantize_w6a8(weights)
         with patch.object(w6a8, "_search_group_scales", lambda g, s, c, levels: (
-            s, w4a8._assign_grid(g, w6a8._grid(levels, s), c)
+            s, grouped_int8.assign_grid(g, grouped_int8.decoded_grid(levels, s), grouped_int8.grid_target(g, c))
         )):
             plain = w6a8.quantize_w6a8(weights)
         error = lambda r: (w6a8.dequantize_w6a8_int8(r) * r.channel_scales[:, None]
-                           - w6a8.apply_hadamard_rotation(weights, 256)).pow(2).sum()
+                           - apply_hadamard_rotation(weights, 256)).pow(2).sum()
         self.assertLessEqual(error(searched).item(), error(plain).item())
 
     def test_chunking_does_not_change_the_result(self):
         weights = torch.randn(40, 512, generator=torch.Generator().manual_seed(5))
         whole = w6a8.quantize_w6a8(weights)
-        with patch.object(w6a8, "QUANT_ROW_ELEM_BUDGET", 512 * 3):
+        with patch.object(grouped_int8, "QUANT_ROW_ELEM_BUDGET", 512 * 3):
             chunked = w6a8.quantize_w6a8(weights)
         for first, second in zip(whole, chunked):
             self.assertTrue(torch.equal(first.view(torch.uint8) if first.dtype == torch.float8_e4m3fn else first,
@@ -87,7 +88,7 @@ class TestW6A8Quantizer(unittest.TestCase):
         zero = w6a8.quantize_w6a8(torch.zeros(2, 256))
         self.assertTrue(torch.equal(w6a8.dequantize_w6a8(zero), torch.zeros(2, 256)))
         for weights in (torch.ones(256), torch.ones(2, 128), torch.full((2, 256), float("inf"))):
-            with self.subTest(shape=tuple(weights.shape)), self.assertRaises(ValueError):
+            with self.subTest(shape=tuple(weights.shape)), self.assertRaisesRegex(ValueError, "^W6A8 "):
                 w6a8.quantize_w6a8(weights)
 
 

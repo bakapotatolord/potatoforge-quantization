@@ -435,62 +435,58 @@ def plan_convrot_w4a4(
     )
 
 
-W4A8_MARKER = {
-    "format": "asym_w4a8_int8",
-    "group_size": 16,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-W4A8_MARKER_PAYLOAD: Final[bytes] = json.dumps(W4A8_MARKER).encode("utf-8")
+def _grouped_int8_marker(format_name: str) -> bytes:
+    return json.dumps({
+        "format": format_name,
+        "group_size": 16,
+        "convrot_groupsize": CONVROT_GROUP_SIZE,
+    }).encode("utf-8")
+
+
+W4A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("asym_w4a8_int8")
+W6A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("w6a8_int8")
+W4A8_MARKER = json.loads(W4A8_MARKER_PAYLOAD)
+W6A8_MARKER = json.loads(W6A8_MARKER_PAYLOAD)
+
+
+def _plan_grouped_int8(
+    tensor_name: str,
+    descriptor: TensorDescriptor,
+    format_label: str,
+    bits: int,
+    marker_payload: bytes,
+    codebook_levels: int | None,
+) -> QuantizedPlan:
+    """ComfyUI grouped ConvRot layers: packed codes (int8 [N, K*bits/8]), fp8
+    group scales [N, K/16], the marker, fp32 channel scales, then the float32
+    codebook when the format has one."""
+    rows, columns = _validate_quantization_weight(tensor_name, descriptor, format_label)
+    if columns % CONVROT_GROUP_SIZE != 0:
+        raise ValueError(
+            f"{format_label} input features must be divisible by {CONVROT_GROUP_SIZE}."
+        )
+    weight_name, _scale_name, marker_name = quantization_family_names(tensor_name)
+    layer_name = logical_layer_name_for_weight(tensor_name)
+    code_width, groups = columns * bits // 8, columns // 16
+    outputs = [
+        OutputTensorSpec(weight_name, "I8", (rows, code_width), rows * code_width),
+        OutputTensorSpec(f"{layer_name}.weight_s_rel", "F8_E4M3", (rows, groups), rows * groups),
+        OutputTensorSpec(marker_name, "U8", (len(marker_payload),), len(marker_payload)),
+        OutputTensorSpec(f"{layer_name}.weight_s_channel", "F32", (rows,), rows * FLOAT32_BYTES_PER_ELEMENT),
+    ]
+    if codebook_levels is not None:
+        outputs.append(OutputTensorSpec(
+            f"{layer_name}.weight_codebook", "F32", (codebook_levels,), codebook_levels * FLOAT32_BYTES_PER_ELEMENT,
+        ))
+    return QuantizedPlan(tuple(outputs), sum(tensor.byte_count for tensor in outputs))
 
 
 def plan_w4a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
-    """Plan ComfyUI asym_w4a8_int8 tensors: packed codes, fp8 group scales, the
-    marker, fp32 channel scales, and the 16-level codebook."""
-    rows, columns = _validate_quantization_weight(tensor_name, descriptor, "W4A8")
-    if columns % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            f"W4A8 input features must be divisible by {CONVROT_GROUP_SIZE}."
-        )
-    weight_name, _scale_name, marker_name = quantization_family_names(tensor_name)
-    layer_name = logical_layer_name_for_weight(tensor_name)
-    groups = columns // 16
-    outputs = (
-        OutputTensorSpec(weight_name, "I8", (rows, columns // 2), rows * columns // 2),
-        OutputTensorSpec(f"{layer_name}.weight_s_rel", "F8_E4M3", (rows, groups), rows * groups),
-        OutputTensorSpec(marker_name, "U8", (len(W4A8_MARKER_PAYLOAD),), len(W4A8_MARKER_PAYLOAD)),
-        OutputTensorSpec(f"{layer_name}.weight_s_channel", "F32", (rows,), rows * FLOAT32_BYTES_PER_ELEMENT),
-        OutputTensorSpec(f"{layer_name}.weight_codebook", "F32", (16,), 16 * FLOAT32_BYTES_PER_ELEMENT),
-    )
-    return QuantizedPlan(outputs, sum(tensor.byte_count for tensor in outputs))
-
-
-W6A8_MARKER = {
-    "format": "w6a8_int8",
-    "group_size": 16,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-W6A8_MARKER_PAYLOAD: Final[bytes] = json.dumps(W6A8_MARKER).encode("utf-8")
+    return _plan_grouped_int8(tensor_name, descriptor, "W4A8", 4, W4A8_MARKER_PAYLOAD, 16)
 
 
 def plan_w6a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
-    """Plan ComfyUI w6a8_int8 tensors: packed codes, fp8 group scales, the
-    marker, and fp32 channel scales. Levels are uniform, so no codebook."""
-    rows, columns = _validate_quantization_weight(tensor_name, descriptor, "W6A8")
-    if columns % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            f"W6A8 input features must be divisible by {CONVROT_GROUP_SIZE}."
-        )
-    weight_name, _scale_name, marker_name = quantization_family_names(tensor_name)
-    layer_name = logical_layer_name_for_weight(tensor_name)
-    groups = columns // 16
-    code_bytes = rows * columns * 3 // 4
-    outputs = (
-        OutputTensorSpec(weight_name, "I8", (rows, columns * 3 // 4), code_bytes),
-        OutputTensorSpec(f"{layer_name}.weight_s_rel", "F8_E4M3", (rows, groups), rows * groups),
-        OutputTensorSpec(marker_name, "U8", (len(W6A8_MARKER_PAYLOAD),), len(W6A8_MARKER_PAYLOAD)),
-        OutputTensorSpec(f"{layer_name}.weight_s_channel", "F32", (rows,), rows * FLOAT32_BYTES_PER_ELEMENT),
-    )
-    return QuantizedPlan(outputs, sum(tensor.byte_count for tensor in outputs))
+    return _plan_grouped_int8(tensor_name, descriptor, "W6A8", 6, W6A8_MARKER_PAYLOAD, None)
 
 
 def build_quantized_tensor_plan(
