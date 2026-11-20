@@ -35,7 +35,9 @@ from .planning import (
     plan_int8_convrot,
     plan_int8_tensorwise,
     plan_w4a8,
+    plan_w6a8,
     W4A8_MARKER_PAYLOAD,
+    W6A8_MARKER_PAYLOAD,
 )
 from .quantization import (
     quantize_int8_convrot,
@@ -47,6 +49,7 @@ from .quantization.convrot_w4a4 import (
     quantize_convrot_w4a4_mse,
 )
 from .quantization.w4a8 import quantize_w4a8
+from .quantization.w6a8 import quantize_w6a8
 from .quantization.int5_rowwise import (
     quantize_int5_convrot_mse_packed,
     quantize_int5_convrot_packed,
@@ -418,6 +421,19 @@ def _encode_w4a8(
     )
 
 
+def _encode_w6a8(
+    weights: torch.Tensor,
+    device: str | torch.device,
+    record: TensorTiming | None,
+) -> EncodedQuantizedPayload:
+    result = _run_quantize(record, lambda: quantize_w6a8(weights, device=device))
+    return EncodedQuantizedPayload(
+        result.packed_codes,
+        result.group_scales,
+        extras=(result.channel_scales,),
+    )
+
+
 def _encode_convrot_w4a4_mse_gptq(
     weights: torch.Tensor,
     device: str | torch.device,
@@ -561,6 +577,15 @@ _METHODS: tuple[ConversionMethodDefinition, ...] = (
         plan=plan_w4a8,
         marker_payload=W4A8_MARKER_PAYLOAD,
         encode=_encode_w4a8,
+    ),
+    ConversionMethodDefinition(
+        action="w6a8",
+        label="W6A8 ConvRot",
+        is_convrot=True,
+        internal_stages=(),
+        plan=plan_w6a8,
+        marker_payload=W6A8_MARKER_PAYLOAD,
+        encode=_encode_w6a8,
     ),
 )
 
