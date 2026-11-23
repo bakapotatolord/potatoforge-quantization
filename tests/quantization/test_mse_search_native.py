@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 
-from potatoforge.quantization import convrot_w4a4, int5_rowwise, int6_rowwise
+from potatoforge.quantization import convrot_w4a4, int5_rowwise, int6_rowwise, rowwise_convrot
 from potatoforge.quantization.mse_search_native import (
     ROWWISE_MSE_SCALE_FLOOR,
     _load_search_function,
@@ -125,8 +125,8 @@ class TestFusedRowwiseMseSearch(unittest.TestCase):
         weights = (torch.randn(64, 512) * 0.02).to(torch.bfloat16)
         weights[2] = 0
         cases = (
-            (int5_rowwise, int5_rowwise.quantize_int5_convrot_mse_packed),
-            (int6_rowwise, int6_rowwise.quantize_int6_convrot_mse_packed),
+            (rowwise_convrot, int5_rowwise.quantize_int5_convrot_mse_packed),
+            (rowwise_convrot, int6_rowwise.quantize_int6_convrot_mse_packed),
             (convrot_w4a4, convrot_w4a4.quantize_convrot_w4a4_mse),
         )
         for module, quantize in cases:

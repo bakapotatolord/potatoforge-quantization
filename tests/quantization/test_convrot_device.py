@@ -348,7 +348,7 @@ class TestConvRotDevice(unittest.TestCase):
             return original_isfinite(values)
 
         with patch(
-            "potatoforge.quantization.int6_rowwise.torch.isfinite",
+            "torch.isfinite",
             side_effect=observe_isfinite,
         ):
             quantize_int6_convrot_packed(weights, device="cuda")
