@@ -31,6 +31,11 @@ from .rowwise import (
     validate_rowwise_weight_metadata,
     validate_rowwise_weights,
 )
+from .mse_search_native import (
+    ROWWISE_MSE_SCALE_FLOOR,
+    fused_rowwise_mse_coarse_search,
+    fused_rowwise_mse_fine_search,
+)
 from .w4a4_mse_native import load_int6_convrot_mse_candidate
 
 
@@ -313,7 +318,27 @@ def _quantize_int6_convrot_mse_cuda(
 
     best_mse = base_scale
     best_multiplier = torch.ones_like(base_scale)
+    fused = None
     if not all_zero:
+        with timed_internal_stage(internal_timings, "coarse_search", device):
+            fused = fused_rowwise_mse_coarse_search(
+                rotated_weights,
+                base_scale,
+                qmin=INT6_QMIN,
+                qmax=INT6_QMAX,
+                scale_floor=ROWWISE_MSE_SCALE_FLOOR,
+            )
+        if fused is not None:
+            with timed_internal_stage(internal_timings, "fine_search", device):
+                best_mse, best_multiplier = fused_rowwise_mse_fine_search(
+                    rotated_weights,
+                    base_scale,
+                    *fused,
+                    qmin=INT6_QMIN,
+                    qmax=INT6_QMAX,
+                    scale_floor=ROWWISE_MSE_SCALE_FLOOR,
+                )
+    if fused is None and not all_zero:
         candidate_mse = load_int6_convrot_mse_candidate(
             device.index
             if device.index is not None

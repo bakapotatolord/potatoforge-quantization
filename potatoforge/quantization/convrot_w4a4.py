@@ -12,6 +12,10 @@ from .hadamard import (
 )
 from .rowwise import resolve_convrot_device
 from ..timing import timed_internal_stage
+from .mse_search_native import (
+    fused_rowwise_mse_coarse_search,
+    fused_rowwise_mse_fine_search,
+)
 from .w4a4_mse_native import load_w4a4_mse_candidate
 
 
@@ -390,7 +394,27 @@ def select_w4a4_mse_scale_cuda(
 
     best_mse = base_scale
     best_multiplier = base_scale
+    fused = None
     if not all_zero:
+        with timed_internal_stage(internal_timings, "coarse_search", device):
+            fused = fused_rowwise_mse_coarse_search(
+                rotated_weights,
+                base_scale,
+                qmin=_W4_QMIN,
+                qmax=_W4_QMAX,
+                scale_floor=_W4_SCALE_FLOOR,
+            )
+        if fused is not None:
+            with timed_internal_stage(internal_timings, "fine_search", device):
+                best_mse, best_multiplier = fused_rowwise_mse_fine_search(
+                    rotated_weights,
+                    base_scale,
+                    *fused,
+                    qmin=_W4_QMIN,
+                    qmax=_W4_QMAX,
+                    scale_floor=_W4_SCALE_FLOOR,
+                )
+    if fused is None and not all_zero:
         candidate_mse = load_w4a4_mse_candidate(
             device.index
             if device.index is not None
