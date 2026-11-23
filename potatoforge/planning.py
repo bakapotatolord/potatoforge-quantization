@@ -1,7 +1,7 @@
 import json
 from math import prod
 from typing import Final, NamedTuple, NotRequired, TypeAlias, TypedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 from .conversion_method_types import QuantizationAction
 from .profiles import (
@@ -65,85 +65,31 @@ METADATA_KEY = "__metadata__"
 QUANTIZATION_METADATA_KEY = "potatoforge.quantization"
 QUANTIZATION_LAYERS_METADATA_KEY = "potatoforge.quantization_layers"
 
+def _marker_payload(marker: Mapping[str, object]) -> bytes:
+    return json.dumps(marker).encode("utf-8")
+
+
+def _convrot_marker(format_name: str) -> dict[str, object]:
+    return {"format": format_name, "convrot": True, "convrot_groupsize": CONVROT_GROUP_SIZE}
+
+
 INT8_MARKER = {"format": "int8_tensorwise"}
-INT8_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT8_MARKER,
-).encode("utf-8")
-
 INT6_ROWWISE_MARKER = {"format": "int6_rowwise"}
-INT6_ROWWISE_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT6_ROWWISE_MARKER,
-).encode("utf-8")
-INT6_ROWWISE_MARKER_BYTE_COUNT: Final[int] = len(
-    INT6_ROWWISE_MARKER_PAYLOAD,
-)
-
-INT6_CONVROT_MARKER = {
-    "format": "int6_rowwise",
-    "convrot": True,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-INT6_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT6_CONVROT_MARKER,
-).encode("utf-8")
-INT6_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
-    INT6_CONVROT_MARKER_PAYLOAD,
-)
-
 INT7_ROWWISE_MARKER = {"format": "int7_rowwise"}
-INT7_ROWWISE_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT7_ROWWISE_MARKER,
-).encode("utf-8")
-INT7_ROWWISE_MARKER_BYTE_COUNT: Final[int] = len(
-    INT7_ROWWISE_MARKER_PAYLOAD,
-)
+INT5_CONVROT_MARKER = _convrot_marker("int5_rowwise")
+INT6_CONVROT_MARKER = _convrot_marker("int6_rowwise")
+INT7_CONVROT_MARKER = _convrot_marker("int7_rowwise")
+INT8_CONVROT_MARKER = _convrot_marker("int8_tensorwise")
+CONVROT_W4A4_MARKER = {"format": "convrot_w4a4", "convrot_groupsize": CONVROT_GROUP_SIZE}
 
-INT7_CONVROT_MARKER = {
-    "format": "int7_rowwise",
-    "convrot": True,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-INT7_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT7_CONVROT_MARKER,
-).encode("utf-8")
-INT7_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
-    INT7_CONVROT_MARKER_PAYLOAD,
-)
-
-INT5_CONVROT_MARKER = {
-    "format": "int5_rowwise",
-    "convrot": True,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-INT5_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT5_CONVROT_MARKER,
-).encode("utf-8")
-INT5_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
-    INT5_CONVROT_MARKER_PAYLOAD,
-)
-
-INT8_CONVROT_MARKER = {
-    "format": "int8_tensorwise",
-    "convrot": True,
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-INT8_CONVROT_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    INT8_CONVROT_MARKER,
-).encode("utf-8")
-INT8_CONVROT_MARKER_BYTE_COUNT: Final[int] = len(
-    INT8_CONVROT_MARKER_PAYLOAD,
-)
-
-CONVROT_W4A4_MARKER = {
-    "format": "convrot_w4a4",
-    "convrot_groupsize": CONVROT_GROUP_SIZE,
-}
-CONVROT_W4A4_MARKER_PAYLOAD: Final[bytes] = json.dumps(
-    CONVROT_W4A4_MARKER,
-).encode("utf-8")
-CONVROT_W4A4_MARKER_BYTE_COUNT: Final[int] = len(
-    CONVROT_W4A4_MARKER_PAYLOAD,
-)
+INT8_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT8_MARKER)
+INT6_ROWWISE_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT6_ROWWISE_MARKER)
+INT7_ROWWISE_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT7_ROWWISE_MARKER)
+INT5_CONVROT_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT5_CONVROT_MARKER)
+INT6_CONVROT_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT6_CONVROT_MARKER)
+INT7_CONVROT_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT7_CONVROT_MARKER)
+INT8_CONVROT_MARKER_PAYLOAD: Final[bytes] = _marker_payload(INT8_CONVROT_MARKER)
+CONVROT_W4A4_MARKER_PAYLOAD: Final[bytes] = _marker_payload(CONVROT_W4A4_MARKER)
 
 
 def source_bytes(descriptor: TensorDescriptor) -> int:
@@ -250,189 +196,66 @@ def _build_quantized_plan(
     )
 
 
-def plan_int8_tensorwise(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "INT8 tensorwise",
-    )
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, in_features),
-        scale_shape=(out_features, 1),
-        marker_payload=INT8_MARKER_PAYLOAD,
-    )
+def _rowwise_planner(
+    format_label: str,
+    marker_payload: bytes,
+    *,
+    width_multiple: int | None = None,
+    packing: tuple[int, int] = (1, 1),
+    storage_dtype: str = "I8",
+    vector_scale: bool = False,
+) -> Callable[[str, TensorDescriptor], QuantizedPlan]:
+    """Plan codes, one scale per row, and the marker.
 
+    ``packing`` is (logical values, stored bytes) per packed group.
+    """
+    values_per_group, bytes_per_group = packing
 
-def plan_int6_rowwise(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    """Plan physically packed rowwise INT6 codes."""
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "INT6 rowwise",
-    )
-    if in_features % 4 != 0:
-        raise ValueError(
-            "INT6 rowwise input features must be divisible by 4."
+    def plan(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
+        rows, columns = _validate_quantization_weight(tensor_name, descriptor, format_label)
+        if width_multiple is not None and columns % width_multiple != 0:
+            raise ValueError(
+                f"{format_label} input features must be divisible by {width_multiple}."
+            )
+        return _build_quantized_plan(
+            tensor_name,
+            code_shape=(rows, columns // values_per_group * bytes_per_group),
+            scale_shape=(rows,) if vector_scale else (rows, 1),
+            marker_payload=marker_payload,
+            storage_dtype=storage_dtype,
         )
 
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, (in_features // 4) * 3),
-        scale_shape=(out_features, 1),
-        marker_payload=INT6_ROWWISE_MARKER_PAYLOAD,
-        storage_dtype="U8",
-    )
+    return plan
 
 
-def plan_int6_convrot(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    """Plan packed rowwise W6 weights with the fixed ConvRot contract."""
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "ConvRot INT6",
-    )
-    if in_features % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            "ConvRot INT6 input features must be divisible by "
-            f"{CONVROT_GROUP_SIZE}."
-        )
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, (in_features // 4) * 3),
-        scale_shape=(out_features, 1),
-        marker_payload=INT6_CONVROT_MARKER_PAYLOAD,
-        storage_dtype="U8",
-    )
-
-
-def plan_int5_convrot(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    """Plan packed rowwise W5 weights with the fixed ConvRot contract."""
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "ConvRot INT5",
-    )
-    if in_features % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            "ConvRot INT5 input features must be divisible by "
-            f"{CONVROT_GROUP_SIZE}."
-        )
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, (in_features // 8) * 5),
-        scale_shape=(out_features, 1),
-        marker_payload=INT5_CONVROT_MARKER_PAYLOAD,
-        storage_dtype="U8",
-    )
-
-
-def plan_int7_rowwise(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    """Plan physically packed rowwise INT7 codes."""
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "INT7 rowwise",
-    )
-    if in_features % 8 != 0:
-        raise ValueError(
-            "INT7 rowwise input features must be divisible by 8."
-        )
-
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, (in_features // 8) * 7),
-        scale_shape=(out_features, 1),
-        marker_payload=INT7_ROWWISE_MARKER_PAYLOAD,
-        storage_dtype="U8",
-    )
-
-
-def plan_int7_convrot(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    """Plan packed rowwise W7 weights with the fixed ConvRot contract."""
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "ConvRot INT7",
-    )
-    if in_features % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            "ConvRot INT7 input features must be divisible by "
-            f"{CONVROT_GROUP_SIZE}."
-        )
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, (in_features // 8) * 7),
-        scale_shape=(out_features, 1),
-        marker_payload=INT7_CONVROT_MARKER_PAYLOAD,
-        storage_dtype="U8",
-    )
-
-
-def plan_int8_convrot(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "ConvRot INT8",
-    )
-
-    if in_features % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            "ConvRot INT8 input features must be divisible by "
-            f"{CONVROT_GROUP_SIZE}."
-        )
-
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, in_features),
-        scale_shape=(out_features, 1),
-        marker_payload=INT8_CONVROT_MARKER_PAYLOAD,
-    )
-
-
-def plan_convrot_w4a4(
-    tensor_name: str,
-    descriptor: TensorDescriptor,
-) -> QuantizedPlan:
-    out_features, in_features = _validate_quantization_weight(
-        tensor_name,
-        descriptor,
-        "ConvRot W4A4",
-    )
-
-    if in_features % CONVROT_GROUP_SIZE != 0:
-        raise ValueError(
-            "ConvRot W4A4 input features must be divisible by "
-            f"{CONVROT_GROUP_SIZE}."
-        )
-
-    return _build_quantized_plan(
-        tensor_name,
-        code_shape=(out_features, in_features // 2),
-        scale_shape=(out_features,),
-        marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
-    )
+plan_int8_tensorwise = _rowwise_planner("INT8 tensorwise", INT8_MARKER_PAYLOAD)
+plan_int6_rowwise = _rowwise_planner(
+    "INT6 rowwise", INT6_ROWWISE_MARKER_PAYLOAD,
+    width_multiple=4, packing=(4, 3), storage_dtype="U8",
+)
+plan_int7_rowwise = _rowwise_planner(
+    "INT7 rowwise", INT7_ROWWISE_MARKER_PAYLOAD,
+    width_multiple=8, packing=(8, 7), storage_dtype="U8",
+)
+plan_int5_convrot = _rowwise_planner(
+    "ConvRot INT5", INT5_CONVROT_MARKER_PAYLOAD,
+    width_multiple=CONVROT_GROUP_SIZE, packing=(8, 5), storage_dtype="U8",
+)
+plan_int6_convrot = _rowwise_planner(
+    "ConvRot INT6", INT6_CONVROT_MARKER_PAYLOAD,
+    width_multiple=CONVROT_GROUP_SIZE, packing=(4, 3), storage_dtype="U8",
+)
+plan_int7_convrot = _rowwise_planner(
+    "ConvRot INT7", INT7_CONVROT_MARKER_PAYLOAD,
+    width_multiple=CONVROT_GROUP_SIZE, packing=(8, 7), storage_dtype="U8",
+)
+plan_int8_convrot = _rowwise_planner(
+    "ConvRot INT8", INT8_CONVROT_MARKER_PAYLOAD, width_multiple=CONVROT_GROUP_SIZE,
+)
+plan_convrot_w4a4 = _rowwise_planner(
+    "ConvRot W4A4", CONVROT_W4A4_MARKER_PAYLOAD,
+    width_multiple=CONVROT_GROUP_SIZE, packing=(2, 1), vector_scale=True,
+)
 
 
 def _grouped_int8_marker(format_name: str) -> bytes:

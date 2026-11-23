@@ -87,6 +87,8 @@ GPTQ_INTERNAL_STAGES = (
     "mse_scale", "gptq_solve", "pack", "finalize",
 )
 
+Encoder = Callable[[torch.Tensor, "str | torch.device", "TensorTiming | None"], EncodedQuantizedPayload]
+
 
 def _run_quantize(
     record: TensorTiming | None,
@@ -96,316 +98,62 @@ def _run_quantize(
         return operation()
 
 
+def _quantizer(name: str) -> Callable[..., Any]:
+    # Resolved at call time so tests can patch the module attribute.
+    return globals()[name]
+
+
+def _device_encoder(name: str, *, codes: str = "packed_codes", cpu_timings: bool = False) -> Encoder:
+    """Encode with a quantizer taking ``device`` and ``internal_timings``.
+
+    ``device`` is passed only off-CPU; internal timings are passed when a
+    record exists and the device is not CPU, unless ``cpu_timings`` is set.
+    """
+
+    def encode(
+        weights: torch.Tensor,
+        device: str | torch.device,
+        record: TensorTiming | None,
+    ) -> EncodedQuantizedPayload:
+        on_cpu = device == "cpu"
+        options: dict[str, Any] = {} if on_cpu else {"device": device}
+        if record is not None and (cpu_timings or not on_cpu):
+            options["internal_timings"] = record.internal_stages
+        result = _run_quantize(record, lambda: _quantizer(name)(weights, **options))
+        return EncodedQuantizedPayload(getattr(result, codes), result.scales)
+
+    return encode
+
+
+def _pack_encoder(name: str, pack: Callable[[torch.Tensor], Any]) -> Encoder:
+    """Quantize on the current device, then pack codes as a separate stage."""
+
+    def encode(
+        weights: torch.Tensor,
+        device: str | torch.device,
+        record: TensorTiming | None,
+    ) -> EncodedQuantizedPayload:
+        result = _run_quantize(record, lambda: _quantizer(name)(weights))
+        with timed_stage(record, "pack"):
+            packed = pack(result.codes)
+        return EncodedQuantizedPayload(packed.packed_codes, result.scales)
+
+    return encode
+
+
+def _cpu_or_device(cpu: Encoder, accelerated: Encoder) -> Encoder:
+    return lambda weights, device, record: (cpu if device == "cpu" else accelerated)(
+        weights, device, record
+    )
+
+
 def _encode_int8(
     weights: torch.Tensor,
     device: str | torch.device,
     record: TensorTiming | None,
 ) -> EncodedQuantizedPayload:
-    result = _run_quantize(record, lambda: quantize_int8_tensorwise(weights))
+    result = _run_quantize(record, lambda: _quantizer("quantize_int8_tensorwise")(weights))
     return EncodedQuantizedPayload(result.codes, result.scales)
-
-
-def _encode_int6_rowwise(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    result = _run_quantize(record, lambda: quantize_int6_rowwise(weights))
-    with timed_stage(record, "pack"):
-        packed = pack_int6_row_major(result.codes)
-    return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-
-def _encode_int7_rowwise(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    result = _run_quantize(record, lambda: quantize_int7_rowwise(weights))
-    with timed_stage(record, "pack"):
-        packed = pack_int7_row_major(result.codes)
-    return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-
-def _encode_int5_convrot(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(
-            record,
-            lambda: quantize_int5_convrot_packed(weights),
-        )
-    elif record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int5_convrot_packed(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int5_convrot_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int5_convrot_mse(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(
-            record,
-            lambda: quantize_int5_convrot_mse_packed(weights),
-        )
-    elif record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int5_convrot_mse_packed(
-                weights,
-                device=device,
-            ),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int5_convrot_mse_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int6_convrot(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(record, lambda: quantize_int6_convrot(weights))
-        with timed_stage(record, "pack"):
-            packed = pack_int6_row_major(result.codes)
-        return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-    if record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int6_convrot_packed(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int6_convrot_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int6_convrot_mse(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(
-            record,
-            lambda: quantize_int6_convrot_mse(weights),
-        )
-        with timed_stage(record, "pack"):
-            packed = pack_int6_row_major(result.codes)
-        return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-    if record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int6_convrot_mse_packed(
-                weights,
-                device=device,
-            ),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int6_convrot_mse_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int7_convrot(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(record, lambda: quantize_int7_convrot(weights))
-        with timed_stage(record, "pack"):
-            packed = pack_int7_row_major(result.codes)
-        return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-    if record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int7_convrot_packed(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int7_convrot_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int7_convrot_mse(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(
-            record,
-            lambda: quantize_int7_convrot_mse(weights),
-        )
-        with timed_stage(record, "pack"):
-            packed = pack_int7_row_major(result.codes)
-        return EncodedQuantizedPayload(packed.packed_codes, result.scales)
-
-    if record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int7_convrot_mse_packed(
-                weights,
-                device=device,
-            ),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int7_convrot_mse_packed(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_int8_convrot(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        if record is None:
-            result = _run_quantize(None, lambda: quantize_int8_convrot(weights))
-        else:
-            result = _run_quantize(
-                record,
-                lambda: quantize_int8_convrot(
-                    weights,
-                    internal_timings=record.internal_stages,
-                ),
-            )
-    elif record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_int8_convrot(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_int8_convrot(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.codes, result.scales)
-
-
-def _encode_int8_convrot_mse(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    result = _run_quantize(
-        record,
-        lambda: quantize_int8_convrot_mse(
-            weights,
-            device=device,
-            internal_timings=None if record is None else record.internal_stages,
-        ),
-    )
-    return EncodedQuantizedPayload(result.codes, result.scales)
-
-
-def _encode_convrot_w4a4(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(record, lambda: quantize_convrot_w4a4(weights))
-    elif record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_convrot_w4a4(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_convrot_w4a4(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
-
-
-def _encode_convrot_w4a4_mse(
-    weights: torch.Tensor,
-    device: str | torch.device,
-    record: TensorTiming | None,
-) -> EncodedQuantizedPayload:
-    if device == "cpu":
-        result = _run_quantize(
-            record,
-            lambda: quantize_convrot_w4a4_mse(weights),
-        )
-    elif record is None:
-        result = _run_quantize(
-            None,
-            lambda: quantize_convrot_w4a4_mse(weights, device=device),
-        )
-    else:
-        result = _run_quantize(
-            record,
-            lambda: quantize_convrot_w4a4_mse(
-                weights,
-                device=device,
-                internal_timings=record.internal_stages,
-            ),
-        )
-    return EncodedQuantizedPayload(result.packed_codes, result.scales)
 
 
 def _encode_w4a8(
@@ -442,151 +190,51 @@ def _encode_convrot_w4a4_mse_gptq(
     raise ValueError("GPTQ encoding requires a calibration artifact and weight name.")
 
 
-_METHODS: tuple[ConversionMethodDefinition, ...] = (
-    ConversionMethodDefinition(
-        action="int8",
-        label="INT8",
-        is_convrot=False,
-        internal_stages=(),
-        plan=plan_int8_tensorwise,
-        marker_payload=INT8_MARKER_PAYLOAD,
-        encode=_encode_int8,
-    ),
-    ConversionMethodDefinition(
-        action="int6_rowwise",
-        label="INT6 Rowwise",
-        is_convrot=False,
-        internal_stages=(),
-        plan=plan_int6_rowwise,
-        marker_payload=INT6_ROWWISE_MARKER_PAYLOAD,
-        encode=_encode_int6_rowwise,
-    ),
-    ConversionMethodDefinition(
-        action="int7_rowwise",
-        label="INT7 Rowwise",
-        is_convrot=False,
-        internal_stages=(),
-        plan=plan_int7_rowwise,
-        marker_payload=INT7_ROWWISE_MARKER_PAYLOAD,
-        encode=_encode_int7_rowwise,
-    ),
-    ConversionMethodDefinition(
-        action="int8_convrot",
-        label="INT8 ConvRot",
-        is_convrot=True,
-        internal_stages=CONVROT_INTERNAL_STAGES,
-        plan=plan_int8_convrot,
-        marker_payload=INT8_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int8_convrot,
-    ),
-    ConversionMethodDefinition(
-        action="int8_convrot_mse",
-        label="INT8 ConvRot MSE",
-        is_convrot=True,
-        internal_stages=INT8_MSE_INTERNAL_STAGES,
-        plan=plan_int8_convrot,
-        marker_payload=INT8_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int8_convrot_mse,
-    ),
-    ConversionMethodDefinition(
-        action="convrot_w4a4",
-        label="W4A4 ConvRot",
-        is_convrot=True,
-        internal_stages=CONVROT_INTERNAL_STAGES,
-        plan=plan_convrot_w4a4,
-        marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
-        encode=_encode_convrot_w4a4,
-    ),
-    ConversionMethodDefinition(
-        action="convrot_w4a4_mse",
-        label="W4A4 ConvRot MSE",
-        is_convrot=True,
-        internal_stages=W4A4_MSE_INTERNAL_STAGES,
-        plan=plan_convrot_w4a4,
-        marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
-        encode=_encode_convrot_w4a4_mse,
-    ),
-    ConversionMethodDefinition(
-        action="convrot_w4a4_mse_gptq",
-        label="W4A4 ConvRot MSE GPTQ",
-        is_convrot=True,
-        internal_stages=GPTQ_INTERNAL_STAGES,
-        plan=plan_convrot_w4a4,
-        marker_payload=CONVROT_W4A4_MARKER_PAYLOAD,
-        encode=_encode_convrot_w4a4_mse_gptq,
-    ),
-    ConversionMethodDefinition(
-        action="int5_convrot",
-        label="INT5 ConvRot",
-        is_convrot=True,
-        internal_stages=CONVROT_INTERNAL_STAGES,
-        plan=plan_int5_convrot,
-        marker_payload=INT5_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int5_convrot,
-    ),
-    ConversionMethodDefinition(
-        action="int5_convrot_mse",
-        label="INT5 ConvRot MSE",
-        is_convrot=True,
-        internal_stages=INT5_MSE_INTERNAL_STAGES,
-        plan=plan_int5_convrot,
-        marker_payload=INT5_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int5_convrot_mse,
-    ),
-    ConversionMethodDefinition(
-        action="int6_convrot",
-        label="INT6 ConvRot",
-        is_convrot=True,
-        internal_stages=CONVROT_INTERNAL_STAGES,
-        plan=plan_int6_convrot,
-        marker_payload=INT6_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int6_convrot,
-    ),
-    ConversionMethodDefinition(
-        action="int6_convrot_mse",
-        label="INT6 ConvRot MSE",
-        is_convrot=True,
-        internal_stages=INT6_MSE_INTERNAL_STAGES,
-        plan=plan_int6_convrot,
-        marker_payload=INT6_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int6_convrot_mse,
-    ),
-    ConversionMethodDefinition(
-        action="int7_convrot",
-        label="INT7 ConvRot",
-        is_convrot=True,
-        internal_stages=CONVROT_INTERNAL_STAGES,
-        plan=plan_int7_convrot,
-        marker_payload=INT7_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int7_convrot,
-    ),
-    ConversionMethodDefinition(
-        action="int7_convrot_mse",
-        label="INT7 ConvRot MSE",
-        is_convrot=True,
-        internal_stages=INT7_MSE_INTERNAL_STAGES,
-        plan=plan_int7_convrot,
-        marker_payload=INT7_CONVROT_MARKER_PAYLOAD,
-        encode=_encode_int7_convrot_mse,
-    ),
-    ConversionMethodDefinition(
-        action="w4a8",
-        label="W4A8 ConvRot",
-        is_convrot=True,
-        internal_stages=(),
-        plan=plan_w4a8,
-        marker_payload=W4A8_MARKER_PAYLOAD,
-        encode=_encode_w4a8,
-    ),
-    ConversionMethodDefinition(
-        action="w6a8",
-        label="W6A8 ConvRot",
-        is_convrot=True,
-        internal_stages=(),
-        plan=plan_w6a8,
-        marker_payload=W6A8_MARKER_PAYLOAD,
-        encode=_encode_w6a8,
-    ),
+# action, label, is_convrot, internal_stages, plan, marker_payload, encode
+_METHOD_TABLE: tuple[tuple[Any, ...], ...] = (
+    ("int8", "INT8", False, (), plan_int8_tensorwise, INT8_MARKER_PAYLOAD, _encode_int8),
+    ("int6_rowwise", "INT6 Rowwise", False, (), plan_int6_rowwise, INT6_ROWWISE_MARKER_PAYLOAD,
+     _pack_encoder("quantize_int6_rowwise", pack_int6_row_major)),
+    ("int7_rowwise", "INT7 Rowwise", False, (), plan_int7_rowwise, INT7_ROWWISE_MARKER_PAYLOAD,
+     _pack_encoder("quantize_int7_rowwise", pack_int7_row_major)),
+    ("int8_convrot", "INT8 ConvRot", True, CONVROT_INTERNAL_STAGES, plan_int8_convrot,
+     INT8_CONVROT_MARKER_PAYLOAD,
+     _device_encoder("quantize_int8_convrot", codes="codes", cpu_timings=True)),
+    ("int8_convrot_mse", "INT8 ConvRot MSE", True, INT8_MSE_INTERNAL_STAGES, plan_int8_convrot,
+     INT8_CONVROT_MARKER_PAYLOAD,
+     _device_encoder("quantize_int8_convrot_mse", codes="codes", cpu_timings=True)),
+    ("convrot_w4a4", "W4A4 ConvRot", True, CONVROT_INTERNAL_STAGES, plan_convrot_w4a4,
+     CONVROT_W4A4_MARKER_PAYLOAD, _device_encoder("quantize_convrot_w4a4")),
+    ("convrot_w4a4_mse", "W4A4 ConvRot MSE", True, W4A4_MSE_INTERNAL_STAGES, plan_convrot_w4a4,
+     CONVROT_W4A4_MARKER_PAYLOAD, _device_encoder("quantize_convrot_w4a4_mse")),
+    ("convrot_w4a4_mse_gptq", "W4A4 ConvRot MSE GPTQ", True, GPTQ_INTERNAL_STAGES,
+     plan_convrot_w4a4, CONVROT_W4A4_MARKER_PAYLOAD, _encode_convrot_w4a4_mse_gptq),
+    ("int5_convrot", "INT5 ConvRot", True, CONVROT_INTERNAL_STAGES, plan_int5_convrot,
+     INT5_CONVROT_MARKER_PAYLOAD, _device_encoder("quantize_int5_convrot_packed")),
+    ("int5_convrot_mse", "INT5 ConvRot MSE", True, INT5_MSE_INTERNAL_STAGES, plan_int5_convrot,
+     INT5_CONVROT_MARKER_PAYLOAD, _device_encoder("quantize_int5_convrot_mse_packed")),
+    ("int6_convrot", "INT6 ConvRot", True, CONVROT_INTERNAL_STAGES, plan_int6_convrot,
+     INT6_CONVROT_MARKER_PAYLOAD,
+     _cpu_or_device(_pack_encoder("quantize_int6_convrot", pack_int6_row_major),
+                    _device_encoder("quantize_int6_convrot_packed"))),
+    ("int6_convrot_mse", "INT6 ConvRot MSE", True, INT6_MSE_INTERNAL_STAGES, plan_int6_convrot,
+     INT6_CONVROT_MARKER_PAYLOAD,
+     _cpu_or_device(_pack_encoder("quantize_int6_convrot_mse", pack_int6_row_major),
+                    _device_encoder("quantize_int6_convrot_mse_packed"))),
+    ("int7_convrot", "INT7 ConvRot", True, CONVROT_INTERNAL_STAGES, plan_int7_convrot,
+     INT7_CONVROT_MARKER_PAYLOAD,
+     _cpu_or_device(_pack_encoder("quantize_int7_convrot", pack_int7_row_major),
+                    _device_encoder("quantize_int7_convrot_packed"))),
+    ("int7_convrot_mse", "INT7 ConvRot MSE", True, INT7_MSE_INTERNAL_STAGES, plan_int7_convrot,
+     INT7_CONVROT_MARKER_PAYLOAD,
+     _cpu_or_device(_pack_encoder("quantize_int7_convrot_mse", pack_int7_row_major),
+                    _device_encoder("quantize_int7_convrot_mse_packed"))),
+    ("w4a8", "W4A8 ConvRot", True, (), plan_w4a8, W4A8_MARKER_PAYLOAD, _encode_w4a8),
+    ("w6a8", "W6A8 ConvRot", True, (), plan_w6a8, W6A8_MARKER_PAYLOAD, _encode_w6a8),
+)
+
+_METHODS: tuple[ConversionMethodDefinition, ...] = tuple(
+    ConversionMethodDefinition(*row) for row in _METHOD_TABLE
 )
 
 

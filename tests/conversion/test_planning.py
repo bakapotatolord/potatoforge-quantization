@@ -3,14 +3,14 @@ import unittest
 
 from potatoforge.planning import (
     BFLOAT16_BYTES_PER_ELEMENT,
-    CONVROT_W4A4_MARKER_BYTE_COUNT,
-    INT5_CONVROT_MARKER_BYTE_COUNT,
-    INT6_CONVROT_MARKER_BYTE_COUNT,
-    INT6_ROWWISE_MARKER_BYTE_COUNT,
-    INT7_CONVROT_MARKER_BYTE_COUNT,
-    INT7_ROWWISE_MARKER_BYTE_COUNT,
+    CONVROT_W4A4_MARKER_PAYLOAD,
+    INT5_CONVROT_MARKER_PAYLOAD,
+    INT6_CONVROT_MARKER_PAYLOAD,
+    INT6_ROWWISE_MARKER_PAYLOAD,
+    INT7_CONVROT_MARKER_PAYLOAD,
+    INT7_ROWWISE_MARKER_PAYLOAD,
     INT8_MARKER_PAYLOAD,
-    INT8_CONVROT_MARKER_BYTE_COUNT,
+    INT8_CONVROT_MARKER_PAYLOAD,
     TensorDescriptor,
     build_output_layout,
     build_plan,
@@ -191,7 +191,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "convrot_w4a4")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 128), (2,), (CONVROT_W4A4_MARKER_BYTE_COUNT,)],
+            [(2, 128), (2,), (len(CONVROT_W4A4_MARKER_PAYLOAD),)],
         )
         self.assertEqual(
             [tensor.data_offsets for tensor in layout.tensors],
@@ -200,7 +200,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
                 (256, 264),
                 (
                     264,
-                    264 + CONVROT_W4A4_MARKER_BYTE_COUNT,
+                    264 + len(CONVROT_W4A4_MARKER_PAYLOAD),
                 ),
             ],
         )
@@ -231,7 +231,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int8_convrot")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 256), (2, 1), (INT8_CONVROT_MARKER_BYTE_COUNT,)],
+            [(2, 256), (2, 1), (len(INT8_CONVROT_MARKER_PAYLOAD),)],
         )
         self.assertEqual(
             [tensor.data_offsets for tensor in layout.tensors],
@@ -240,7 +240,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
                 (512, 520),
                 (
                     520,
-                    520 + INT8_CONVROT_MARKER_BYTE_COUNT,
+                    520 + len(INT8_CONVROT_MARKER_PAYLOAD),
                 ),
             ],
         )
@@ -314,7 +314,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         )
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(3840, 1280), (3840, 1), (INT8_CONVROT_MARKER_BYTE_COUNT,)],
+            [(3840, 1280), (3840, 1), (len(INT8_CONVROT_MARKER_PAYLOAD),)],
         )
 
     def test_fused_qkv_convrot_uses_the_existing_int8_fallback(self) -> None:
@@ -532,7 +532,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "convrot_w4a4_mse")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 128), (2,), (CONVROT_W4A4_MARKER_BYTE_COUNT,)],
+            [(2, 128), (2,), (len(CONVROT_W4A4_MARKER_PAYLOAD),)],
         )
         self.assertEqual(metadata["potatoforge.quantization"], "convrot_w4a4")
         self.assertEqual(
@@ -651,7 +651,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int6_rowwise")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 3), (2, 1), (INT6_ROWWISE_MARKER_BYTE_COUNT,)],
+            [(2, 3), (2, 1), (len(INT6_ROWWISE_MARKER_PAYLOAD),)],
         )
 
     def test_plans_int6_convrot_weights(self) -> None:
@@ -679,7 +679,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int6_convrot")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 192), (2, 1), (INT6_CONVROT_MARKER_BYTE_COUNT,)],
+            [(2, 192), (2, 1), (len(INT6_CONVROT_MARKER_PAYLOAD),)],
         )
 
     def test_plans_int7_rowwise_weights(self) -> None:
@@ -707,7 +707,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int7_rowwise")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 14), (2, 1), (INT7_ROWWISE_MARKER_BYTE_COUNT,)],
+            [(2, 14), (2, 1), (len(INT7_ROWWISE_MARKER_PAYLOAD),)],
         )
         self.assertEqual(layout.tensors[0].spec.dtype, "U8")
 
@@ -736,7 +736,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int7_convrot")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 224), (2, 1), (INT7_CONVROT_MARKER_BYTE_COUNT,)],
+            [(2, 224), (2, 1), (len(INT7_CONVROT_MARKER_PAYLOAD),)],
         )
 
     def test_keeps_int7_rowwise_weights_with_ineligible_width(self) -> None:
@@ -788,7 +788,7 @@ class TestInt8TensorwisePlan(unittest.TestCase):
         self.assertEqual(entries[0]["action"], "int5_convrot")
         self.assertEqual(
             [tensor.spec.shape for tensor in layout.tensors],
-            [(2, 160), (2, 1), (INT5_CONVROT_MARKER_BYTE_COUNT,)],
+            [(2, 160), (2, 1), (len(INT5_CONVROT_MARKER_PAYLOAD),)],
         )
         self.assertEqual(layout.tensors[0].spec.dtype, "U8")
         self.assertEqual(layout.tensors[1].spec.dtype, "F32")
