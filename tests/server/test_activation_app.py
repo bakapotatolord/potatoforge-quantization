@@ -14,7 +14,7 @@ from potatoforge.server.app import create_app
 from potatoforge.server.model_library import (
     discover_activation_audit_caches,
     discover_activation_calibrations,
-    load_activation_folders,
+    load_library_folders,
 )
 
 
@@ -82,7 +82,7 @@ class ActivationServerTests(TestCase):
                 encoding='utf-8',
             )
 
-            self.assertEqual(load_activation_folders(root / 'models.toml'), [activation])
+            self.assertEqual(load_library_folders('activation', root / 'models.toml'), [activation])
             self.assertEqual(
                 discover_activation_calibrations(root / 'models.toml'),
                 [

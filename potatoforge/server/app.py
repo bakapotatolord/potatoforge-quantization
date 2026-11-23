@@ -38,32 +38,17 @@ from ..conversion_methods import get_conversion_method
 from ..profiles import load_profile
 from .model_library import (
     DEFAULT_CONFIG_PATH,
-    add_activation_folder,
-    add_folder,
-    add_lora_folder,
-    add_output_folder,
-    add_profile_folder,
+    FOLDER_KINDS,
+    add_library_folder,
     discover_audit_reports,
     discover_activation_audit_caches,
     discover_activation_calibrations,
     discover_loras,
     discover_models,
     discover_profiles,
-    is_configured_activation,
-    is_configured_model,
-    is_configured_lora,
-    is_configured_output,
-    is_configured_profile,
-    load_activation_folders,
-    load_folders,
-    load_lora_folders,
-    load_output_folders,
-    load_profile_folders,
-    remove_activation_folder,
-    remove_folder,
-    remove_lora_folder,
-    remove_output_folder,
-    remove_profile_folder,
+    is_in_library,
+    load_library_folders,
+    remove_library_folder,
 )
 from .activation_jobs import ActivationAuditJobManager
 from .audit_jobs import AuditJobManager, audit_result_payload
@@ -210,12 +195,12 @@ def _prepare_quantize_request(
 ) -> None:
     if request.output_path is not None:
         request.output_path = _with_default_suffix(request.output_path, ".safetensors")
-    if not is_configured_model(request.source_path, config_path):
+    if not is_in_library("model", request.source_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Model path must be inside a configured model folder.",
         )
-    if not is_configured_profile(request.profile, config_path):
+    if not is_in_library("profile", request.profile, config_path):
         raise HTTPException(
             status_code=422,
             detail="Profile path must be inside a configured profile folder.",
@@ -226,17 +211,14 @@ def _prepare_quantize_request(
             detail="LoRA files and strengths must be paired.",
         )
     if any(
-        not is_configured_lora(adapter_path, config_path)
+        not is_in_library("lora", adapter_path, config_path)
         for adapter_path in request.adapter_path
     ):
         raise HTTPException(
             status_code=422,
             detail="LoRA path must be inside a configured LoRA folder.",
         )
-    if request.output_path is not None and not is_configured_output(
-        request.output_path,
-        config_path,
-    ):
+    if request.output_path is not None and not is_in_library("output", request.output_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Output path must be inside a configured output folder.",
@@ -264,12 +246,12 @@ def _prepare_quantize_request(
 
 def _prepare_optimize_request(request: OptimizeRequest, config_path: Path) -> None:
     request.output_path = _with_default_suffix(request.output_path, ".json")
-    if not is_configured_output(request.audit_path, config_path):
+    if not is_in_library("output", request.audit_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Audit report path must be inside a configured output folder.",
         )
-    if not is_configured_profile(request.output_path, config_path):
+    if not is_in_library("profile", request.output_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Profile path must be inside a configured profile folder.",
@@ -278,12 +260,12 @@ def _prepare_optimize_request(request: OptimizeRequest, config_path: Path) -> No
 
 def _prepare_audit_request(request: AuditRequest, config_path: Path) -> None:
     request.output = _with_default_suffix(request.output, ".json")
-    if not is_configured_model(request.source_path, config_path):
+    if not is_in_library("model", request.source_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Model path must be inside a configured model folder.",
         )
-    if not is_configured_output(request.output, config_path):
+    if not is_in_library("output", request.output, config_path):
         raise HTTPException(
             status_code=422,
             detail="Output path must be inside a configured output folder.",
@@ -295,7 +277,7 @@ def _validate_activation_path(
     config_path: Path,
     detail: str,
 ) -> None:
-    if not is_configured_activation(path, config_path):
+    if not is_in_library("activation", path, config_path):
         raise HTTPException(status_code=422, detail=detail)
 
 
@@ -305,8 +287,8 @@ def _validate_activation_cache_pair_output(
 ) -> tuple[Path, Path]:
     metadata_path, tensors_path = activation_audit_pair_paths(output)
     if not (
-        is_configured_activation(metadata_path, config_path)
-        and is_configured_activation(tensors_path, config_path)
+        is_in_library("activation", metadata_path, config_path)
+        and is_in_library("activation", tensors_path, config_path)
     ):
         raise HTTPException(
             status_code=422,
@@ -321,7 +303,7 @@ def _validate_activation_audit_paths(
     *,
     check_existing_output: bool = True,
 ) -> None:
-    if not is_configured_model(request.source_path, config_path):
+    if not is_in_library("model", request.source_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Model path must be inside a configured model folder.",
@@ -394,13 +376,13 @@ def _prepare_activation_optimize_request(
         )
     else:
         request.summary_output = _with_default_suffix(request.summary_output, ".json")
-    if not is_configured_profile(request.output_path, config_path):
+    if not is_in_library("profile", request.output_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Profile path must be inside a configured profile folder.",
         )
     assert request.summary_output is not None
-    if not is_configured_profile(request.summary_output, config_path):
+    if not is_in_library("profile", request.summary_output, config_path):
         raise HTTPException(
             status_code=422,
             detail="Summary path must be inside a configured profile folder.",
@@ -410,10 +392,7 @@ def _prepare_activation_optimize_request(
             status_code=422,
             detail="Profile and summary output paths must be different.",
         )
-    if request.source_path is not None and not is_configured_model(
-        request.source_path,
-        config_path,
-    ):
+    if request.source_path is not None and not is_in_library("model", request.source_path, config_path):
         raise HTTPException(
             status_code=422,
             detail="Source path must be inside a configured model folder.",
@@ -460,6 +439,30 @@ def _activation_method_options(methods: list[str] | tuple[str, ...]) -> list[dic
         {"value": method, "label": get_conversion_method(METHOD_ACTIONS[method]).label}
         for method in methods
     ]
+
+
+def _register_folder_routes(app: FastAPI, kind: str, config_path: Path) -> None:
+    route = f"/api/{kind}-folders"
+
+    def folder_list() -> dict[str, list[str]]:
+        return {"folders": [str(folder) for folder in load_library_folders(kind, config_path)]}
+
+    def change(update: Any, request: ModelFolderRequest) -> dict[str, list[str]]:
+        try:
+            folders = update(kind, request.path, config_path)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"folders": [str(folder) for folder in folders]}
+
+    def add(request: ModelFolderRequest) -> dict[str, list[str]]:
+        return change(add_library_folder, request)
+
+    def remove(request: ModelFolderRequest) -> dict[str, list[str]]:
+        return change(remove_library_folder, request)
+
+    app.get(route, name=f"{kind}_folders")(folder_list)
+    app.post(route, status_code=201, name=f"add_{kind}_folder")(add)
+    app.delete(route, name=f"remove_{kind}_folder")(remove)
 
 
 def create_app(
@@ -596,91 +599,16 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/api/model-folders")
-    def model_folders() -> dict[str, list[str]]:
-        return {"folders": [str(folder) for folder in load_folders(config_path)]}
-
-    @app.post("/api/model-folders", status_code=201)
-    def add_model_folder(request: ModelFolderRequest) -> dict[str, list[str]]:
-        folders = add_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.delete("/api/model-folders")
-    def remove_model_folder(request: ModelFolderRequest) -> dict[str, list[str]]:
-        folders = remove_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.get("/api/activation-folders")
-    def activation_folder_list() -> dict[str, list[str]]:
-        return {
-            "folders": [str(folder) for folder in load_activation_folders(config_path)]
-        }
-
-    @app.post("/api/activation-folders", status_code=201)
-    def add_configured_activation_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        try:
-            folders = add_activation_folder(request.path, config_path)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.delete("/api/activation-folders")
-    def remove_configured_activation_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        try:
-            folders = remove_activation_folder(request.path, config_path)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return {"folders": [str(folder) for folder in folders]}
+    for kind in FOLDER_KINDS:
+        _register_folder_routes(app, kind, config_path)
 
     @app.get("/api/models")
     def models() -> dict[str, list[dict[str, str | bool]]]:
         return {"models": discover_models(config_path)}
 
-    @app.get("/api/lora-folders")
-    def lora_folders() -> dict[str, list[str]]:
-        return {"folders": [str(folder) for folder in load_lora_folders(config_path)]}
-
-    @app.post("/api/lora-folders", status_code=201)
-    def add_configured_lora_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = add_lora_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.delete("/api/lora-folders")
-    def remove_configured_lora_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = remove_lora_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
     @app.get("/api/loras")
     def loras() -> dict[str, list[dict[str, str]]]:
         return {"loras": discover_loras(config_path)}
-
-    @app.get("/api/profile-folders")
-    def profile_folders() -> dict[str, list[str]]:
-        return {
-            "folders": [str(folder) for folder in load_profile_folders(config_path)]
-        }
-
-    @app.post("/api/profile-folders", status_code=201)
-    def add_configured_profile_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = add_profile_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.delete("/api/profile-folders")
-    def remove_configured_profile_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = remove_profile_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
 
     @app.get("/api/profiles")
     def profiles() -> dict[str, list[dict[str, str]]]:
@@ -688,7 +616,7 @@ def create_app(
 
     @app.get("/api/profile-details")
     def profile_details(path: Path) -> dict[str, Any]:
-        if not is_configured_profile(path, config_path):
+        if not is_in_library("profile", path, config_path):
             raise HTTPException(
                 status_code=422,
                 detail="Profile path must be inside a configured profile folder.",
@@ -698,12 +626,6 @@ def create_app(
             "profile_id": profile["profile_id"],
             "default": profile["default"],
             "rules": profile["rules"],
-        }
-
-    @app.get("/api/output-folders")
-    def output_folders() -> dict[str, list[str]]:
-        return {
-            "folders": [str(folder) for folder in load_output_folders(config_path)]
         }
 
     @app.get("/api/audit-reports")
@@ -765,31 +687,16 @@ def create_app(
             "baseline_methods": ["bf16", *methods],
         }
 
-    @app.post("/api/output-folders", status_code=201)
-    def add_configured_output_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = add_output_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
-    @app.delete("/api/output-folders")
-    def remove_configured_output_folder(
-        request: ModelFolderRequest,
-    ) -> dict[str, list[str]]:
-        folders = remove_output_folder(request.path, config_path)
-        return {"folders": [str(folder) for folder in folders]}
-
     @app.post("/api/inspect")
     async def inspect(request: InspectRequest) -> CommandResult:
         if request.output is not None:
             request.output = _with_default_suffix(request.output, ".json")
-        if not is_configured_model(request.model_path, config_path):
+        if not is_in_library("model", request.model_path, config_path):
             raise HTTPException(
                 status_code=422,
                 detail="Model path must be inside a configured model folder.",
             )
-        if request.output is not None and not is_configured_output(
-            request.output, config_path
+        if request.output is not None and not is_in_library("output", request.output, config_path
         ):
             raise HTTPException(
                 status_code=422,

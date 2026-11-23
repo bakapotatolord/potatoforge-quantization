@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from ..converter import ConversionCancelled
+
+logger = logging.getLogger(__name__)
 
 SseEvent = tuple[str, dict[str, Any] | None]
 
@@ -199,3 +204,43 @@ class LocalJobManager:
     @staticmethod
     def _encode_event(name: str, payload: dict[str, Any] | None) -> str:
         return f"event: {name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+class CommandJobManager(LocalJobManager):
+    """Run one blocking command per job with shared progress and outcome handling."""
+
+    label = "Job"
+
+    async def run_command(
+        self,
+        job: Job,
+        command: Callable[[], Any],
+        to_payload: Callable[[Any], dict[str, Any]],
+    ) -> None:
+        try:
+            self.set_running(job)
+            result = await asyncio.to_thread(command)
+            payload = to_payload(result)
+        except ConversionCancelled:
+            self.finish(job, "cancelled", error=f"{self.label} stopped.")
+        except (FileExistsError, FileNotFoundError, ValueError) as error:
+            self.finish(job, "failed", error=str(error) or error.__class__.__name__)
+        except Exception:
+            logger.exception("%s job %s failed", self.label, job.id)
+            self.finish(job, "failed", error=f"{self.label} failed.")
+        else:
+            self.finish(job, "succeeded", result=payload)
+
+    def check_cancelled(self, job: Job) -> None:
+        if self.is_cancelled(job):
+            raise ConversionCancelled
+
+    def report_tensor(
+        self, job: Job, index: int, total: int, tensor_name: str, line: str | None = None
+    ) -> None:
+        self.check_cancelled(job)
+        self.record_progress(
+            job,
+            {"current": index, "total": total, "tensor_name": tensor_name},
+            line or f"[{index}/{total}] {tensor_name}",
+        )

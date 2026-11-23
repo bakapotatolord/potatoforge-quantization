@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
 from typing import Any, Callable
 
-from ..converter import ConversionCancelled, format_conversion_progress
-from .jobs import Job, LocalJobManager
+from ..converter import format_conversion_progress
+from .jobs import CommandJobManager
 
-logger = logging.getLogger(__name__)
 QuantizeCommand = Callable[..., Any]
 
 
@@ -29,49 +26,29 @@ def quantize_result_payload(result: Any, *, timing: bool = False) -> dict[str, A
     return payload
 
 
-class QuantizeJobManager(LocalJobManager):
+class QuantizeJobManager(CommandJobManager):
     """Run one Quantize command with replayable progress and cancellation."""
 
+    label = "Quantization"
+
     def start(self, request: Any, command: QuantizeCommand) -> dict[str, Any]:
-        return super().start(lambda job: self._run(job, request, command))
-
-    async def _run(self, job: Job, request: Any, command: QuantizeCommand) -> None:
-        try:
-            self.set_running(job)
-            result = await asyncio.to_thread(
-                command,
-                request.source_path,
-                request.output_path,
-                profile=request.profile,
-                device=request.device,
-                adapter_path=request.adapter_path,
-                adapter_strength=request.adapter_strength,
-                dry_run=request.dry_run,
-                timing=request.timing,
-                on_entry_started=lambda index, total, entry: self._on_entry_started(
-                    job, index, total, entry
+        return super().start(
+            lambda job: self.run_command(
+                job,
+                lambda: command(
+                    request.source_path,
+                    request.output_path,
+                    profile=request.profile,
+                    device=request.device,
+                    adapter_path=request.adapter_path,
+                    adapter_strength=request.adapter_strength,
+                    dry_run=request.dry_run,
+                    timing=request.timing,
+                    on_entry_started=lambda index, total, entry: self.report_tensor(
+                        job, index, total, entry["tensor_name"],
+                        format_conversion_progress(index, total, entry),
+                    ),
                 ),
+                lambda result: quantize_result_payload(result, timing=request.timing),
             )
-            final_result = quantize_result_payload(result, timing=request.timing)
-        except ConversionCancelled:
-            self.finish(job, "cancelled", error="Quantization stopped.")
-        except (FileExistsError, FileNotFoundError, ValueError) as error:
-            self.finish(job, "failed", error=str(error) or error.__class__.__name__)
-        except Exception:
-            logger.exception("Quantize job %s failed", job.id)
-            self.finish(job, "failed", error="Quantization failed.")
-        else:
-            self.finish(job, "succeeded", result=final_result)
-
-    def _on_entry_started(self, job: Job, index: int, total: int, entry: Any) -> None:
-        if self.is_cancelled(job):
-            raise ConversionCancelled
-        self.record_progress(
-            job,
-            {
-                "current": index,
-                "total": total,
-                "tensor_name": entry["tensor_name"],
-            },
-            format_conversion_progress(index, total, entry),
         )

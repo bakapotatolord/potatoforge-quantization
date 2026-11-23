@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
 from typing import Any, Callable
 
-from ..converter import ConversionCancelled
-from .jobs import Job, LocalJobManager
+from .jobs import CommandJobManager
 
-logger = logging.getLogger(__name__)
 AuditCommand = Callable[..., Any]
 
 
@@ -24,42 +20,25 @@ def audit_result_payload(request: Any, result: Any) -> dict[str, Any]:
     }
 
 
-class AuditJobManager(LocalJobManager):
+class AuditJobManager(CommandJobManager):
     """Run one Audit command with replayable progress and cancellation."""
 
+    label = "Audit"
+
     def start(self, request: Any, command: AuditCommand) -> dict[str, Any]:
-        return super().start(lambda job: self._run(job, request, command))
-
-    async def _run(self, job: Job, request: Any, command: AuditCommand) -> None:
-        try:
-            self.set_running(job)
-            result = await asyncio.to_thread(
-                command,
-                request.source_path,
-                request.output,
-                device=request.device,
-                overwrite=request.overwrite,
-                methods=getattr(request, "methods", None),
-                on_entry_started=lambda index, total, entry: self._on_entry_started(
-                    job, index, total, entry
+        return super().start(
+            lambda job: self.run_command(
+                job,
+                lambda: command(
+                    request.source_path,
+                    request.output,
+                    device=request.device,
+                    overwrite=request.overwrite,
+                    methods=getattr(request, "methods", None),
+                    on_entry_started=lambda index, total, name: self.report_tensor(
+                        job, index, total, name
+                    ),
                 ),
+                lambda result: audit_result_payload(request, result),
             )
-            final_result = audit_result_payload(request, result)
-        except ConversionCancelled:
-            self.finish(job, "cancelled", error="Audit stopped.")
-        except (FileExistsError, FileNotFoundError, ValueError) as error:
-            self.finish(job, "failed", error=str(error) or error.__class__.__name__)
-        except Exception:
-            logger.exception("Audit job %s failed", job.id)
-            self.finish(job, "failed", error="Audit failed.")
-        else:
-            self.finish(job, "succeeded", result=final_result)
-
-    def _on_entry_started(self, job: Job, index: int, total: int, tensor_name: str) -> None:
-        if self.is_cancelled(job):
-            raise ConversionCancelled
-        self.record_progress(
-            job,
-            {"current": index, "total": total, "tensor_name": tensor_name},
-            f"[{index}/{total}] {tensor_name}",
         )

@@ -13,7 +13,6 @@ from safetensors import safe_open
 
 FORMAT = "potatoforge_gptq_calibration"
 VERSION = 1
-BLOCK_SIZE = 512
 
 
 def _positive_int(value: Any, label: str) -> int:

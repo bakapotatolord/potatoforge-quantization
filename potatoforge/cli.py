@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from collections import Counter
 from pathlib import Path
 from time import perf_counter
@@ -12,6 +11,12 @@ from typing import Any, Callable, Literal
 import typer
 
 from .application.commands import (
+    build_adapter_inputs as _build_adapter_inputs,
+    gib_to_bytes,
+    mib_to_bytes,
+    preflight_output as _preflight_audit_output,
+    split_comma_separated as _split_comma_separated,
+    write_json as _write_json,
     audit_model,
     inspect_model,
     optimize_profile,
@@ -58,7 +63,7 @@ from .extraction import extract_tensors
 from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
-from .lora.lora_merge import AdapterMergeInput, merge_bf16_adapters
+from .lora.lora_merge import merge_bf16_adapters
 from .krea2_mlp_pruning import (
     Krea2MLPPrunePlan,
     Krea2MLPSelectionResult,
@@ -80,11 +85,6 @@ from .krea2_block_pruning import (
 )
 from .patch_planning import build_patch_metadata, build_patch_plan
 from .patching import execute_patch_plan
-from .planning import (
-    QUANTIZATION_LAYERS_METADATA_KEY,
-    QUANTIZATION_METADATA_KEY,
-    parse_quantization_layers,
-)
 from .profiles import validate_quantization_action
 from .config import load_optimize_config, load_quantize_config
 from .calibration import (
@@ -198,43 +198,6 @@ def _run(
         _fail(command, error, 5)
 
 
-def _write_json(path: Path, document: object, overwrite: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "w" if overwrite else "x"
-    with path.open(mode, encoding="utf-8") as output_file:
-        json.dump(document, output_file, indent=2)
-        output_file.write("\n")
-
-
-def _preflight_audit_output(output: Path, overwrite: bool) -> None:
-    if not overwrite and output.exists():
-        raise FileExistsError(f"Output already exists: {output}")
-
-
-def _parse_quantization_metadata(
-    metadata: object,
-) -> tuple[str, dict[str, str]]:
-    if not isinstance(metadata, dict):
-        return "unavailable", {}
-
-    summary = metadata.get(QUANTIZATION_METADATA_KEY)
-    if not isinstance(summary, str):
-        summary = "unavailable"
-
-    raw_layers = metadata.get(QUANTIZATION_LAYERS_METADATA_KEY)
-    if raw_layers is None:
-        return summary, {}
-    if not isinstance(raw_layers, str):
-        return "invalid", {}
-
-    try:
-        layers = parse_quantization_layers(raw_layers)
-    except ValueError:
-        return "invalid", {}
-
-    return summary, layers
-
-
 def _print_quantization(
     summary: str,
     layers: dict[str, str],
@@ -252,24 +215,6 @@ def _print_quantization(
     typer.echo("layers:")
     for name, action in layers.items():
         typer.echo(f"  {name}: {action}")
-
-
-def _gib_to_bytes(value: float) -> int:
-    if not math.isfinite(value) or value <= 0:
-        raise typer.BadParameter("must be a finite positive number")
-    byte_count = int(value * (1024**3))
-    if byte_count <= 0:
-        raise typer.BadParameter("must represent at least one byte")
-    return byte_count
-
-
-def _mib_to_bytes(value: float, *, allow_zero: bool = False) -> int:
-    if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
-        raise typer.BadParameter("must be a finite positive number")
-    byte_count = int(value * (1024**2))
-    if byte_count <= 0 and not allow_zero:
-        raise typer.BadParameter("must represent at least one byte")
-    return byte_count
 
 
 def _resolve_profile_budget(
@@ -292,21 +237,15 @@ def _resolve_profile_budget(
     if budget_options != 1:
         raise ValueError(option_error)
     if target_size_mib is not None:
-        return _mib_to_bytes(target_size_mib), None
+        return mib_to_bytes(target_size_mib), None
     if target_size_gib is not None:
-        return _gib_to_bytes(target_size_gib), None
+        return gib_to_bytes(target_size_gib), None
     if promotion_budget_bytes_option is not None:
         if promotion_budget_bytes_option < 0:
             raise ValueError("--promotion-budget-bytes must be non-negative.")
         return None, promotion_budget_bytes_option
     assert promotion_budget_mib is not None
-    return None, _mib_to_bytes(promotion_budget_mib, allow_zero=True)
-
-
-def _split_comma_separated(value: str | None) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    return tuple(part.strip() for part in value.split(","))
+    return None, mib_to_bytes(promotion_budget_mib, allow_zero=True)
 
 
 def _print_progress(index: int, count: int, name: str) -> None:
@@ -403,21 +342,6 @@ def _print_krea2_activation_aggregation(
     typer.echo(
         "Aggregation:                 raw sums/counts summed first; "
         "per-file means are never averaged"
-    )
-
-
-def _build_adapter_inputs(
-    adapter_paths: list[Path],
-    adapter_strengths: list[float],
-) -> tuple[AdapterMergeInput, ...]:
-    if len(adapter_paths) != len(adapter_strengths):
-        raise ValueError(
-            "--adapter-path and --adapter-strength must be repeated "
-            "the same number of times."
-        )
-    return tuple(
-        AdapterMergeInput(path=path, strength=strength)
-        for path, strength in zip(adapter_paths, adapter_strengths)
     )
 
 
@@ -1111,12 +1035,12 @@ def analyze(
             selected_target_bytes = (
                 None
                 if target_size_gib is None
-                else _gib_to_bytes(target_size_gib)
+                else gib_to_bytes(target_size_gib)
             )
             profile_sweep = generate_profile_sweep(
                 audit_document,
                 "analysis",
-                _gib_to_bytes(target_size_step_gib),
+                gib_to_bytes(target_size_step_gib),
                 allowed_methods,
                 excluded_prefixes=exclude_prefixes,
                 selected_target_bytes=selected_target_bytes,
@@ -1139,7 +1063,7 @@ def analyze(
             optimized = optimize_target_size(
                 audit_document,
                 "analysis",
-                _gib_to_bytes(target_size_gib),
+                gib_to_bytes(target_size_gib),
                 allowed_methods,
                 excluded_prefixes=exclude_prefixes,
             )
@@ -1228,7 +1152,6 @@ def optimize(
             config=config,
             output=output,
             dry_run=dry_run,
-            to_bytes=_gib_to_bytes,
             load_config=load_optimize_config,
             load_audit=load_weight_audit,
             optimize=optimize_target_size,
