@@ -1,4 +1,4 @@
-import { ChartBar, Cube, Gear, MagnifyingGlass, Play, Pulse, SlidersHorizontal } from '@phosphor-icons/react'
+import { ChartBar, Cube, Gear, GitDiff, MagnifyingGlass, Play, Pulse, SlidersHorizontal } from '@phosphor-icons/react'
 import { AppShell, Burger, Container, Group, NavLink, Title } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { createRootRoute, Link, Outlet, useRouterState } from '@tanstack/react-router'
@@ -26,6 +26,13 @@ function RootLayout() {
         </Group>
       </AppShell.Header>
       <AppShell.Navbar p="sm">
+        <NavLink
+          component={Link}
+          to="/extract"
+          label="Extract LoRA"
+          leftSection={<GitDiff size={18} />}
+          active={pathname === '/extract'}
+        />
         <NavLink
           component={Link}
           to="/inspect"

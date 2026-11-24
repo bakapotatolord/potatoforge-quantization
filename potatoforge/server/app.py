@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import re
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 from urllib.parse import quote
 
 import httpx
@@ -34,6 +35,11 @@ from ..audits.weight_audit import (
     QuantizationMethod,
     audit_method_options,
 )
+from ..lora.lora_extract import (
+    extract_lora,
+    resolve_output_paths,
+    validate_options as validate_extraction_options,
+)
 from ..conversion_methods import get_conversion_method
 from ..profiles import load_profile
 from .model_library import (
@@ -53,6 +59,7 @@ from .model_library import (
 from .activation_jobs import ActivationAuditJobManager
 from .audit_jobs import AuditJobManager, audit_result_payload
 from .jobs import ActiveJobError, InactiveJobError, UnknownJobError
+from .extract_jobs import ExtractJobManager, build_extraction_options
 from .quantize_jobs import QuantizeJobManager, quantize_result_payload
 from .comfy_runner import ComfyClient, ComfyRunner, launch_comfy
 from .comfy_workflow import inspect_dataset, inspect_workflow, load_json, validate_bindings
@@ -146,6 +153,24 @@ class QuantizeRequest(BaseModel):
     timing: bool = False
 
 
+class ExtractLoraRequest(BaseModel):
+    base_path: Path
+    tuned_path: Path
+    output_path: Path
+    ranks: list[Annotated[int, Field(ge=1, le=4096)]] = Field(
+        default_factory=lambda: [64],
+        min_length=1,
+        max_length=8,
+    )
+    energy: float | None = Field(default=None, gt=0, le=1)
+    split_fused: list[str] = Field(default_factory=list)
+    include_diffs: bool = False
+    include: str | None = None
+    exclude: str | None = None
+    dtype: Literal["fp16", "bf16", "fp32"] = "fp16"
+    device: Literal["cpu", "cuda"] = "cpu"
+
+
 class ComfyConnectionRequest(BaseModel):
     base_url: str = "http://127.0.0.1:8188"
 
@@ -237,6 +262,59 @@ def _prepare_quantize_request(
         partial = request.output_path.with_name(
             f"{request.output_path.name}.partial"
         )
+        if partial.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Partial output already exists: {partial}",
+            )
+
+
+def _prepare_extract_request(request: ExtractLoraRequest, config_path: Path) -> None:
+    request.output_path = _with_default_suffix(request.output_path, ".safetensors")
+    if len(request.ranks) > 1 and "{rank}" not in str(request.output_path):
+        request.output_path = request.output_path.with_name(
+            f"{request.output_path.stem}_r{{rank}}{request.output_path.suffix}"
+        )
+    for label, path in (("Base", request.base_path), ("Tuned", request.tuned_path)):
+        if not is_in_library("model", path, config_path):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} checkpoint must be inside a configured model folder.",
+            )
+    if request.base_path.resolve() == request.tuned_path.resolve():
+        raise HTTPException(
+            status_code=422,
+            detail="Base and tuned checkpoints must be different files.",
+        )
+    try:
+        options = build_extraction_options(request)
+        validate_extraction_options(options)
+        for pattern in (request.include, request.exclude):
+            if pattern:
+                re.compile(pattern)
+        outputs = resolve_output_paths(request.output_path, options)
+    except (ValueError, re.error) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    for output in outputs.values():
+        if not (
+            is_in_library("output", output, config_path)
+            or is_in_library("lora", output, config_path)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Output path must be inside a configured output or LoRA folder.",
+            )
+        if output.resolve() in (request.base_path.resolve(), request.tuned_path.resolve()):
+            raise HTTPException(
+                status_code=422,
+                detail="Output must differ from the input checkpoints.",
+            )
+        if output.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Refusing to overwrite existing output: {output}",
+            )
+        partial = output.with_name(f"{output.name}.partial")
         if partial.exists():
             raise HTTPException(
                 status_code=409,
@@ -473,10 +551,12 @@ def create_app(
     audit_jobs = AuditJobManager()
     activation_jobs = ActivationAuditJobManager()
     quantize_jobs = QuantizeJobManager()
+    extract_jobs = ExtractJobManager()
     comfy_jobs = ComfyRunner(config_path.with_name("comfy_runner_state.json"))
     app.state.audit_jobs = audit_jobs
     app.state.activation_jobs = activation_jobs
     app.state.quantize_jobs = quantize_jobs
+    app.state.extract_jobs = extract_jobs
     app.state.comfy_jobs = comfy_jobs
 
     async def comfy_preflight_check(request: ComfyRunRequest) -> dict[str, Any]:
@@ -955,6 +1035,43 @@ def create_app(
             raise HTTPException(status_code=404, detail="Quantize job not found.") from error
         return StreamingResponse(
             quantize_jobs.stream(subscriber),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/lora/extract/jobs", status_code=202)
+    async def start_extract_job(request: ExtractLoraRequest) -> dict[str, Any]:
+        _prepare_extract_request(request, config_path)
+        try:
+            job = extract_jobs.start(request, extract_lora)
+        except ActiveJobError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="A LoRA extraction job is already active.",
+            ) from error
+        return {"job": job}
+
+    @app.get("/api/lora/extract/jobs/current")
+    def current_extract_job() -> dict[str, Any]:
+        return {"job": extract_jobs.current()}
+
+    @app.delete("/api/lora/extract/jobs/{job_id}")
+    def cancel_extract_job(job_id: str) -> dict[str, Any]:
+        try:
+            return {"job": extract_jobs.cancel(job_id)}
+        except UnknownJobError as error:
+            raise HTTPException(status_code=404, detail="Extract job not found.") from error
+        except InactiveJobError as error:
+            raise HTTPException(status_code=409, detail="Extract job is no longer active.") from error
+
+    @app.get("/api/lora/extract/jobs/{job_id}/events")
+    async def extract_job_events(job_id: str) -> StreamingResponse:
+        try:
+            subscriber = extract_jobs.subscribe(job_id)
+        except UnknownJobError as error:
+            raise HTTPException(status_code=404, detail="Extract job not found.") from error
+        return StreamingResponse(
+            extract_jobs.stream(subscriber),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
