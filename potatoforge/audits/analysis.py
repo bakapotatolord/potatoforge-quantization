@@ -44,6 +44,11 @@ ANALYSIS_METHODS: Final[tuple[tuple[QuantizationMethod, str], ...]] = (
     ("int8", "INT8"),
     ("int8_convrot", "INT8 ConvRot"),
     ("int8_convrot_mse", "INT8 ConvRot + MSE"),
+    # Appended so existing workbook columns keep their positions.
+    ("w4a8", "W4A8 ConvRot"),
+    ("w6a8", "W6A8 ConvRot"),
+    ("w3a8", "W3A8 ConvRot"),
+    ("w5a8", "W5A8 ConvRot"),
 )
 PROFILE_METHODS: Final[tuple[tuple[QuantizationMethod, str], ...]] = (
     ("bf16", "BF16"),

@@ -18,6 +18,36 @@ from potatoforge.audits.weight_audit import (
 
 
 class TestWeightAudit(unittest.TestCase):
+    def test_audits_grouped_a8_methods_like_their_conversions(self) -> None:
+        from potatoforge.planning import plan_w3a8, plan_w4a8, plan_w5a8, plan_w6a8
+        from potatoforge.quantization import w3a8, w4a8, w5a8, w6a8
+
+        weights = (torch.randn((8, 512), generator=torch.Generator().manual_seed(4)) * 0.02).bfloat16()
+        with TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.safetensors"
+            save_file({"blocks.0.attn.wq.weight": weights}, str(source_path))
+            document = audit_bf16_source(source_path, methods=("w3a8", "w4a8", "w5a8", "w6a8"))
+        methods = document["results"][0]["methods"]
+        descriptor = {"dtype": "BF16", "shape": [8, 512], "data_offsets": [0, 8 * 512 * 2]}
+        for method, plan, quantize, dequantize in (
+            ("w3a8", plan_w3a8, w3a8.quantize_w3a8, w3a8.dequantize_w3a8),
+            ("w4a8", plan_w4a8, w4a8.quantize_w4a8, w4a8.dequantize_w4a8),
+            ("w5a8", plan_w5a8, w5a8.quantize_w5a8, w5a8.dequantize_w5a8),
+            ("w6a8", plan_w6a8, w6a8.quantize_w6a8, w6a8.dequantize_w6a8),
+        ):
+            with self.subTest(method=method):
+                expected = all_comparison.relative_l2_error(weights, dequantize(quantize(weights)))
+                self.assertAlmostEqual(methods[method]["relative_l2_error"], expected, places=12)
+                self.assertEqual(
+                    methods[method]["storage_bytes"],
+                    plan("blocks.0.attn.wq.weight", descriptor).estimated_bytes,
+                )
+        errors = [methods[method]["relative_l2_error"] for method in ("w3a8", "w4a8", "w5a8", "w6a8")]
+        self.assertEqual(errors, sorted(errors, reverse=True))
+        storage = [methods[method]["storage_bytes"] for method in ("w3a8", "w4a8", "w5a8", "w6a8")]
+        self.assertEqual(storage, sorted(storage))
+        self.assertEqual(document["summary"]["storage_bytes"]["w4a8"], methods["w4a8"]["storage_bytes"])
+
     def test_audits_w4a4_mse_alongside_the_baseline(self) -> None:
         weights = torch.zeros((2, 256), dtype=torch.bfloat16)
         weights[0] = torch.linspace(
@@ -54,6 +84,10 @@ class TestWeightAudit(unittest.TestCase):
                 "int7_convrot_mse",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
+                "w4a8",
+                "w6a8",
+                "w3a8",
+                "w5a8",
             },
         )
         self.assertEqual(

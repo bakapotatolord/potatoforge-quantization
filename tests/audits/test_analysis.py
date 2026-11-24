@@ -147,8 +147,12 @@ class TestAnalysis(unittest.TestCase):
                 errors["M2"].value,
                 first_result["methods"]["int8_convrot"]["relative_l2_error"],
             )
-            self.assertEqual(errors.max_column, 14)
+            self.assertEqual(errors.max_column, 18)
             self.assertEqual(errors["N1"].value, "INT8 ConvRot + MSE")
+            self.assertEqual(errors["O1"].value, "W4A8 ConvRot")
+            self.assertEqual(errors["P1"].value, "W6A8 ConvRot")
+            self.assertEqual(errors["Q1"].value, "W3A8 ConvRot")
+            self.assertEqual(errors["R1"].value, "W5A8 ConvRot")
             self.assertIsNone(errors["B3"].value)
             self.assertIsNone(errors["C3"].value)
             self.assertIsNone(errors["D3"].value)

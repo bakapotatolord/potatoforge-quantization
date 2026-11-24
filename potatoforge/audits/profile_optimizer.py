@@ -43,6 +43,10 @@ _METHOD_ACTIONS: Final[dict[QuantizationMethod, QuantizationAction]] = {
     "int7_convrot_mse": "int7_convrot_mse",
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
+    "w4a8": "w4a8",
+    "w6a8": "w6a8",
+    "w3a8": "w3a8",
+    "w5a8": "w5a8",
 }
 
 MEASURED_METHODS: Final[frozenset[QuantizationMethod]] = frozenset(
@@ -63,10 +67,18 @@ SUPPORTED_METHODS: Final[frozenset[QuantizationMethod]] = frozenset(
         "int7_convrot_mse",
         "convrot_w4a4",
         "convrot_w4a4_mse",
+        "w4a8",
+        "w6a8",
+        "w3a8",
+        "w5a8",
     ),
 )
 
 _AUDIT_FORMAT_VERSION: Final[int] = 8
+# Methods added within format version 8; older reports omit them.
+_LATER_METHODS: Final[frozenset[QuantizationMethod]] = frozenset(
+    ("int8_convrot_mse", "w4a8", "w6a8", "w3a8", "w5a8")
+)
 _KNAPSACK_BUDGET_UNIT_BYTES: Final[int] = 1 << 20
 
 
@@ -360,18 +372,17 @@ def _validated_results(
             raise ValueError("Weight audit contains an invalid weight_l2_sq.")
         if result["tensor_name"] in tensor_names:
             raise ValueError("Weight audit contains duplicate tensor measurements.")
-        if frozenset(result["methods"]) not in (
-            MEASURED_METHODS,
-            MEASURED_METHODS - {"int8_convrot_mse"},
-        ):
+        recorded = frozenset(result["methods"])
+        if not recorded <= MEASURED_METHODS or MEASURED_METHODS - recorded - _LATER_METHODS:
             raise ValueError(
                 "Weight audit contains unsupported or incomplete method records."
             )
-        # Earlier version 8 reports have no INT8 MSE measurement.
-        result["methods"].setdefault("int8_convrot_mse", {
-            "relative_l2_error": None, "storage_bytes": None,
-            "storage_saved_bytes": None, "storage_saving_fraction": None,
-        })
+        # Earlier version 8 reports predate these methods; treat them as unmeasured.
+        for method in _LATER_METHODS:
+            result["methods"].setdefault(method, {
+                "relative_l2_error": None, "storage_bytes": None,
+                "storage_saved_bytes": None, "storage_saving_fraction": None,
+            })
         for method in MEASURED_METHODS:
             measurement = result["methods"].get(method)
             if not isinstance(measurement, dict):

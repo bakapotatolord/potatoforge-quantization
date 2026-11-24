@@ -253,6 +253,10 @@ class ServerAppTests(TestCase):
                 {"value": "int7_convrot_mse", "label": "INT7 ConvRot MSE"},
                 {"value": "convrot_w4a4", "label": "W4A4 ConvRot"},
                 {"value": "convrot_w4a4_mse", "label": "W4A4 ConvRot MSE"},
+                {"value": "w4a8", "label": "W4A8 ConvRot"},
+                {"value": "w6a8", "label": "W6A8 ConvRot"},
+                {"value": "w3a8", "label": "W3A8 ConvRot"},
+                {"value": "w5a8", "label": "W5A8 ConvRot"},
             ],
         )
 
@@ -351,6 +355,10 @@ class ServerAppTests(TestCase):
                         "int7_convrot_mse",
                         "convrot_w4a4",
                         "convrot_w4a4_mse",
+                        "w4a8",
+                        "w6a8",
+                        "w3a8",
+                        "w5a8",
                     ],
                 },
             )
@@ -441,6 +449,10 @@ class ServerAppTests(TestCase):
                         "int7_convrot_mse",
                         "convrot_w4a4",
                         "convrot_w4a4_mse",
+                        "w4a8",
+                        "w6a8",
+                        "w3a8",
+                        "w5a8",
                     ],
                 },
             )

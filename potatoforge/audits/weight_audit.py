@@ -1,7 +1,7 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, NamedTuple, TypedDict, cast
+from typing import Literal, NamedTuple, NotRequired, TypedDict, cast
 
 import torch
 
@@ -16,6 +16,10 @@ from ..planning import (
     plan_int7_rowwise,
     plan_int8_convrot,
     plan_int8_tensorwise,
+    plan_w3a8,
+    plan_w4a8,
+    plan_w5a8,
+    plan_w6a8,
     source_bytes,
 )
 from .all_comparison import (
@@ -42,6 +46,10 @@ QuantizationMethod = Literal[
     "int7_convrot_mse",
     "convrot_w4a4",
     "convrot_w4a4_mse",
+    "w4a8",
+    "w6a8",
+    "w3a8",
+    "w5a8",
 ]
 
 _AUDIT_METHOD_ACTIONS: dict[QuantizationMethod, str] = {
@@ -58,6 +66,10 @@ _AUDIT_METHOD_ACTIONS: dict[QuantizationMethod, str] = {
     "int7_convrot_mse": "int7_convrot_mse",
     "convrot_w4a4": "convrot_w4a4",
     "convrot_w4a4_mse": "convrot_w4a4_mse",
+    "w4a8": "w4a8",
+    "w6a8": "w6a8",
+    "w3a8": "w3a8",
+    "w5a8": "w5a8",
 }
 
 AUDIT_METHODS: tuple[QuantizationMethod, ...] = tuple(_AUDIT_METHOD_ACTIONS)
@@ -126,6 +138,10 @@ class MethodAudits(NamedTuple):
     int7_convrot_mse: MethodAudit
     convrot_w4a4: MethodAudit
     convrot_w4a4_mse: MethodAudit
+    w4a8: MethodAudit
+    w6a8: MethodAudit
+    w3a8: MethodAudit
+    w5a8: MethodAudit
 
 
 class ErrorDeltas(NamedTuple):
@@ -175,6 +191,10 @@ class MethodAuditsRecord(TypedDict):
     int7_convrot_mse: MethodAuditRecord
     convrot_w4a4: MethodAuditRecord
     convrot_w4a4_mse: MethodAuditRecord
+    w4a8: NotRequired[MethodAuditRecord]
+    w6a8: NotRequired[MethodAuditRecord]
+    w3a8: NotRequired[MethodAuditRecord]
+    w5a8: NotRequired[MethodAuditRecord]
 
 
 class ErrorDeltasRecord(TypedDict):
@@ -291,6 +311,10 @@ def _audit_weight(
     int7_convrot_plan = None
     int7_convrot_mse_plan = None
     w4a4_plan = None
+    w4a8_plan = None
+    w6a8_plan = None
+    w3a8_plan = None
+    w5a8_plan = None
 
     if (
         "int6" in methods and weights.shape[1] % 4 == 0
@@ -317,6 +341,14 @@ def _audit_weight(
             int7_convrot_mse_plan = plan_int7_convrot(tensor_name, descriptor)
         if "convrot_w4a4" in methods or "convrot_w4a4_mse" in methods:
             w4a4_plan = plan_convrot_w4a4(tensor_name, descriptor)
+        if "w4a8" in methods:
+            w4a8_plan = plan_w4a8(tensor_name, descriptor)
+        if "w6a8" in methods:
+            w6a8_plan = plan_w6a8(tensor_name, descriptor)
+        if "w3a8" in methods:
+            w3a8_plan = plan_w3a8(tensor_name, descriptor)
+        if "w5a8" in methods:
+            w5a8_plan = plan_w5a8(tensor_name, descriptor)
 
     methods = MethodAudits(
         bf16=_method_audit(0.0, bf16_bytes, bf16_bytes),
@@ -397,6 +429,26 @@ def _audit_weight(
         convrot_w4a4_mse=_method_audit(
             comparison.w4a4_mse_relative_l2_error,
             None if w4a4_plan is None else w4a4_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        w4a8=_method_audit(
+            comparison.w4a8_relative_l2_error,
+            None if w4a8_plan is None else w4a8_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        w6a8=_method_audit(
+            comparison.w6a8_relative_l2_error,
+            None if w6a8_plan is None else w6a8_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        w3a8=_method_audit(
+            comparison.w3a8_relative_l2_error,
+            None if w3a8_plan is None else w3a8_plan.estimated_bytes,
+            bf16_bytes,
+        ),
+        w5a8=_method_audit(
+            comparison.w5a8_relative_l2_error,
+            None if w5a8_plan is None else w5a8_plan.estimated_bytes,
             bf16_bytes,
         ),
     )
@@ -705,6 +757,10 @@ def print_weight_audit_table(
         "C-INT7 MSE KiB",
         "W4A4 KiB",
         "W4A4 MSE KiB",
+        "W4A8 KiB",
+        "W6A8 KiB",
+        "W3A8 KiB",
+        "W5A8 KiB",
         f"{source_dtype} err",
         "INT8 err",
         "INT6 err",
@@ -719,6 +775,10 @@ def print_weight_audit_table(
         "C-INT7 MSE err",
         "W4A4 err",
         "W4A4 MSE err",
+        "W4A8 err",
+        "W6A8 err",
+        "W3A8 err",
+        "W5A8 err",
         "d6-I",
         "d7-I",
         "dC-I",
@@ -756,6 +816,10 @@ def print_weight_audit_table(
                 _format_kib(methods["int7_convrot_mse"]["storage_bytes"]),
                 _format_kib(methods["convrot_w4a4"]["storage_bytes"]),
                 _format_kib(methods["convrot_w4a4_mse"]["storage_bytes"]),
+                _format_kib(methods.get("w4a8", {}).get("storage_bytes")),
+                _format_kib(methods.get("w6a8", {}).get("storage_bytes")),
+                _format_kib(methods.get("w3a8", {}).get("storage_bytes")),
+                _format_kib(methods.get("w5a8", {}).get("storage_bytes")),
                 _format_error(methods["bf16"]["relative_l2_error"]),
                 _format_error(methods["int8"]["relative_l2_error"]),
                 _format_error(methods["int6"]["relative_l2_error"]),
@@ -786,6 +850,10 @@ def print_weight_audit_table(
                 _format_error(
                     methods["convrot_w4a4_mse"]["relative_l2_error"]
                 ),
+                _format_error(methods.get("w4a8", {}).get("relative_l2_error")),
+                _format_error(methods.get("w6a8", {}).get("relative_l2_error")),
+                _format_error(methods.get("w3a8", {}).get("relative_l2_error")),
+                _format_error(methods.get("w5a8", {}).get("relative_l2_error")),
                 _format_error(
                     deltas["int6_vs_int8"],
                     signed=True,

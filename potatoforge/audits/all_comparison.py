@@ -35,6 +35,10 @@ from ..quantization.int7_rowwise import (
     quantize_int7_convrot_packed,
     quantize_int7_rowwise,
 )
+from ..quantization.w3a8 import dequantize_w3a8, quantize_w3a8
+from ..quantization.w4a8 import dequantize_w4a8, quantize_w4a8
+from ..quantization.w5a8 import dequantize_w5a8, quantize_w5a8
+from ..quantization.w6a8 import dequantize_w6a8, quantize_w6a8
 from ..quantization.int8_tensorwise import (
     dequantize_int8_convrot,
     dequantize_int8_tensorwise,
@@ -93,6 +97,10 @@ class AllQuantizationComparison(NamedTuple):
     int7_convrot_mse_relative_l2_error: float | None
     w4a4_relative_l2_error: float | None
     w4a4_mse_relative_l2_error: float | None
+    w4a8_relative_l2_error: float | None = None
+    w6a8_relative_l2_error: float | None = None
+    w3a8_relative_l2_error: float | None = None
+    w5a8_relative_l2_error: float | None = None
 
 
 def _dequantize_int6_convrot_for_device(
@@ -177,6 +185,10 @@ def compare_all_reconstructions(
                 "int7_convrot_mse",
                 "convrot_w4a4",
                 "convrot_w4a4_mse",
+                "w4a8",
+                "w6a8",
+                "w3a8",
+                "w5a8",
             )
         )
         if methods is None
@@ -364,6 +376,30 @@ def compare_all_reconstructions(
             original_float, w4a4_mse_reconstructed, source_l2
         )
 
+    w4a8_error = None
+    if "w4a8" in methods:
+        w4a8_error = _relative_l2_error_from_float(
+            original_float, dequantize_w4a8(quantize_w4a8(weights, device=device)), source_l2
+        )
+
+    w6a8_error = None
+    if "w6a8" in methods:
+        w6a8_error = _relative_l2_error_from_float(
+            original_float, dequantize_w6a8(quantize_w6a8(weights, device=device)), source_l2
+        )
+
+    w3a8_error = None
+    if "w3a8" in methods:
+        w3a8_error = _relative_l2_error_from_float(
+            original_float, dequantize_w3a8(quantize_w3a8(weights, device=device)), source_l2
+        )
+
+    w5a8_error = None
+    if "w5a8" in methods:
+        w5a8_error = _relative_l2_error_from_float(
+            original_float, dequantize_w5a8(quantize_w5a8(weights, device=device)), source_l2
+        )
+
     return AllQuantizationComparison(
         int8_relative_l2_error=int8_error,
         int6_relative_l2_error=int6_error,
@@ -378,4 +414,8 @@ def compare_all_reconstructions(
         int7_convrot_mse_relative_l2_error=int7_convrot_mse_error,
         w4a4_relative_l2_error=w4a4_error,
         w4a4_mse_relative_l2_error=w4a4_mse_error,
+        w4a8_relative_l2_error=w4a8_error,
+        w6a8_relative_l2_error=w6a8_error,
+        w3a8_relative_l2_error=w3a8_error,
+        w5a8_relative_l2_error=w5a8_error,
     )
