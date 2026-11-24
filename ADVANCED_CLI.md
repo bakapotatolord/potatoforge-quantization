@@ -59,6 +59,44 @@ LoRA targets use an exact source-name match first, then one unique
 dot-boundary suffix match. Missing or ambiguous matches fail before writing.
 The merger never overwrites the source or an existing output artifact.
 
+## Extract a LoRA from a fine-tune
+
+Compress the difference between a fine-tuned checkpoint and its base into a
+LoRA. Tensors are matched by name (key prefixes such as `model.diffusion_model.`
+are detected automatically), and either checkpoint can be float or ComfyUI
+`int8_tensorwise` / ConvRot; quantized weights are dequantized and un-rotated
+before the difference is taken. The delta is factored with a truncated SVD, so
+`base + LoRA ~= tuned`, and `alpha` equals the rank so strength 1.0 applies the
+full extracted delta.
+
+```powershell
+uv run potatoforge lora extract `
+    path\to\base.safetensors `
+    path\to\tuned.safetensors `
+    path\to\tuned_delta_r{rank}.safetensors `
+    --rank 32 --rank 64 `
+    --report reports\tuned-delta.json
+```
+
+- Several `--rank` values are written from one factorization; use `{rank}` in
+  the output path. A smaller rank is the best truncation of the larger one.
+- `--energy 0.9 --rank 128` picks, per tensor, the smallest rank that captures
+  90% of that tensor's delta energy, capped at 128.
+- The default keeps fused tensors fused (for example `proj.qkv`), which
+  `lora merge` accepts against a source that stores the fused weight. Pass
+  `--split-fused qkv:q,k,v` for runtimes such as ComfyUI whose LoRA loaders
+  expect separate q/k/v keys; that variant cannot be merged into a source that
+  stores a fused `qkv` weight.
+- `--include-diffs` also stores changed non-matrix tensors (norm weights,
+  biases) as `.diff` tensors, which `lora merge` supports.
+- Unchanged tensors, shape mismatches, non-weight tensors, and names present in
+  only one file are listed in the report. Nothing is overwritten.
+
+Extracted LoRAs combine with `lora merge`, so several fine-tunes can be merged
+into one base at chosen strengths. Ranks well below the delta's true rank keep
+the dominant shift and drop fine detail; validate generated images, not only
+the reported `energy_captured`, which measures weight-space error.
+
 ## Quantize or estimate
 
 Run a profile-driven streaming conversion:

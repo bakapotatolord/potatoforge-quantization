@@ -63,6 +63,12 @@ from .extraction import extract_tensors
 from .headers.header_reader import read_header_from_safetensors
 from .headers.source_header import read_source_model_header
 from .lora.lora_discovery import inspect_adapter_header
+from .lora.lora_extract import (
+    ExtractionOptions,
+    extract_lora,
+    parse_split_rule,
+    summarize as summarize_lora_extraction,
+)
 from .lora.lora_merge import merge_bf16_adapters
 from .krea2_mlp_pruning import (
     Krea2MLPPrunePlan,
@@ -112,7 +118,7 @@ lora_app = typer.Typer(
     no_args_is_help=True,
     help=(
         "Consume a source checkpoint and LoRA files and produce an "
-        "unquantized merged checkpoint."
+        "unquantized merged checkpoint, or extract a LoRA from a fine-tune."
     ),
 )
 profile_app = typer.Typer(
@@ -150,7 +156,7 @@ app.add_typer(
     name="inspect",
     short_help="Inspect checkpoints and LoRA files.",
 )
-app.add_typer(lora_app, name="lora", short_help="Merge LoRA files.")
+app.add_typer(lora_app, name="lora", short_help="Merge or extract LoRA files.")
 app.add_typer(
     profile_app,
     name="profile",
@@ -473,6 +479,106 @@ def merge_lora(
         )
 
     _run("merge-lora", action)
+
+
+@lora_app.command("extract")
+def extract_lora_command(
+    base_path: Path = typer.Argument(..., help="Base checkpoint."),
+    tuned_path: Path = typer.Argument(..., help="Fine-tuned checkpoint."),
+    output_path: Path = typer.Argument(
+        ..., help="Output LoRA; include {rank} when using several --rank values."
+    ),
+    rank: list[int] = typer.Option(
+        [64], "--rank", help="LoRA rank; repeat to write several ranks in one pass."
+    ),
+    energy: float | None = typer.Option(
+        None,
+        help=(
+            "Adaptive rank: per tensor, the smallest rank capturing this "
+            "share (0-1) of the delta energy. --rank is then the per-tensor cap."
+        ),
+    ),
+    split_fused: list[str] = typer.Option(
+        [],
+        "--split-fused",
+        help="Factor a fused tensor as separate LoRAs, e.g. qkv:q,k,v.",
+    ),
+    key_prefix: str = typer.Option(
+        "diffusion_model.", help="Prefix written onto LoRA keys."
+    ),
+    base_prefix: str | None = typer.Option(
+        None, help="Strip this prefix from base keys (auto-detected by default)."
+    ),
+    tuned_prefix: str | None = typer.Option(
+        None, help="Strip this prefix from tuned keys (auto-detected by default)."
+    ),
+    include: str | None = typer.Option(None, help="Regex; only matching tensors."),
+    exclude: str | None = typer.Option(None, help="Regex; skip matching tensors."),
+    min_relative_delta: float = typer.Option(
+        1e-4, help="Skip tensors whose delta/base norm ratio is at or below this."
+    ),
+    include_diffs: bool = typer.Option(
+        False, help="Also store changed non-matrix tensors (norms, biases) as .diff."
+    ),
+    dtype: Literal["fp16", "bf16", "fp32"] = typer.Option(
+        "fp16", help="Stored LoRA dtype."
+    ),
+    device: str | None = typer.Option(
+        None, help="Compute device; defaults to cuda when available."
+    ),
+    report: Path | None = typer.Option(None, help="Optional JSON report path."),
+    overwrite_report: bool = typer.Option(
+        False, help="Replace an existing JSON report."
+    ),
+) -> None:
+    """Extract a LoRA from a fine-tune relative to its base checkpoint."""
+    def action() -> None:
+        if report is not None:
+            _preflight_audit_output(report, overwrite_report)
+        options = ExtractionOptions(
+            ranks=tuple(rank),
+            energy=energy,
+            key_prefix=key_prefix,
+            base_prefix=base_prefix,
+            tuned_prefix=tuned_prefix,
+            include=include,
+            exclude=exclude,
+            split=tuple(parse_split_rule(rule) for rule in split_fused),
+            min_relative_delta=min_relative_delta,
+            include_diffs=include_diffs,
+            dtype=dtype,
+            device=device,
+        )
+        result = extract_lora(
+            base_path,
+            tuned_path,
+            output_path,
+            options,
+            on_tensor_started=_print_progress,
+        )
+        summary = summarize_lora_extraction(result)
+        if report is not None:
+            _write_json(
+                report,
+                {
+                    "summary": summary,
+                    "skipped": result.skipped,
+                    "unmatched_base": result.unmatched_base,
+                    "unmatched_tuned": result.unmatched_tuned,
+                    "tensors": [vars(tensor) for tensor in result.tensors],
+                },
+                overwrite_report,
+            )
+        _finish(
+            {
+                "outputs": json.dumps(summary, indent=2),
+                "skipped_tensors": len(result.skipped),
+                "unmatched_base": len(result.unmatched_base),
+                "unmatched_tuned": len(result.unmatched_tuned),
+            },
+        )
+
+    _run("extract-lora", action)
 
 
 @app.command("audit", hidden=True)

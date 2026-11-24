@@ -249,6 +249,7 @@ sums, so its cross-file metric is a `forward_count`-weighted
 ## Kroma GPTQ v1
 
 `convrot_w4a4_mse_gptq` uses model-wide logical-input Gram statistics to
+| Extract a LoRA from a fine-tune | `lora extract` | LoRA safetensors file(s) |
 compensate W4A4 rounding errors within each Gram block. Collect and finalize a
 BD512 JSON/Safetensors calibration pair with the ComfyUI PotatoForge GPTQ
 calibration nodes. Supply the JSON path with `--gptq-calibration`; the

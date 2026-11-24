@@ -64,7 +64,7 @@ class TestCli(unittest.TestCase):
                 "Consume safetensors or LoRA headers",
             ),
             ("lora",): (
-                {"merge"},
+                {"merge", "extract"},
                 "Consume a source checkpoint and LoRA files",
             ),
             ("profile",): (
