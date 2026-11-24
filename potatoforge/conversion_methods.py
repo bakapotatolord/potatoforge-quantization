@@ -34,9 +34,13 @@ from .planning import (
     plan_int7_rowwise,
     plan_int8_convrot,
     plan_int8_tensorwise,
+    plan_w3a8,
     plan_w4a8,
+    plan_w5a8,
     plan_w6a8,
+    W3A8_MARKER_PAYLOAD,
     W4A8_MARKER_PAYLOAD,
+    W5A8_MARKER_PAYLOAD,
     W6A8_MARKER_PAYLOAD,
 )
 from .quantization import (
@@ -48,7 +52,9 @@ from .quantization.convrot_w4a4 import (
     quantize_convrot_w4a4,
     quantize_convrot_w4a4_mse,
 )
+from .quantization.w3a8 import quantize_w3a8
 from .quantization.w4a8 import quantize_w4a8
+from .quantization.w5a8 import quantize_w5a8
 from .quantization.w6a8 import quantize_w6a8
 from .quantization.int5_rowwise import (
     quantize_int5_convrot_mse_packed,
@@ -156,6 +162,32 @@ def _encode_int8(
     return EncodedQuantizedPayload(result.codes, result.scales)
 
 
+def _encode_w3a8(
+    weights: torch.Tensor,
+    device: str | torch.device,
+    record: TensorTiming | None,
+) -> EncodedQuantizedPayload:
+    result = _run_quantize(record, lambda: quantize_w3a8(weights, device=device))
+    return EncodedQuantizedPayload(
+        result.packed_codes,
+        result.group_scales,
+        extras=(result.channel_scales, result.codebook),
+    )
+
+
+def _encode_w5a8(
+    weights: torch.Tensor,
+    device: str | torch.device,
+    record: TensorTiming | None,
+) -> EncodedQuantizedPayload:
+    result = _run_quantize(record, lambda: quantize_w5a8(weights, device=device))
+    return EncodedQuantizedPayload(
+        result.packed_codes,
+        result.group_scales,
+        extras=(result.channel_scales,),
+    )
+
+
 def _encode_w4a8(
     weights: torch.Tensor,
     device: str | torch.device,
@@ -231,6 +263,8 @@ _METHOD_TABLE: tuple[tuple[Any, ...], ...] = (
                     _device_encoder("quantize_int7_convrot_mse_packed"))),
     ("w4a8", "W4A8 ConvRot", True, (), plan_w4a8, W4A8_MARKER_PAYLOAD, _encode_w4a8),
     ("w6a8", "W6A8 ConvRot", True, (), plan_w6a8, W6A8_MARKER_PAYLOAD, _encode_w6a8),
+    ("w3a8", "W3A8 ConvRot", True, (), plan_w3a8, W3A8_MARKER_PAYLOAD, _encode_w3a8),
+    ("w5a8", "W5A8 ConvRot", True, (), plan_w5a8, W5A8_MARKER_PAYLOAD, _encode_w5a8),
 )
 
 _METHODS: tuple[ConversionMethodDefinition, ...] = tuple(

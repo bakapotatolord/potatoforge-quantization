@@ -122,6 +122,23 @@ def quantize_in_chunks(
     return tuple(torch.cat(fields).cpu() for fields in zip(*parts))
 
 
+def pack_plane(codes: torch.Tensor, shift: int, width: int) -> torch.Tensor:
+    """``width``-bit field ``(codes >> shift)`` of every code, 8/width codes per
+    byte (column c in byte c // (8/width) at bit width * (c % (8/width)))."""
+    per_byte = 8 // width
+    mask = (1 << width) - 1
+    plane = (codes[:, 0::per_byte] >> shift) & mask
+    for index in range(1, per_byte):
+        plane |= ((codes[:, index::per_byte] >> shift) & mask) << (width * index)
+    return plane.to(torch.int8)
+
+
+def unpack_plane(plane: torch.Tensor, columns: int, width: int) -> torch.Tensor:
+    """Inverse of ``pack_plane``: int32 bytes [N, columns*width/8] -> int32 [N, columns]."""
+    shifts = torch.arange(0, 8, width, device=plane.device, dtype=torch.int32)
+    return ((plane.unsqueeze(-1) >> shifts) & ((1 << width) - 1)).reshape(plane.shape[0], columns)
+
+
 def unrotate(int8_grid: torch.Tensor, channel_scales: torch.Tensor) -> torch.Tensor:
     """Float32 weights in the original basis. The normalized Hadamard is symmetric
     and orthogonal, so applying it again inverts the rotation."""

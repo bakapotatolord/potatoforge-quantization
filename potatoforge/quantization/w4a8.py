@@ -46,17 +46,17 @@ def default_w4a8_codebook(device: torch.device | str = "cpu") -> torch.Tensor:
     return torch.tensor(FIXED_W4A8_CODEBOOK, dtype=torch.float32, device=device)
 
 
-def _fit_codebook(normalized: torch.Tensor) -> torch.Tensor:
+def _fit_codebook(normalized: torch.Tensor, levels: int = W4A8_CODEBOOK_LEVELS) -> torch.Tensor:
     samples = normalized.flatten()
     if samples.numel() > _FIT_SAMPLE:
         generator = torch.Generator(device=samples.device).manual_seed(0)
         indices = torch.randint(0, samples.numel(), (_FIT_SAMPLE,), device=samples.device, generator=generator)
         samples = samples[indices]
-    codebook = torch.quantile(samples, torch.linspace(0, 1, W4A8_CODEBOOK_LEVELS, device=samples.device))
+    codebook = torch.quantile(samples, torch.linspace(0, 1, levels, device=samples.device))
     for _ in range(_FIT_ITERATIONS):
         assignments = (samples.unsqueeze(-1) - codebook).abs().argmin(-1)
         updated = codebook.clone()
-        for index in range(W4A8_CODEBOOK_LEVELS):
+        for index in range(levels):
             selected = assignments == index
             if selected.any():
                 updated[index] = samples[selected].mean()
@@ -64,21 +64,25 @@ def _fit_codebook(normalized: torch.Tensor) -> torch.Tensor:
     return codebook.contiguous()
 
 
-def _codebook_for(normalized: torch.Tensor) -> torch.Tensor:
-    """Kitchen's frozen table unless the sample is heavy-tailed. The sampling
-    generator lives on the tensor's device, so a fitted table can differ between
-    CPU and CUDA runs; real model layers stay on the frozen table."""
+def _codebook_for(
+    normalized: torch.Tensor,
+    frozen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Kitchen's frozen table (16 levels unless ``frozen`` gives another size,
+    as W3A8's 8) unless the sample is heavy-tailed. The sampling generator lives
+    on the tensor's device, so a fitted table can differ between CPU and CUDA
+    runs; real model layers stay on the frozen table."""
     x = normalized.flatten()
     if x.numel() > _KURTOSIS_SAMPLE:
         generator = torch.Generator(device=x.device).manual_seed(0)
         x = x[torch.randint(0, x.numel(), (_KURTOSIS_SAMPLE,), device=x.device, generator=generator)]
     excess_kurtosis = ((x - x.mean()) / (x.std() + 1e-9)).pow(4).mean() - 3.0
     if excess_kurtosis.item() <= _GATE_KURTOSIS:
-        return default_w4a8_codebook(normalized.device)
-    return _fit_codebook(normalized)
+        return default_w4a8_codebook(normalized.device) if frozen is None else frozen.to(normalized.device)
+    return _fit_codebook(normalized, W4A8_CODEBOOK_LEVELS if frozen is None else frozen.numel())
 
 
-def _decide_codebook(weights: torch.Tensor) -> torch.Tensor:
+def _decide_codebook(weights: torch.Tensor, frozen: torch.Tensor | None = None) -> torch.Tensor:
     """One table for the whole tensor from evenly strided rows spanning every chunk."""
     rows, columns = weights.shape
     max_rows = max(1, _CODEBOOK_SAMPLE_ELEMS // columns)
@@ -88,7 +92,7 @@ def _decide_codebook(weights: torch.Tensor) -> torch.Tensor:
     else:
         sample = weights
     groups = core.grouped(apply_hadamard_rotation(sample.contiguous(), CONVROT_GROUP_SIZE))
-    return _codebook_for(groups / groups.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8))
+    return _codebook_for(groups / groups.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8), frozen)
 
 
 def _assign_codes(normalized: torch.Tensor, codebook: torch.Tensor) -> torch.Tensor:

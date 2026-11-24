@@ -30,6 +30,8 @@ class TestConversionMethods(unittest.TestCase):
                 "convrot_w4a4_mse_gptq",
                 "w4a8",
                 "w6a8",
+                "w3a8",
+                "w5a8",
             },
         )
         self.assertEqual(
@@ -48,6 +50,8 @@ class TestConversionMethods(unittest.TestCase):
                 "int7_convrot_mse",
                 "w4a8",
                 "w6a8",
+                "w3a8",
+                "w5a8",
             ),
         )
 

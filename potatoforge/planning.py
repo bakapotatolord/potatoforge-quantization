@@ -266,9 +266,13 @@ def _grouped_int8_marker(format_name: str) -> bytes:
     }).encode("utf-8")
 
 
+W3A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("w3a8_int8")
 W4A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("asym_w4a8_int8")
+W5A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("w5a8_int8")
 W6A8_MARKER_PAYLOAD: Final[bytes] = _grouped_int8_marker("w6a8_int8")
+W3A8_MARKER = json.loads(W3A8_MARKER_PAYLOAD)
 W4A8_MARKER = json.loads(W4A8_MARKER_PAYLOAD)
+W5A8_MARKER = json.loads(W5A8_MARKER_PAYLOAD)
 W6A8_MARKER = json.loads(W6A8_MARKER_PAYLOAD)
 
 
@@ -304,8 +308,16 @@ def _plan_grouped_int8(
     return QuantizedPlan(tuple(outputs), sum(tensor.byte_count for tensor in outputs))
 
 
+def plan_w3a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
+    return _plan_grouped_int8(tensor_name, descriptor, "W3A8", 3, W3A8_MARKER_PAYLOAD, 8)
+
+
 def plan_w4a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
     return _plan_grouped_int8(tensor_name, descriptor, "W4A8", 4, W4A8_MARKER_PAYLOAD, 16)
+
+
+def plan_w5a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
+    return _plan_grouped_int8(tensor_name, descriptor, "W5A8", 5, W5A8_MARKER_PAYLOAD, None)
 
 
 def plan_w6a8(tensor_name: str, descriptor: TensorDescriptor) -> QuantizedPlan:
