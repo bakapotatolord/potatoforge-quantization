@@ -24,6 +24,16 @@ _MSE_COARSE_MULTIPLIERS: tuple[float, ...] = tuple(
 _MSE_FINE_STEPS = 16
 
 
+def divide_exactly(values: torch.Tensor, divisor: float) -> torch.Tensor:
+    """``values / divisor`` rounded as on the CPU.
+
+    CUDA divides by a Python scalar as a multiply by its FP32 reciprocal,
+    which can round differently; dividing by a same-device tensor is exact,
+    so CUDA scales match the CPU bit for bit.
+    """
+    return values / torch.tensor(divisor, dtype=values.dtype, device=values.device)
+
+
 def validate_rowwise_weight_metadata(
     weights: torch.Tensor,
     *,
@@ -136,7 +146,7 @@ def select_rowwise_absmax_scale(
     return torch.where(
         max_abs == 0,
         torch.ones_like(max_abs),
-        (max_abs / qmax).clamp_min(1e-30),
+        divide_exactly(max_abs, qmax).clamp_min(1e-30),
     )
 
 
@@ -260,7 +270,7 @@ def select_rowwise_mse_scale(
     base_scale = torch.where(
         zero_rows,
         torch.ones_like(max_abs),
-        (max_abs / qmax).clamp_min(1e-30),
+        divide_exactly(max_abs, qmax).clamp_min(1e-30),
     )
     if bool(zero_rows.all()):
         return base_scale
@@ -318,7 +328,7 @@ def quantize_symmetric_rows(
             _timing_device,
         ):
             max_abs = math_values.abs().amax(dim=1, keepdim=True)
-            scales = max_abs / qmax
+            scales = divide_exactly(max_abs, qmax)
             if zero_scale is None:
                 scales = scales.clamp_min(1e-30)
             else:
@@ -350,13 +360,10 @@ def quantize_symmetric_rows(
             "scale",
             _timing_device,
         ):
-            scales = (
-                math_values.abs()
-                .amax(dim=1, keepdim=True)
-                .float()
-                .div(qmax)
-                .clamp_min(1e-30)
-            )
+            scales = divide_exactly(
+                math_values.abs().amax(dim=1, keepdim=True).float(),
+                qmax,
+            ).clamp_min(1e-30)
 
         with timed_internal_stage(
             internal_timings,

@@ -17,7 +17,7 @@ from typing import Final
 import torch
 
 from .hadamard import CONVROT_GROUP_SIZE, apply_hadamard_rotation
-from .rowwise import resolve_convrot_device
+from .rowwise import divide_exactly, resolve_convrot_device
 
 GROUP_SIZE: Final[int] = 16
 _ALS_ITERS: Final[int] = 2
@@ -78,7 +78,7 @@ def stored_scales(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-row float32 scale onto the INT8 grid and fp8 group scales relative to it."""
     shifted = level_table[codes] * group_scale
-    channel_scales = (shifted.abs().amax(dim=(1, 2)) / 127.0).clamp(min=1e-8)
+    channel_scales = divide_exactly(shifted.abs().amax(dim=(1, 2)), 127.0).clamp(min=1e-8)
     group_scales = (group_scale.squeeze(-1) / channel_scales.unsqueeze(1)).to(torch.float8_e4m3fn)
     return channel_scales, group_scales
 

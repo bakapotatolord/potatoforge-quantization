@@ -10,7 +10,7 @@ from .hadamard import (
     apply_hadamard_rotation,
     cached_cuda_hadamard_matrix,
 )
-from .rowwise import resolve_convrot_device
+from .rowwise import divide_exactly, resolve_convrot_device
 from ..timing import timed_internal_stage
 from .mse_search_native import (
     fused_rowwise_mse_coarse_search,
@@ -102,7 +102,7 @@ def _w4_absmax_and_scale(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     math_weights = _w4_math_weights(weights)
     max_abs = math_weights.abs().amax(dim=1, keepdim=True).float()
-    return max_abs, max_abs.div(_W4_QMAX).clamp_min(_W4_SCALE_FLOOR)
+    return max_abs, divide_exactly(max_abs, _W4_QMAX).clamp_min(_W4_SCALE_FLOOR)
 
 
 def _select_w4_absmax_scale(weights: torch.Tensor) -> torch.Tensor:

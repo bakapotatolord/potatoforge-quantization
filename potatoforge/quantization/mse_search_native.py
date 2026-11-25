@@ -14,6 +14,7 @@ from functools import lru_cache
 
 import torch
 
+from .rowwise import divide_exactly
 from .w4a4_mse_native import _candidate_library_paths
 
 _SYMBOL = "potatoforge_rowwise_mse_search"
@@ -155,7 +156,7 @@ def fused_rowwise_mse_scale(
     base_scale = torch.where(
         zero_rows,
         torch.ones_like(max_abs),
-        (max_abs / qmax).clamp_min(ROWWISE_MSE_SCALE_FLOOR),
+        divide_exactly(max_abs, qmax).clamp_min(ROWWISE_MSE_SCALE_FLOOR),
     )
     if bool(zero_rows.all()):
         return base_scale

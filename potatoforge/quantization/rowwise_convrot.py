@@ -25,6 +25,7 @@ from .mse_search_native import (
 )
 from .rowwise import (
     dequantize_rowwise,
+    divide_exactly,
     quantize_rows_with_scale,
     quantize_symmetric_rows,
     resolve_convrot_device,
@@ -294,7 +295,7 @@ class RowwiseFormat:
             base_scale = torch.where(
                 zero_rows,
                 torch.ones_like(max_abs),
-                (max_abs / self.qmax).clamp_min(1e-30),
+                divide_exactly(max_abs, self.qmax).clamp_min(1e-30),
             )
         with timed_internal_stage(internal_timings, "zero_row_check", device):
             all_zero = bool(zero_rows.all())
