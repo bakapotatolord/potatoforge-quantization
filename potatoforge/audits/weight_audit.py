@@ -24,6 +24,7 @@ from ..planning import (
 )
 from .all_comparison import (
     compare_all_reconstructions,
+    l2_norm,
 )
 from ..conversion_methods import get_conversion_method
 from ..quantization.hadamard import CONVROT_GROUP_SIZE
@@ -285,7 +286,7 @@ def _audit_weight(
 ) -> WeightAuditResult:
     methods = _normalise_audit_methods(methods, include_plain_methods)
     original_float = weights.float()
-    source_l2 = torch.linalg.vector_norm(original_float)
+    source_l2 = l2_norm(original_float)
     comparison = compare_all_reconstructions(
         weights,
         original_float=original_float,

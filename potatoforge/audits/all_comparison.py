@@ -14,6 +14,7 @@ from ..quantization.int5_rowwise import (
     quantize_int5_convrot,
     quantize_int5_convrot_mse,
     quantize_int5_convrot_mse_packed,
+    quantize_int5_convrot_packed,
 )
 from ..quantization.int6_rowwise import (
     dequantize_int6_convrot,
@@ -48,6 +49,21 @@ from ..quantization.int8_tensorwise import (
 )
 
 
+def l2_norm(values: torch.Tensor, other: torch.Tensor | None = None) -> torch.Tensor:
+    """Accumulate FP32 squared values in FP64 with bounded row temporaries."""
+    if values.ndim == 0:
+        values = values.reshape(1)
+        if other is not None:
+            other = other.reshape(1)
+    squared_sum = torch.zeros((), dtype=torch.float64, device=values.device)
+    for start in range(0, values.shape[0], 1024):
+        chunk = values[start:start + 1024].float()
+        if other is not None:
+            chunk = chunk - other[start:start + 1024].float()
+        squared_sum += chunk.square().sum(dtype=torch.float64)
+    return squared_sum.sqrt()
+
+
 def _relative_l2_error_from_float(
     original_float: torch.Tensor,
     reconstructed: torch.Tensor,
@@ -55,9 +71,7 @@ def _relative_l2_error_from_float(
 ) -> float:
     original_float = original_float.to(device=reconstructed.device)
     source_l2 = source_l2.to(device=reconstructed.device)
-    error_norm = torch.linalg.vector_norm(
-        original_float - reconstructed.float()
-    )
+    error_norm = l2_norm(original_float, reconstructed)
 
     if source_l2.item() == 0:
         if error_norm == 0:
@@ -75,7 +89,7 @@ def relative_l2_error(original: torch.Tensor, reconstructed: torch.Tensor) -> fl
         )
 
     original_float = original.float()
-    source_l2 = torch.linalg.vector_norm(original_float)
+    source_l2 = l2_norm(original_float)
     return _relative_l2_error_from_float(
         original_float,
         reconstructed,
@@ -138,7 +152,7 @@ def _dequantize_int5_convrot_for_device(
         else quantize_int5_convrot_packed
     )
     packed = quantize_packed(weights, device=device)
-    return dequantize_int5_convrot_packed(packed)
+    return dequantize_int5_convrot_packed(packed, device=device)
 
 
 def _dequantize_int7_convrot_for_device(
@@ -158,6 +172,16 @@ def _dequantize_int7_convrot_for_device(
     )
     packed = quantize_packed(weights, device=device)
     return dequantize_int7_convrot_packed(packed, device=device)
+
+
+def _on_device(result, device: torch.device | None):
+    """Move a quantized result's tensors to ``device`` (None keeps them)."""
+    if device is None:
+        return result
+    return type(result)(*(
+        field.to(device) if isinstance(field, torch.Tensor) else field
+        for field in result
+    ))
 
 
 def compare_all_reconstructions(
@@ -197,7 +221,17 @@ def compare_all_reconstructions(
     if original_float is None:
         original_float = weights.float()
     if source_l2 is None:
-        source_l2 = torch.linalg.vector_norm(original_float)
+        source_l2 = l2_norm(original_float)
+    # On CUDA, keep the source, its norm and every reconstruction on the GPU:
+    # quantizers skip their uploads, and dequantization and error sums never
+    # run on the CPU or copy full matrices across. Plain INT8/INT6/INT7 divide
+    # exactly, so their CUDA codes match the CPU conversion bit for bit.
+    result_device = None
+    if torch.device(device).type == "cuda":
+        result_device = torch.device(device)
+        weights = weights.to(result_device)
+        original_float = original_float.to(result_device)
+        source_l2 = source_l2.to(result_device)
 
     int8_error = None
     if include_plain_methods and "int8" in methods:
@@ -274,15 +308,17 @@ def compare_all_reconstructions(
 
     int8_convrot_error = None
     if "int8_convrot" in methods:
-        int8_convrot_result = quantize_int8_convrot(weights, device=device)
+        int8_convrot_result = quantize_int8_convrot(weights, device=device, return_on_device=True)
         int8_convrot_reconstructed = dequantize_int8_convrot(int8_convrot_result)
         int8_convrot_error = _relative_l2_error_from_float(
             original_float, int8_convrot_reconstructed, source_l2
         )
+        del int8_convrot_result
+        del int8_convrot_reconstructed
 
     int8_convrot_mse_error = None
     if "int8_convrot_mse" in methods:
-        int8_convrot_mse_result = quantize_int8_convrot_mse(weights, device=device)
+        int8_convrot_mse_result = quantize_int8_convrot_mse(weights, device=device, return_on_device=True)
         int8_convrot_mse_reconstructed = dequantize_int8_convrot(int8_convrot_mse_result)
         int8_convrot_mse_error = _relative_l2_error_from_float(
             original_float, int8_convrot_mse_reconstructed, source_l2
@@ -301,6 +337,7 @@ def compare_all_reconstructions(
             int5_convrot_reconstructed,
             source_l2,
         )
+        del int5_convrot_reconstructed
 
     int5_convrot_mse_error = None
     if "int5_convrot_mse" in methods:
@@ -314,6 +351,7 @@ def compare_all_reconstructions(
             int5_convrot_mse_reconstructed,
             source_l2,
         )
+        del int5_convrot_mse_reconstructed
 
     int6_convrot_error = None
     if "int6_convrot" in methods:
@@ -321,6 +359,7 @@ def compare_all_reconstructions(
         int6_convrot_error = _relative_l2_error_from_float(
             original_float, int6_convrot_reconstructed, source_l2
         )
+        del int6_convrot_reconstructed
 
     int6_convrot_mse_error = None
     if "int6_convrot_mse" in methods:
@@ -334,6 +373,7 @@ def compare_all_reconstructions(
             int6_convrot_mse_reconstructed,
             source_l2,
         )
+        del int6_convrot_mse_reconstructed
 
     int7_convrot_error = None
     if "int7_convrot" in methods:
@@ -346,6 +386,7 @@ def compare_all_reconstructions(
             int7_convrot_reconstructed,
             source_l2,
         )
+        del int7_convrot_reconstructed
 
     int7_convrot_mse_error = None
     if "int7_convrot_mse" in methods:
@@ -359,45 +400,50 @@ def compare_all_reconstructions(
             int7_convrot_mse_reconstructed,
             source_l2,
         )
+        del int7_convrot_mse_reconstructed
 
     w4a4_error = None
     if "convrot_w4a4" in methods:
-        w4a4_result = quantize_convrot_w4a4(weights, device=device)
+        w4a4_result = quantize_convrot_w4a4(weights, device=device, return_on_device=True)
         w4a4_reconstructed = dequantize_convrot_w4a4(w4a4_result)
         w4a4_error = _relative_l2_error_from_float(
             original_float, w4a4_reconstructed, source_l2
         )
+        del w4a4_result
+        del w4a4_reconstructed
 
     w4a4_mse_error = None
     if "convrot_w4a4_mse" in methods:
-        w4a4_mse_result = quantize_convrot_w4a4_mse(weights, device=device)
+        w4a4_mse_result = quantize_convrot_w4a4_mse(weights, device=device, return_on_device=True)
         w4a4_mse_reconstructed = dequantize_convrot_w4a4(w4a4_mse_result)
         w4a4_mse_error = _relative_l2_error_from_float(
             original_float, w4a4_mse_reconstructed, source_l2
         )
+        del w4a4_mse_result
+        del w4a4_mse_reconstructed
 
     w4a8_error = None
     if "w4a8" in methods:
         w4a8_error = _relative_l2_error_from_float(
-            original_float, dequantize_w4a8(quantize_w4a8(weights, device=device)), source_l2
+            original_float, dequantize_w4a8(_on_device(quantize_w4a8(weights, device=device), result_device)), source_l2
         )
 
     w6a8_error = None
     if "w6a8" in methods:
         w6a8_error = _relative_l2_error_from_float(
-            original_float, dequantize_w6a8(quantize_w6a8(weights, device=device)), source_l2
+            original_float, dequantize_w6a8(_on_device(quantize_w6a8(weights, device=device), result_device)), source_l2
         )
 
     w3a8_error = None
     if "w3a8" in methods:
         w3a8_error = _relative_l2_error_from_float(
-            original_float, dequantize_w3a8(quantize_w3a8(weights, device=device)), source_l2
+            original_float, dequantize_w3a8(_on_device(quantize_w3a8(weights, device=device), result_device)), source_l2
         )
 
     w5a8_error = None
     if "w5a8" in methods:
         w5a8_error = _relative_l2_error_from_float(
-            original_float, dequantize_w5a8(quantize_w5a8(weights, device=device)), source_l2
+            original_float, dequantize_w5a8(_on_device(quantize_w5a8(weights, device=device), result_device)), source_l2
         )
 
     return AllQuantizationComparison(
