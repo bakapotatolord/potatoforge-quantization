@@ -137,6 +137,40 @@ def fused_rowwise_mse_coarse_search(
     return best_mse, best_multiplier
 
 
+def fused_rowwise_mse_scale(
+    weights: torch.Tensor,
+    *,
+    qmin: int,
+    qmax: int,
+) -> torch.Tensor | None:
+    """rowwise.select_rowwise_mse_scale on CUDA, or None when unavailable."""
+    if (
+        weights.device.type != "cuda"
+        or weights.dtype != torch.float32
+        or _load_search_function() is None
+    ):
+        return None
+    max_abs = weights.abs().amax(dim=1, keepdim=True)
+    zero_rows = max_abs == 0
+    base_scale = torch.where(
+        zero_rows,
+        torch.ones_like(max_abs),
+        (max_abs / qmax).clamp_min(ROWWISE_MSE_SCALE_FLOOR),
+    )
+    if bool(zero_rows.all()):
+        return base_scale
+    bounds = {"qmin": qmin, "qmax": qmax, "scale_floor": ROWWISE_MSE_SCALE_FLOOR}
+    coarse = fused_rowwise_mse_coarse_search(weights, base_scale, **bounds)
+    if coarse is None:
+        return None
+    _, multiplier = fused_rowwise_mse_fine_search(weights, base_scale, *coarse, **bounds)
+    return torch.where(
+        zero_rows,
+        base_scale,
+        base_scale * multiplier,
+    ).clamp_min(ROWWISE_MSE_SCALE_FLOOR)
+
+
 def fused_rowwise_mse_fine_search(
     weights: torch.Tensor,
     base_scale: torch.Tensor,

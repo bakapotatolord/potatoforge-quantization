@@ -30,7 +30,6 @@ from .rowwise import (
     resolve_convrot_device,
     run_rowwise_mse_coarse_search,
     run_rowwise_mse_fine_search,
-    select_rowwise_absmax_scale,
     select_rowwise_mse_scale,
     validate_convrot_input_width,
     validate_rowwise_finite_weights,
@@ -286,11 +285,18 @@ class RowwiseFormat:
         rotated = self._rotate_on_device(
             weights, device, internal_timings, time_validation=False
         )
+        weights_float = rotated.float()
         with timed_internal_stage(internal_timings, "scale_init", device):
-            base_scale = select_rowwise_absmax_scale(rotated, qmax=self.qmax)
+            # rowwise.select_rowwise_absmax_scale, keeping max_abs for the
+            # zero-row check instead of scanning the weights a second time.
+            max_abs = weights_float.abs().amax(dim=1, keepdim=True)
+            zero_rows = max_abs == 0
+            base_scale = torch.where(
+                zero_rows,
+                torch.ones_like(max_abs),
+                (max_abs / self.qmax).clamp_min(1e-30),
+            )
         with timed_internal_stage(internal_timings, "zero_row_check", device):
-            weights_float = rotated.float()
-            zero_rows = weights_float.abs().amax(dim=1, keepdim=True) == 0
             all_zero = bool(zero_rows.all())
 
         best_multiplier = torch.ones_like(base_scale)

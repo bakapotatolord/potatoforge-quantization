@@ -16,7 +16,7 @@ from .rowwise import (
     validate_convrot_input_width,
     validate_rowwise_finite_weights,
 )
-from .w4a4_mse_native import create_exact_mse_candidate
+from .mse_search_native import fused_rowwise_mse_scale
 
 
 Int8TensorwiseResult = RowwiseQuantizationResult
@@ -162,19 +162,6 @@ def _quantize_int8_with_scale(
     return Int8TensorwiseResult(codes.to(torch.int8), scales)
 
 
-def _calculate_int8_candidate_mse(
-    weights: torch.Tensor,
-    weights_float: torch.Tensor,
-    scales: torch.Tensor,
-) -> torch.Tensor:
-    scales = scales.float().clamp_min(1e-30)
-    # Search needs rounded values, not INT8 storage for every candidate.
-    codes = (weights / scales.to(weights.dtype)).round_().clamp_(-128, 127)
-    error = codes.detach().float()
-    error.mul_(scales).sub_(weights_float)
-    return error.square_().mean(dim=1, keepdim=True)
-
-
 def quantize_int8_convrot_mse(
     weights: torch.Tensor,
     *,
@@ -199,12 +186,9 @@ def quantize_int8_convrot_mse(
     del device_weights
     with timed_internal_stage(internal_timings, "mse_scale", timing_device):
         validate_rowwise_finite_weights(rotated_weights, format_name="INT8")
-        candidate_mse = create_exact_mse_candidate(rotated_weights, bits=8)
-        scales = select_rowwise_mse_scale(
-            rotated_weights, qmin=-128, qmax=127,
-            candidate_mse=candidate_mse if candidate_mse is not None else _calculate_int8_candidate_mse,
-        )
-        del candidate_mse
+        scales = fused_rowwise_mse_scale(rotated_weights, qmin=-128, qmax=127)
+        if scales is None:
+            scales = select_rowwise_mse_scale(rotated_weights, qmin=-128, qmax=127)
     with timed_internal_stage(internal_timings, "final_quantize", timing_device):
         result = _quantize_int8_with_scale(rotated_weights, scales)
     with timed_internal_stage(internal_timings, "finalize", timing_device):

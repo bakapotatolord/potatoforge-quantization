@@ -9,8 +9,8 @@ from .int7_packing import (
     pack_int7_row_major,
     unpack_int7_row_major,
 )
-from .rowwise_convrot import ConvRotPackedResult, RowwiseFormat, RowwiseResult
-from .w4a4_mse_native import create_exact_mse_candidate
+from .rowwise_convrot import ConvRotPackedResult, RowwiseFormat, RowwiseResult, native_mse_candidate
+from .w4a4_mse_native import load_int7_convrot_mse_candidate
 
 
 INT7_QMAX: Final[int] = 63
@@ -24,8 +24,8 @@ INT7 = RowwiseFormat(
     storage_qmin=INT7_QMIN,
     pack=pack_int7_row_major,
     unpack=lambda codes, shape: unpack_int7_row_major(Int7PackedResult(codes, shape)),
-    mse_candidate=lambda rotated, device: create_exact_mse_candidate(rotated, bits=7),
-    fused_mse_search=False,
+    mse_candidate=native_mse_candidate(load_int7_convrot_mse_candidate),
+    fused_mse_search=True,
 )
 
 Int7RowwiseResult = RowwiseResult

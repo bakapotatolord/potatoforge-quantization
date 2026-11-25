@@ -5,6 +5,7 @@ import torch
 
 from potatoforge.quantization import int8_tensorwise as int8
 from potatoforge.quantization.hadamard import apply_hadamard_rotation
+from potatoforge.quantization.rowwise import select_rowwise_mse_scale
 
 
 class TestInt8ConvRotMSE(unittest.TestCase):
@@ -20,36 +21,6 @@ class TestInt8ConvRotMSE(unittest.TestCase):
         error = result.codes.float() * result.scales - weights_float
         return error.square().mean(dim=1, keepdim=True)
 
-    def test_candidate_scores_exactly_match_stored_codes_on_cpu_and_cuda(self):
-        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
-        for device in devices:
-            weights = self._weights(torch.float32).to(device)
-            weights[1, :8] = weights.new_tensor(
-                [-128.5, -127.5, -1.5, -0.5, 0.5, 1.5, 126.5, 127.5]
-            )
-            weights[2].mul_(1e-28)
-            weights.requires_grad_()
-            weights_float = weights.detach()
-            original = weights.detach().clone()
-            scales = torch.tensor(
-                [0, 1, 1e-35, 1e-8, 1e-2, 0.73, 1, 100],
-                dtype=torch.float32, device=device,
-            )[:, None]
-            for multiplier in (0.1, 0.73, 1.0):
-                with self.subTest(device=device, multiplier=multiplier):
-                    candidate_scales = scales * multiplier
-                    saved_scales = candidate_scales.clone()
-                    expected = self._stored_candidate_mse(
-                        weights, weights_float, candidate_scales
-                    )
-                    actual = int8._calculate_int8_candidate_mse(
-                        weights, weights_float, candidate_scales
-                    )
-                    self.assertTrue(torch.equal(actual, expected))
-                    self.assertFalse(actual.requires_grad)
-                    self.assertTrue(torch.equal(weights, original))
-                    self.assertTrue(torch.equal(candidate_scales, saved_scales))
-
     def test_mse_payload_exactly_matches_stored_code_scoring_on_cpu_and_cuda(self):
         devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
         for device in devices:
@@ -63,10 +34,15 @@ class TestInt8ConvRotMSE(unittest.TestCase):
                 for case, source in enumerate(cases):
                     with self.subTest(device=device, dtype=dtype, case=case):
                         original = source.clone()
+                        # Reference: the Torch search scored with stored INT8 codes.
                         with patch.object(
-                            int8, "_calculate_int8_candidate_mse",
-                            side_effect=self._stored_candidate_mse,
-                        ), patch.object(int8, "create_exact_mse_candidate", return_value=None):
+                            int8, "fused_rowwise_mse_scale", return_value=None,
+                        ), patch.object(
+                            int8, "select_rowwise_mse_scale",
+                            side_effect=lambda weights, **bounds: select_rowwise_mse_scale(
+                                weights, **bounds, candidate_mse=self._stored_candidate_mse,
+                            ),
+                        ):
                             expected = int8.quantize_int8_convrot_mse(source, device=device)
                         actual = int8.quantize_int8_convrot_mse(source, device=device)
                         self.assertTrue(torch.equal(actual.codes, expected.codes))
